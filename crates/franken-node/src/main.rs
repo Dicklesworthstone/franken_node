@@ -126,7 +126,8 @@ use crate::cli::{
     OpsResourceGovernorArgs, OpsStorageSchemaAuditArgs, OpsSwarmHandoffArgs, OpsSwarmScenarioArgs,
     OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
     ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RemoteCapInvokeArgs, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs,
+    RuntimeCommand,
     RuntimeLaneCommand, RuntimeRegionQuiescenceAuditArgs, RuntimeSupervisionAuditArgs,
     SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
     TrustCardReputationArgs, TrustCommand, TrustEcosystemTelemetryArgs,
@@ -24773,6 +24774,277 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(all(feature = "engine", feature = "http-client")))]
+fn handle_remotecap_invoke(_args: &RemoteCapInvokeArgs) -> Result<()> {
+    anyhow::bail!(
+        "remotecap invoke requires the engine and http-client build features; no token was consumed and no request was sent"
+    )
+}
+
+#[cfg(all(feature = "engine", feature = "http-client"))]
+fn handle_remotecap_invoke(args: &RemoteCapInvokeArgs) -> Result<()> {
+    use observability::evidence_ledger::{DecisionKind, evidence_entry_hash_hex};
+    use security::remote_cap_http::{
+        PreparedRemoteCapHttpRequest, PreparedRemoteCapHttpTransport, RemoteCapHttpOutcome,
+    };
+
+    const INVOCATION_EVIDENCE_SCHEMA: &str = "franken-node/remotecap-invocation-evidence/v1";
+    anyhow::ensure!(
+        !args.token_file.as_os_str().is_empty(),
+        "--token-file is required"
+    );
+    anyhow::ensure!(!args.endpoint.is_empty(), "--endpoint is required");
+    anyhow::ensure!(
+        !args.trace_id.is_empty()
+            && args.trace_id.len() <= 256
+            && !args.trace_id.chars().any(char::is_control),
+        "--trace-id must contain 1..=256 bytes without control characters"
+    );
+    let project_root = std::env::current_dir()
+        .context("failed resolving RemoteCap invocation project")?
+        .canonicalize()
+        .context("failed canonicalizing RemoteCap invocation project")?;
+    let cap = read_remotecap_token(&args.token_file)?;
+    let token_sha256 = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&cap)?));
+    let body = match args.body_file.as_deref() {
+        Some(path) => bounded_read(path, 1_048_576)
+            .with_context(|| format!("failed reading bounded request body {}", path.display()))?,
+        None => Vec::new(),
+    };
+    let request = PreparedRemoteCapHttpRequest::new(
+        &args.method,
+        &args.endpoint,
+        args.content_type.as_deref(),
+        body,
+        args.timeout_ms,
+        args.max_response_bytes,
+    )?;
+    let resolved = config::Config::resolve(args.config.as_deref(), CliOverrides::default())
+        .context("failed resolving RemoteCap invocation network policy")?;
+    let transport = PreparedRemoteCapHttpTransport::new(
+        &project_root,
+        &resolved.config.security.network_policy,
+        &args.trace_id,
+        &request,
+    )?;
+    let receipt_key_path = args.receipt_signing_key.as_deref().or(resolved
+        .config
+        .security
+        .decision_receipt_signing_key_path
+        .as_deref());
+    let signing = load_receipt_signing_material(receipt_key_path)?.context(
+        "remotecap invoke requires a receipt signing key before dispatch; initialize the project or pass --receipt-signing-key",
+    )?;
+    let signing_key = resolve_remotecap_signing_key_for(&project_root)?;
+    let mut gate = remotecap_cli_capability_gate_at(
+        &signing_key,
+        &cap,
+        &project_root.join(remotecap_cli_replay_store_path()),
+    )?;
+    let state_path = project_root.join(remotecap_cli_state_path());
+    let ledger_dir = project_ledger_dir(&project_root);
+    let invocation_id = format!("remotecap-invoke-{}", Uuid::now_v7());
+
+    // Serialize admission with durable revocation. Do not call the ordinary
+    // loader under this lock: it acquires the same cross-process lock itself.
+    // The lock is released before network I/O; revocation prevents subsequent
+    // admissions, but does not claim to cancel an already admitted request.
+    let state_lock = lock_remotecap_cli_state(&state_path)?;
+    let state = if remotecap_cli_authority_started(&state_path)? {
+        require_remotecap_cli_authority(&state_path)?;
+        read_remotecap_cli_database(&open_remotecap_cli_database(&state_path)?)?
+    } else {
+        load_legacy_remotecap_cli_state(&state_path)?
+    };
+    anyhow::ensure!(
+        !state.revoked_token_ids.contains(cap.token_id()),
+        "{}",
+        RemoteCapError::Revoked {
+            token_id: cap.token_id().to_owned(),
+        }
+    );
+    gate.recheck_network(
+        Some(&cap),
+        RemoteOperation::NetworkEgress,
+        request.endpoint(),
+        now_unix_secs(),
+        &args.trace_id,
+    )?;
+
+    // Persist the exact prepared request before spending single-use authority
+    // or dispatching. A prepared entry without its terminal successor is
+    // deliberately unresolved; it is never proof that a request was sent.
+    let intent = append_decision_evidence_with_signing(
+        &ledger_dir,
+        INVOCATION_EVIDENCE_SCHEMA,
+        &format!("{invocation_id}:prepared"),
+        DecisionKind::Admit,
+        &args.trace_id,
+        serde_json::json!({
+            "invocation_id": invocation_id,
+            "phase": "prepared",
+            "token_id": cap.token_id(),
+            "token_sha256": token_sha256,
+            "token_issuer": cap.issuer_identity(),
+            "token_issued_at_epoch_secs": cap.issued_at_epoch_secs(),
+            "token_expires_at_epoch_secs": cap.expires_at_epoch_secs(),
+            "operation": RemoteOperation::NetworkEgress,
+            "single_use": cap.is_single_use(),
+            "request": request.summary(),
+            "network_policy_sha256": transport.network_policy_sha256(),
+            "dispatch_observed": false,
+            "terminal_outcome": null,
+        }),
+        Some(&signing),
+    )?
+    .context("RemoteCap invocation intent was not signed")?;
+    let intent_hash = evidence_entry_hash_hex(&intent);
+
+    // Both durable receipt publication and replay consumption can wait on
+    // locks. Sample time again before consumption and after it, rather than
+    // extending the token's TTL by the duration of either wait. A token that
+    // expires during consumption stays spent and the request stays unsent.
+    let admission = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::NetworkEgress,
+            request.endpoint(),
+            now_unix_secs(),
+            &args.trace_id,
+        )
+        .and_then(|()| {
+            let now = now_unix_secs();
+            if now < cap.issued_at_epoch_secs() {
+                Err(RemoteCapError::NotYetValid {
+                    now_epoch_secs: now,
+                    issued_at_epoch_secs: cap.issued_at_epoch_secs(),
+                })
+            } else if now >= cap.expires_at_epoch_secs() {
+                Err(RemoteCapError::Expired {
+                    now_epoch_secs: now,
+                    expires_at_epoch_secs: cap.expires_at_epoch_secs(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+    drop(state_lock);
+
+    let (outcome, dispatch_attempted, ok, decision_kind) = match admission {
+        Err(error) => (
+            serde_json::json!({
+                "outcome": "refused_before_dispatch",
+                "error": error.to_string(),
+                "error_code": error.code(),
+            }),
+            false,
+            false,
+            DecisionKind::Deny,
+        ),
+        Ok(()) => {
+            // The prepared transport performs exactly one request. It never
+            // redirects or retries; an uncertain outcome cannot spend the
+            // same single-use capability again.
+            let outcome = transport.execute(&request);
+            let ok = matches!(
+                &outcome,
+                RemoteCapHttpOutcome::ResponseObserved { status, .. }
+                    if (200..300).contains(status)
+            );
+            let kind = match &outcome {
+                RemoteCapHttpOutcome::ResponseObserved { .. } => DecisionKind::Admit,
+                RemoteCapHttpOutcome::Indeterminate { .. } => DecisionKind::Escalate,
+            };
+            (serde_json::to_value(outcome)?, true, ok, kind)
+        }
+    };
+
+    // Retain hashes and observed lengths in the signed ledger, not the remote
+    // response body. JSON output includes the bounded body separately, so a
+    // consumer can verify its digest without persisting potentially sensitive
+    // response content in every project's evidence database.
+    let mut evidence_outcome = outcome.clone();
+    if let Some(object) = evidence_outcome.as_object_mut() {
+        object.remove("body_base64");
+    }
+    let terminal = append_decision_evidence_with_signing(
+        &ledger_dir,
+        INVOCATION_EVIDENCE_SCHEMA,
+        &format!("{invocation_id}:terminal"),
+        decision_kind,
+        &args.trace_id,
+        serde_json::json!({
+            "invocation_id": invocation_id,
+            "phase": "terminal",
+            "token_id": cap.token_id(),
+            "operation": RemoteOperation::NetworkEgress,
+            "request_sha256": request.summary().request_sha256,
+            "prepared_entry_hash": intent_hash,
+            "dispatch_attempted": dispatch_attempted,
+            "outcome": evidence_outcome,
+            "http_success": ok,
+        }),
+        Some(&signing),
+    );
+    let (terminal_entry, persistence_error) = match terminal {
+        Ok(Some(entry)) => (Some(entry), None),
+        Ok(None) => (None, Some("terminal evidence was not signed".to_owned())),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
+    let complete = terminal_entry.is_some();
+    let report_ok = ok && complete;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "franken-node/remotecap-invoke-cli/v1",
+                "command": "remotecap.invoke",
+                "ok": report_ok,
+                "invocation_id": invocation_id,
+                "request": request.summary(),
+                "dispatch_attempted": dispatch_attempted,
+                "outcome": outcome,
+                "evidence_complete": complete,
+                "evidence_persistence_error": persistence_error,
+                "prepared_entry": intent,
+                "terminal_entry": terminal_entry,
+                "receipt_verifying_key_hex": hex::encode(signing.signing_key.verifying_key().as_bytes()),
+            }))?
+        );
+    } else {
+        println!("RemoteCap invocation: {invocation_id}");
+        println!(
+            "  request: {} {}",
+            request.summary().method,
+            request.endpoint()
+        );
+        println!("  dispatch_attempted: {dispatch_attempted}");
+        println!(
+            "  outcome: {}",
+            outcome["outcome"].as_str().unwrap_or("unknown")
+        );
+        if let Some(status) = outcome.get("status") {
+            println!("  HTTP status: {status}");
+        }
+        if let Some(error) = outcome.get("error").and_then(serde_json::Value::as_str) {
+            println!("  error: {error}");
+        }
+        println!("  evidence_complete: {complete}");
+        if let Some(error) = &persistence_error {
+            println!("  evidence error: {error}");
+        }
+    }
+    if !report_ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "RemoteCap invocation did not complete with a successful HTTP response and durable terminal evidence; inspect invocation {invocation_id} before attempting another operation"
+        )
+    }
+    Ok(())
+}
+
 fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
     if args.token_file.as_os_str().is_empty() {
         return remotecap_fail("remotecap.verify", args.json, "--token-file is required");
@@ -47908,6 +48180,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
     match (top, sub) {
         ("remotecap", Some("issue")) => ("franken-node/remotecap-error-cli/v1", "remotecap.issue"),
         ("remotecap", Some("use")) => ("franken-node/remotecap-error-cli/v1", "remotecap.use"),
+        ("remotecap", Some("invoke")) => ("franken-node/remotecap-error-cli/v1", "remotecap.invoke"),
         ("remotecap", Some("verify")) => {
             ("franken-node/remotecap-error-cli/v1", "remotecap.verify")
         }
@@ -50145,6 +50418,11 @@ fn main() -> Result<()> {
             RemoteCapCommand::Use(args) => {
                 if let Err(err) = handle_remotecap_use(&args) {
                     return remotecap_fail("remotecap.use", args.json, err);
+                }
+            }
+            RemoteCapCommand::Invoke(args) => {
+                if let Err(err) = handle_remotecap_invoke(&args) {
+                    return remotecap_fail("remotecap.invoke", args.json, err);
                 }
             }
             RemoteCapCommand::Revoke(args) => {

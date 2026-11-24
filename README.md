@@ -1164,6 +1164,7 @@ remain in force.
 | `franken-node remotecap issue` | Issue a local Ed25519 capability token. Does **not** perform the scoped network operation. `--scope` and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
 | `franken-node remotecap verify` | Verify a capability token without using it. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-verify-cli/v1`). |
 | `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
+| `franken-node remotecap invoke` | Perform one bounded native HTTP(S) request authorized by `network_egress`, with current durable revocation checks, single-use replay protection and signed prepared/terminal evidence. Required: `--token-file`, `--endpoint`. Optional: `--method`, `--body-file`, `--content-type`, `--timeout-ms`, `--max-response-bytes`, `--config`, `--receipt-signing-key`, `--trace-id`. `--json` returns `franken-node/remotecap-invoke-cli/v1`, including the bounded response body as base64. Requires `engine` and `http-client`. |
 | `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. Flags: `--json` (`franken-node/remotecap-revoke-cli/v1`). |
 
 ### Fleet quarantine control plane (file transport or live HTTP coordinator)
@@ -2066,9 +2067,52 @@ The capability gate also tracks a `ConnectivityMode`:
 
 `RemoteScope` aggregates the set of allowed operations on a token.
 Single-use tokens (`remotecap issue --single-use`) burn their scope
-after one accepted use; reuse fails closed. Token use also re-validates
-the resolved IP set so a token issued for one endpoint cannot be
-silently redirected by DNS changes (see Network Egress and SSRF Policy).
+after one accepted use; reuse fails closed. `remotecap use` is a consuming
+authorization dry-run; `remotecap verify` checks without consuming.
+
+`remotecap invoke` performs one HTTP(S) exchange using a token with
+`network_egress` scope and the resolved project's network policy:
+
+```bash
+franken-node remotecap issue --scope network_egress \
+  --endpoint https://hooks.example.com/events --single-use \
+  --operator-approved --json > capability.json
+franken-node remotecap invoke --token-file capability.json \
+  --endpoint https://hooks.example.com/events --method POST \
+  --body-file event.json --content-type application/json --json
+```
+
+GET and HEAD carry no body; POST, PUT, PATCH and DELETE accept a body file
+up to 1 MiB. The response limit includes HTTP headers and framing, with a
+default and maximum of 1 MiB. The default 10-second network deadline spans
+DNS, connection, request transmission and response reading; `--timeout-ms`
+accepts 1 through 60,000 milliseconds. DNS/address pinning and TLS use the
+same native provider as guest egress. Private destinations remain subject
+to the configured SSRF policy. The request contains fixed headers plus an
+optional Content-Type; it does not inherit proxy settings, cookies or
+authentication headers. Redirects and application retries are disabled.
+Canonical URL paths reject encoded routing delimiters. Query values are
+transmitted unchanged, subject to the existing token endpoint validation.
+
+Before dispatch, the command requires a receipt signing key and durably
+records the exact request commitment and network-policy digest in
+`.franken-node/state/evidence-ledger.db`. Admission serializes with the
+project's durable revocation store, consumes single-use authority and checks
+expiry again after storage waits. A later revocation prevents subsequent
+admission; it does not cancel a request already admitted. The terminal
+signed entry links the prepared entry to either a complete observed HTTP
+response or an indeterminate outcome. JSON includes the bounded response
+body and its digest; the ledger retains hashes and lengths without storing
+the response body. Verify entries against the operator's independently
+trusted receipt key.
+
+A 2xx response with a durably recorded terminal entry is CLI success. It
+does not establish that a remote transaction committed. Non-2xx responses,
+network failures, truncated or oversized responses, and failed terminal
+evidence publication return nonzero with their observed state. A prepared
+entry without a terminal successor remains unresolved after interruption.
+Single-use tokens stay spent after uncertain outcomes; the command never
+automatically repeats the operation.
 
 ---
 

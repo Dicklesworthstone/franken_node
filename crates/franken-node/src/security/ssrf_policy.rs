@@ -14,6 +14,7 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use crate::push_bounded;
 const MAX_ALLOWLIST_ENTRIES: usize = 4096;
 
+#[path = "ssrf_policy/ipv6.rs"]
 mod ipv6;
 
 /// One destination decision for both literal addresses and DNS evidence.

@@ -461,12 +461,7 @@ fn missing_or_corrupt_revocation_database_denies_cli_authorization() {
                     "https://api.example.com/v1/status",
                 ]);
             }
-            let output = invocation
-                .assert()
-                .failure()
-                .get_output()
-                .stdout
-                .clone();
+            let output = invocation.assert().failure().get_output().stdout.clone();
             let report: Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(report["command"], format!("remotecap.{command}"));
             assert_eq!(report["ok"], false);
@@ -474,7 +469,10 @@ fn missing_or_corrupt_revocation_database_denies_cli_authorization() {
             assert!(report.get("revoked").is_none());
         }
     }
-    assert_eq!(fs::read(&state_path).unwrap(), br#"{"revoked_token_ids":[]}"#);
+    assert_eq!(
+        fs::read(&state_path).unwrap(),
+        br#"{"revoked_token_ids":[]}"#
+    );
 }
 
 #[test]
@@ -1312,4 +1310,359 @@ fn remotecap_issue_structured_logging() {
     assert_eq!(json["audit_event"]["trace_id"], "structured-log-test");
 
     // The audit event is the stable structured surface for capability issuance.
+}
+
+#[cfg(all(feature = "engine", feature = "http-client"))]
+mod invocation {
+    use super::*;
+    use frankenengine_node::observability::evidence_ledger::{
+        EvidenceEntry, evidence_entry_hash_hex, verify_evidence_entry,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    fn issue(workspace: &TempDir, endpoint: &str, operation: &str) -> std::path::PathBuf {
+        let output = remotecap_cmd()
+            .args([
+                "issue",
+                "--scope",
+                operation,
+                "--endpoint",
+                endpoint,
+                "--single-use",
+                "--operator-approved",
+                "--json",
+            ])
+            .current_dir(workspace.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let issued: Value = serde_json::from_slice(&output).unwrap();
+        let path = workspace.path().join(format!(
+            "invocation-{}.json",
+            issued["token"]["token_id"].as_str().unwrap()
+        ));
+        write_json(&path, &issued);
+        path
+    }
+
+    fn allow_loopback(workspace: &TempDir, port: u16) {
+        let path = workspace.path().join("franken_node.toml");
+        let mut config: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut entry = toml::map::Map::new();
+        entry.insert("host".into(), toml::Value::String("127.0.0.1".into()));
+        entry.insert("port".into(), toml::Value::Integer(i64::from(port)));
+        entry.insert(
+            "reason".into(),
+            toml::Value::String("invocation fixture".into()),
+        );
+        config["security"]["network_policy"]["allowlist"] =
+            toml::Value::Array(vec![toml::Value::Table(entry)]);
+        fs::write(path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    }
+
+    fn invoke(workspace: &TempDir, token: &Path, endpoint: &str) -> Command {
+        let mut command = remotecap_cmd();
+        command
+            .args(["invoke", "--json", "--endpoint", endpoint, "--token-file"])
+            .arg(token)
+            .current_dir(workspace.path());
+        command
+    }
+
+    fn peer(
+        listener: TcpListener,
+        response: &'static [u8],
+    ) -> std::thread::JoinHandle<(Vec<u8>, TcpListener)> {
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "invocation did not reach its peer"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let head = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = head
+                        .split("\r\n")
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+                    if request.len() == end + 4 + length {
+                        break;
+                    }
+                }
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).unwrap();
+                assert_ne!(count, 0, "truncated request");
+                request.extend_from_slice(&bytes[..count]);
+                assert!(request.len() <= 1_060_000);
+            }
+            stream.write_all(response).unwrap();
+            drop(stream);
+            (request, listener)
+        })
+    }
+
+    fn assert_no_connection(listener: &TcpListener) {
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    fn assert_spent(workspace: &TempDir, token: &Path, endpoint: &str) {
+        let output = remotecap_cmd()
+            .args([
+                "verify",
+                "--operation",
+                "network_egress",
+                "--endpoint",
+                endpoint,
+                "--token-file",
+            ])
+            .arg(token)
+            .arg("--json")
+            .current_dir(workspace.path())
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("replay")
+        );
+    }
+
+    #[test]
+    fn invoke_posts_once_and_retains_independently_verifiable_terminal_evidence() {
+        let workspace = setup_test_workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        allow_loopback(&workspace, address.port());
+        let endpoint = format!("http://{address}/hook");
+        let token = issue(&workspace, &endpoint, "network_egress");
+        let body_path = workspace.path().join("request.bin");
+        fs::write(&body_path, b"event\0\xff").unwrap();
+        let server = peer(
+            listener,
+            b"HTTP/1.1 201 Created\r\nContent-Length: 3\r\n\r\nok!",
+        );
+        let output = invoke(&workspace, &token, &endpoint)
+            .args(["--method", "POST", "--body-file"])
+            .arg(body_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let (request, listener) = server.join().unwrap();
+        assert!(
+            request.starts_with(format!("POST /hook HTTP/1.1\r\nHost: {address}\r\n").as_bytes())
+        );
+        assert!(request.ends_with(b"event\0\xff"));
+        assert!(!request.windows(14).any(|part| part == b"Authorization:"));
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/remotecap-invoke-cli/v1"
+        );
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["dispatch_attempted"], true);
+        assert_eq!(report["outcome"]["outcome"], "response_observed");
+        assert_eq!(report["outcome"]["status"], 201);
+        assert_eq!(report["outcome"]["body_base64"], "b2sh");
+        assert_eq!(report["evidence_complete"], true);
+
+        let key = fs::read_to_string(
+            workspace
+                .path()
+                .join(".franken-node/keys/receipt-signing.key"),
+        )
+        .unwrap();
+        let seed: [u8; 32] = hex::decode(key.trim()).unwrap().try_into().unwrap();
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let prepared: EvidenceEntry =
+            serde_json::from_value(report["prepared_entry"].clone()).unwrap();
+        let terminal: EvidenceEntry =
+            serde_json::from_value(report["terminal_entry"].clone()).unwrap();
+        verify_evidence_entry(&prepared, &public_key).unwrap();
+        verify_evidence_entry(&terminal, &public_key).unwrap();
+        assert_eq!(
+            terminal.payload["prepared_entry_hash"],
+            evidence_entry_hash_hex(&prepared)
+        );
+        assert_eq!(
+            terminal.payload["request_sha256"],
+            report["request"]["request_sha256"]
+        );
+        assert!(terminal.payload["outcome"].get("body_base64").is_none());
+        let mut forged = terminal.clone();
+        forged.payload["outcome"]["status"] = Value::from(200);
+        assert!(verify_evidence_entry(&forged, &public_key).is_err());
+        let store = frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger::open_default(workspace.path()).unwrap();
+        let entries = store.entries_json().unwrap();
+        for expected in [&prepared, &terminal] {
+            assert!(entries.iter().any(|line| {
+                serde_json::from_str::<EvidenceEntry>(line).is_ok_and(|entry| entry == *expected)
+            }));
+        }
+        invoke(&workspace, &token, &endpoint).assert().failure();
+        assert_no_connection(&listener);
+        assert_spent(&workspace, &token, &endpoint);
+    }
+
+    #[test]
+    fn invoke_rejects_revoked_and_non_egress_capabilities_without_contacting_peer() {
+        let workspace = setup_test_workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+        allow_loopback(&workspace, listener.local_addr().unwrap().port());
+        let wrong_operation = issue(&workspace, &endpoint, "telemetry_export");
+        invoke(&workspace, &wrong_operation, &endpoint)
+            .assert()
+            .failure();
+        assert_no_connection(&listener);
+
+        let token = issue(&workspace, &endpoint, "network_egress");
+        remotecap_cmd()
+            .args(["revoke", "--token-file"])
+            .arg(&token)
+            .current_dir(workspace.path())
+            .assert()
+            .success();
+        let report: Value = serde_json::from_slice(
+            &invoke(&workspace, &token, &endpoint)
+                .assert()
+                .failure()
+                .get_output()
+                .stdout,
+        )
+        .unwrap();
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("revok")
+        );
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn invoke_validates_body_and_receipt_key_before_spending_authority() {
+        let workspace = setup_test_workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+        allow_loopback(&workspace, listener.local_addr().unwrap().port());
+        let token = issue(&workspace, &endpoint, "network_egress");
+        let body = workspace.path().join("body.bin");
+        fs::write(&body, b"body").unwrap();
+        invoke(&workspace, &token, &endpoint)
+            .arg("--body-file")
+            .arg(body)
+            .assert()
+            .failure();
+        invoke(&workspace, &token, &endpoint)
+            .arg("--receipt-signing-key")
+            .arg(workspace.path().join("missing-signing.key"))
+            .assert()
+            .failure();
+        assert_no_connection(&listener);
+        remotecap_cmd()
+            .args([
+                "verify",
+                "--operation",
+                "network_egress",
+                "--endpoint",
+                &endpoint,
+                "--token-file",
+            ])
+            .arg(token)
+            .current_dir(workspace.path())
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn invoke_retains_unknown_outcome_and_spent_token_after_truncated_response() {
+        let workspace = setup_test_workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+        allow_loopback(&workspace, listener.local_addr().unwrap().port());
+        let token = issue(&workspace, &endpoint, "network_egress");
+        let server = peer(
+            listener,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\npartial",
+        );
+        let output = invoke(&workspace, &token, &endpoint)
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let (_, listener) = server.join().unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["dispatch_attempted"], true);
+        assert_eq!(report["outcome"]["outcome"], "indeterminate");
+        assert_eq!(report["evidence_complete"], true);
+        assert_eq!(
+            report["terminal_entry"]["payload"]["outcome"]["outcome"],
+            "indeterminate"
+        );
+        assert_spent(&workspace, &token, &endpoint);
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn invoke_keeps_redirect_as_observed_http_failure_and_never_follows_it() {
+        let workspace = setup_test_workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+        allow_loopback(&workspace, listener.local_addr().unwrap().port());
+        let token = issue(&workspace, &endpoint, "network_egress");
+        let server = peer(
+            listener,
+            b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n",
+        );
+        let output = invoke(&workspace, &token, &endpoint)
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let (_, listener) = server.join().unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["outcome"]["outcome"], "response_observed");
+        assert_eq!(report["outcome"]["status"], 302);
+        assert_eq!(report["outcome"]["redirect_not_followed"], true);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["evidence_complete"], true);
+        assert_spent(&workspace, &token, &endpoint);
+        assert_no_connection(&listener);
+    }
 }

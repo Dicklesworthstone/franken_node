@@ -22,6 +22,8 @@ pub mod lineage_tracker;
 pub mod network_guard;
 pub mod quarantine_controller;
 pub mod remote_cap;
+#[cfg(all(feature = "engine", feature = "http-client"))]
+pub mod remote_cap_http;
 pub mod revocation_freshness;
 pub mod revocation_freshness_gate;
 pub mod sandbox_policy_compiler;

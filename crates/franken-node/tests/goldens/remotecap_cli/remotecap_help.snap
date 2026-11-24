@@ -9,6 +9,7 @@ Commands:
   issue   Issue a local Ed25519 capability token (does not perform the scoped network operation)
   verify  Verify a capability token without consuming single-use tokens
   use     Authorize a token (dry-run; does not send the HTTP request)
+  invoke  Send one bounded HTTP request with live capability checks and signed evidence
   revoke  Revoke a capability token in the local CLI state
   help    Print this message or the help of the given subcommand(s)
 

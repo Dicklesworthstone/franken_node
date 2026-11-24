@@ -2216,3 +2216,8 @@ path = "tests/vef_proof_generator_test_support_gate.rs"
 [[test]]
 name = "vef_proof_service"
 path = "tests/vef_proof_service.rs"
+
+[[test]]
+name = "remote_cap_http_transport"
+path = "tests/remote_cap_http_transport.rs"
+required-features = ["engine", "http-client"]

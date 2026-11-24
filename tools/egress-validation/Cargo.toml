@@ -19,6 +19,8 @@ http-client = ["dep:url"]
 profiling = []
 
 [dependencies]
+anyhow = "1.0"
+base64 = "0.22.1"
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -51,3 +53,8 @@ path = "../../crates/franken-node/tests/ssrf_gated_host_io_egress.rs"
 name = "operator_state_gated_host_io"
 path = "../../crates/franken-node/src/ops/operator_state_gated_host_io.rs"
 required-features = ["engine"]
+
+[[test]]
+name = "remote_cap_http_transport"
+path = "../../crates/franken-node/tests/remote_cap_http_transport.rs"
+required-features = ["engine", "http-client"]

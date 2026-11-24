@@ -3018,6 +3018,8 @@ pub enum RemoteCapCommand {
     Verify(RemoteCapVerifyArgs),
     /// Authorize a token (dry-run; does not send the HTTP request).
     Use(RemoteCapUseArgs),
+    /// Send one bounded HTTP request with live capability checks and signed evidence.
+    Invoke(RemoteCapInvokeArgs),
     /// Revoke a capability token in the local CLI state.
     Revoke(RemoteCapRevokeArgs),
 }
@@ -3089,6 +3091,53 @@ pub struct RemoteCapUseArgs {
     pub trace_id: String,
 
     /// Emit machine-readable JSON output.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct RemoteCapInvokeArgs {
+    /// JSON capability token or full `remotecap issue --json` response.
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub token_file: PathBuf,
+
+    /// HTTP(S) URL authorized by the token's `network_egress` scope.
+    #[arg(long, default_value = "")]
+    pub endpoint: String,
+
+    /// HTTP method: GET, HEAD, POST, PUT, PATCH, or DELETE.
+    #[arg(long, default_value = "GET")]
+    pub method: String,
+
+    /// Request body file (at most 1 MiB; unavailable for GET and HEAD).
+    #[arg(long)]
+    pub body_file: Option<PathBuf>,
+
+    /// Content-Type for the request body. No other user headers are forwarded.
+    #[arg(long)]
+    pub content_type: Option<String>,
+
+    /// Complete DNS/connect/write/read deadline in milliseconds (1..=60000).
+    #[arg(long, default_value_t = 10_000)]
+    pub timeout_ms: u64,
+
+    /// Maximum complete HTTP response bytes, including headers (1..=1048576).
+    #[arg(long, default_value_t = 1_048_576)]
+    pub max_response_bytes: u64,
+
+    /// Configuration supplying the network policy. Uses normal discovery if omitted.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Ed25519 receipt key; otherwise use the initialized project's receipt key.
+    #[arg(long)]
+    pub receipt_signing_key: Option<PathBuf>,
+
+    /// Trace correlation ID retained in signed invocation evidence.
+    #[arg(long, default_value = "trace-cli-remotecap-invoke")]
+    pub trace_id: String,
+
+    /// Emit signed evidence and a base64-encoded response body as JSON.
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
@@ -8171,6 +8220,46 @@ mod tests {
             }
             other => panic!("expected remotecap use, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remotecap_invoke_parses_bounded_request_without_generic_operation_override() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "remotecap",
+            "invoke",
+            "--json",
+            "--method",
+            "POST",
+            "--endpoint",
+            "https://example.test/hooks",
+            "--body-file",
+            "event.json",
+            "--timeout-ms",
+            "2500",
+        ])
+        .expect("invoke request parses");
+        match cli.command {
+            Command::Remotecap(RemoteCapCommand::Invoke(args)) => {
+                assert!(args.json);
+                assert!(args.token_file.as_os_str().is_empty());
+                assert_eq!(args.method, "POST");
+                assert_eq!(args.body_file, Some(PathBuf::from("event.json")));
+                assert_eq!(args.timeout_ms, 2500);
+                assert_eq!(args.max_response_bytes, 1_048_576);
+            }
+            other => panic!("expected remotecap invoke, got {other:?}"),
+        }
+        assert!(
+            <Cli as clap::Parser>::try_parse_from([
+                "franken-node",
+                "remotecap",
+                "invoke",
+                "--operation",
+                "telemetry_export",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
