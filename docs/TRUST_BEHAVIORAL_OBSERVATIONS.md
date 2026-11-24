@@ -295,7 +295,10 @@ The graph keeps the signed card's historical `base_score` visible. For a healthy
 mismatched card, `effective_score` is `null`, and the card supplies neither a
 trust ceiling nor an immunization candidate for that new artifact. Existing
 quarantine and revocation restrictions remain active and propagate to
-dependents. Missing versions or integrity produce `unverified` inventory;
+dependents, including through an unscored mismatched intermediary. Direct
+dependents also report the artifact coverage gap in their explanations, so a
+matching card for a parent cannot hide its dependency's mismatch in the human
+or JSON view. Missing versions or integrity produce `unverified` inventory;
 their displayed registry scores do not establish artifact authentication.
 Reading these reports does not refresh or mutate signed trust cards.
 

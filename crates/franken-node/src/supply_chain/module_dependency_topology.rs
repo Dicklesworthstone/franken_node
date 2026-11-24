@@ -190,7 +190,11 @@ fn add_trust_package(
     text_bytes: &mut usize,
 ) -> ModuleResolutionGraphResult<()> {
     if !dependencies.contains_key(name) {
-        enforce_len("trust projection packages", dependencies.len() + 1, MAX_NODES)?;
+        enforce_len(
+            "trust projection packages",
+            dependencies.len() + 1,
+            MAX_NODES,
+        )?;
         reserve_text(text_bytes, name.len())?;
         dependencies.insert(name.to_owned(), BTreeSet::new());
     }
@@ -727,7 +731,10 @@ impl DependencyTopology {
                 let manifest = &self.nodes[self.index(target)?];
                 let name = manifest.name.as_deref().ok_or_else(|| {
                     ModuleResolutionGraphError::InvalidMetadata {
-                        detail: format!("workspace link at {:?} has an unnamed target", node.location),
+                        detail: format!(
+                            "workspace link at {:?} has an unnamed target",
+                            node.location
+                        ),
                     }
                 })?;
                 if let Some(captured_name) = node.name.as_deref() {
@@ -808,13 +815,19 @@ impl DependencyTopology {
                 PackageSource::Lockfile => {
                     identity.version.as_deref().and_then(normalized_pin_version)
                 }
-                PackageSource::Manifest | PackageSource::WorkspaceLink => identity.version.as_deref(),
+                PackageSource::Manifest | PackageSource::WorkspaceLink => {
+                    identity.version.as_deref()
+                }
             };
             let integrity = self
                 .trust_pins
                 .get(&node.location)
                 .and_then(|pin| pin.integrity.as_deref());
-            enforce_len("trust projection placements", placements.len() + 1, MAX_NODES)?;
+            enforce_len(
+                "trust projection placements",
+                placements.len() + 1,
+                MAX_NODES,
+            )?;
             reserve_text(
                 &mut text_bytes,
                 node.location.len()
@@ -1101,11 +1114,7 @@ mod tests {
                     Some("2.0.0"),
                     Some("sha512-bmVzdGVk"),
                 ),
-                (
-                    "node_modules/b",
-                    Some("9.0.0"),
-                    Some("sha512-aG9pc3RlZA=="),
-                ),
+                ("node_modules/b", Some("9.0.0"), Some("sha512-aG9pc3RlZA=="),),
             ])
         );
         assert!(projection.placements.iter().any(|placement| {
@@ -1125,8 +1134,7 @@ mod tests {
     #[test]
     fn trust_projection_binds_selected_raw_lockfile_without_changing_semantic_hashes() {
         let root = fixture(json!({"node_modules/a":{"version":"9.0.0"}}));
-        let lock =
-            json!({"lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}});
+        let lock = json!({"lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}});
         let raw = serde_json::to_string(&lock).unwrap();
         fs::write(root.path().join("npm-shrinkwrap.json"), &raw).unwrap();
         let captured = build(root.path()).unwrap();
@@ -1212,8 +1220,7 @@ mod tests {
             );
             assert!(projection.root_dependencies.is_empty());
             assert!(projection.placements.iter().all(|placement| {
-                placement.package_name == "actual"
-                    && placement.version.as_deref() == Some("1.0.0")
+                placement.package_name == "actual" && placement.version.as_deref() == Some("1.0.0")
             }));
         }
         put(root.path(), "packages/actual/package.json", json!({}));
@@ -1421,7 +1428,10 @@ mod tests {
         );
 
         let projection = topology.trust_graph_projection().unwrap();
-        assert_eq!(projection.lockfile_source.as_ref().unwrap().path, "bun.lock");
+        assert_eq!(
+            projection.lockfile_source.as_ref().unwrap().path,
+            "bun.lock"
+        );
         assert_eq!(
             projection.dependencies["app"],
             BTreeSet::from(["private".into(), "real".into()])
@@ -2238,10 +2248,7 @@ mod tests {
         let graph = build(root.path()).unwrap();
         assert!(graph.closure(".").unwrap().fully_resolved);
         let projection = graph.trust_graph_projection().unwrap();
-        assert_eq!(
-            projection.dependencies["a"],
-            BTreeSet::from(["dep".into()])
-        );
+        assert_eq!(projection.dependencies["a"], BTreeSet::from(["dep".into()]));
         assert_eq!(projection.coverage.intent_only_edges, 0);
         assert!(projection.placements.iter().any(|placement| {
             placement.location == "node_modules/a"
@@ -2325,10 +2332,7 @@ mod tests {
         assert!(!closure.fully_resolved);
         let projection = graph.trust_graph_projection().unwrap();
         assert!(!projection.coverage.metadata_complete);
-        assert_eq!(
-            projection.dependencies["a"],
-            BTreeSet::from(["b".into()])
-        );
+        assert_eq!(projection.dependencies["a"], BTreeSet::from(["b".into()]));
         assert_eq!(projection.coverage.unresolved_required_edges, 0);
         assert!(
             graph

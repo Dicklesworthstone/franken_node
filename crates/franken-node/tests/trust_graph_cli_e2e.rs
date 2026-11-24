@@ -1038,7 +1038,11 @@ fn changed_artifact_pins_do_not_inherit_a_current_trust_score() {
         let reputation = json_ok(
             root,
             &[
-                "trust-card", "reputation", "--extension", "npm:lib-core", "--json",
+                "trust-card",
+                "reputation",
+                "--extension",
+                "npm:lib-core",
+                "--json",
             ],
         );
         let scores = reputation["scores"].as_array().unwrap();
@@ -1070,15 +1074,25 @@ fn changed_artifact_pins_do_not_inherit_a_current_trust_score() {
     let restored = json_ok(root, &["trust", "graph", "--json"]);
     let restored_node = node(&restored["graph"], "npm:lib-core");
     assert_eq!(restored_node["artifact_coverage"]["status"], "matched");
-    assert_eq!(restored_node["effective_score"].as_u64(), Some(original_score));
+    assert_eq!(
+        restored_node["effective_score"].as_u64(),
+        Some(original_score)
+    );
     assert_eq!(restored["graph"]["summary"]["artifact_mismatches"], 0);
     let reputation = json_ok(
         root,
         &[
-            "trust-card", "reputation", "--extension", "npm:lib-core", "--json",
+            "trust-card",
+            "reputation",
+            "--extension",
+            "npm:lib-core",
+            "--json",
         ],
     );
-    assert_eq!(reputation["scores"][0]["artifact_coverage"]["status"], "matched");
+    assert_eq!(
+        reputation["scores"][0]["artifact_coverage"]["status"],
+        "matched"
+    );
     assert!(
         reputation["scores"][0]["base_score"]
             .as_f64()
@@ -1111,7 +1125,11 @@ fn every_captured_placement_must_match_before_package_trust_is_propagated() {
             "{report}"
         );
         assert_eq!(selected["artifact_coverage"]["placement_count"], 2);
-        assert_eq!(selected["effective_score"].is_number(), all_match, "{report}");
+        assert_eq!(
+            selected["effective_score"].is_number(),
+            all_match,
+            "{report}"
+        );
         let placements = report["dependency_capture"]["placements"]
             .as_array()
             .unwrap()
@@ -1120,8 +1138,7 @@ fn every_captured_placement_must_match_before_package_trust_is_propagated() {
             .collect::<Vec<_>>();
         assert_eq!(placements.len(), 2);
         assert!(placements.iter().any(|placement| {
-            placement["location"] == "node_modules/lib-core"
-                && placement["version"] == "2.0.7"
+            placement["location"] == "node_modules/lib-core" && placement["version"] == "2.0.7"
         }));
         assert!(placements.iter().any(|placement| {
             placement["location"] == "node_modules/web-kit/node_modules/lib-core"
@@ -1136,7 +1153,13 @@ fn mismatched_artifacts_keep_known_quarantine_and_revocation_effective() {
     let root = workspace.path();
     json_ok(
         root,
-        &["trust", "quarantine", "--artifact", "npm:lib-core", "--json"],
+        &[
+            "trust",
+            "quarantine",
+            "--artifact",
+            "npm:lib-core",
+            "--json",
+        ],
     );
     lock["packages"]["node_modules/lib-core"]["version"] = serde_json::json!("2.0.8");
     write_json(root, "package-lock.json", &lock);
