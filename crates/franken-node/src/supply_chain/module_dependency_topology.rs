@@ -28,6 +28,7 @@ pub enum PackageSource {
     Manifest,
     Lockfile,
     WorkspaceLink,
+    LocalDirectoryLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -318,11 +319,15 @@ fn from_parts(
             },
         );
     }
+    let workspace_locations: BTreeSet<_> = graph.packages.iter()
+        .filter(|package| package.workspace)
+        .map(|package| location(&package.relative_manifest_path))
+        .collect();
     for pin in &graph.lockfile_pins {
         let link_target = details.links.get(&pin.package_path).cloned();
         if let Some(target) = &link_target {
             if !nodes.contains_key(target) {
-                return invalid_metadata("topology link target is not a captured workspace");
+                return invalid_metadata("topology link target is not a captured workspace or file dependency");
             }
             if details
                 .requirements
@@ -339,8 +344,12 @@ fn from_parts(
             manifest_path: format!("{}/package.json", pin.package_path),
             name: Some(pin.package_name.clone()),
             version: pin.version.clone(),
-            source: if link_target.is_some() {
-                PackageSource::WorkspaceLink
+            source: if let Some(target) = &link_target {
+                if workspace_locations.contains(target) {
+                    PackageSource::WorkspaceLink
+                } else {
+                    PackageSource::LocalDirectoryLink
+                }
             } else {
                 PackageSource::Lockfile
             },
@@ -815,7 +824,7 @@ impl DependencyTopology {
                 PackageSource::Lockfile => {
                     identity.version.as_deref().and_then(normalized_pin_version)
                 }
-                PackageSource::Manifest | PackageSource::WorkspaceLink => {
+                PackageSource::Manifest | PackageSource::WorkspaceLink | PackageSource::LocalDirectoryLink => {
                     identity.version.as_deref()
                 }
             };

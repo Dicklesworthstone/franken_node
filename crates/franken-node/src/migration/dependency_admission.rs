@@ -673,6 +673,8 @@ fn nearest_package<'a>(
 struct DeclarationAuthority<'a> {
     overrides: &'a declaration_selection::Overrides,
     bun_workspace_links: Option<&'a BTreeSet<String>>,
+    file_links: &'a BTreeMap<String, String>,
+    local_directories: &'a BTreeSet<String>,
 }
 
 fn declarations(
@@ -684,8 +686,14 @@ fn declarations(
     deadline: Instant,
     authority: &DeclarationAuthority<'_>,
 ) -> Result<()> {
-    for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
-        let consumer = source.strip_suffix("/package.json").unwrap_or("");
+    let consumer = source.strip_suffix("/package.json").unwrap_or("");
+    for edge in declaration_selection::select(
+        manifest,
+        !authority.local_directories.contains(consumer),
+        deadline,
+        count,
+        MAX_PACKAGES,
+    )? {
         let request = authority
             .overrides
             .apply_from(consumer, edge.installed_as, edge.request)?;
@@ -700,6 +708,16 @@ fn declarations(
         if selected.is_none() && edge.optional {
             continue;
         }
+        // Unsupported directory spellings retain the ordinary opaque-request
+        // review finding. They never supply a path or a local-link grant.
+        let file_target = crate::supply_chain::module_resolution_graph::npm_file_dependency_target(
+            consumer, request,
+        ).ok().flatten();
+        let bound_file = file_target.as_ref().is_some_and(|target| {
+            selected.is_some_and(|package| {
+                package.linked && authority.file_links.get(&package.path) == Some(target)
+            })
+        });
         // The prefix is authority, not just a range abbreviation. It cannot
         // select a registry namesake, arbitrary link, or unselected workspace.
         // npm paths keep their existing opaque-protocol refusal semantics.
@@ -712,7 +730,9 @@ fn declarations(
             package.name == actual
                 && !package.unresolved
                 && !overridden_link
-                && if workspace_range.is_some() {
+                && if file_target.is_some() {
+                    bound_file
+                } else if workspace_range.is_some() {
                     package.linked
                         && authority
                             .bun_workspace_links
@@ -730,6 +750,7 @@ fn declarations(
             // prereleases. They are NOT registry wildcards that omit prereleases.
             Some("*" | "^" | "~") => locked_version,
             Some(range) => Some(range),
+            None if bound_file => locked_version,
             None => requirement,
         };
         let version_issue = if represented {
@@ -1103,6 +1124,11 @@ fn inspect_with_installation(
             crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode::Npm,
         )?,
     };
+    let local = if source == "bun.lock" {
+        workspaces::LocalDependencies::default()
+    } else {
+        workspaces::capture_file_dependencies(&mut capture, &mut manifests, lock.as_ref(), &packages)?
+    };
     for directory in manifests.keys().filter(|directory| !directory.is_empty()) {
         capture.refuse_unsupported_dependency_authorities(directory)?;
     }
@@ -1121,6 +1147,7 @@ fn inspect_with_installation(
         &manifests,
         lock.as_ref(),
         &packages,
+        &local,
         &mut report,
     )?;
     if let Some(catalogs) = &catalogs {
@@ -1165,6 +1192,8 @@ fn inspect_with_installation(
     let authority = DeclarationAuthority {
         overrides: &overrides,
         bun_workspace_links: (source == "bun.lock").then_some(&workspace_links),
+        file_links: &local.links,
+        local_directories: &local.directories,
     };
     for (directory, manifest) in &manifests {
         let source = workspaces::manifest_path(directory);
@@ -1207,6 +1236,7 @@ fn inspect_with_installation(
                 &manifests,
                 lock.as_ref(),
                 &overrides,
+                &local.directories,
                 &mut report,
             )?;
         }
@@ -1218,6 +1248,11 @@ fn inspect_with_installation(
     if catalogs.as_ref().is_some_and(bun::Catalogs::has_entries) {
         report.scope.push_str(
             "; project catalog references resolved from matching captured root/lock definitions",
+        );
+    }
+    if !local.links.is_empty() {
+        report.scope.push_str(
+            "; project-contained npm file: directory links matched to captured manifests, exact locked targets and runtime dependency routes",
         );
     }
     if !overrides.is_empty() {

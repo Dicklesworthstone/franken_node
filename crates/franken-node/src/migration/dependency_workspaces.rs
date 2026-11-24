@@ -9,9 +9,12 @@
 
 use super::{
     Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_LOCK_BYTES,
-    MAX_MANIFEST_BYTES, SECTIONS, bounded_text, flag, name, time_remaining,
+    MAX_MANIFEST_BYTES, MAX_PACKAGES, SECTIONS, bounded_text, declaration_selection, flag,
+    name, nearest_package, time_remaining,
 };
-use crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode;
+use crate::supply_chain::module_resolution_graph::{
+    WorkspaceSelectionMode, npm_file_dependency_target, npm_file_manifest_matches,
+};
 use crate::supply_chain::module_resolution_graph::workspace_selection::{
     self, open_directory as directory,
 };
@@ -106,6 +109,90 @@ pub(super) fn capture(
     Ok(manifests)
 }
 
+#[derive(Default)]
+pub(super) struct LocalDependencies {
+    /// Directory dependencies are consumers, not workspace development roots.
+    pub directories: BTreeSet<String>,
+    /// Only a captured declaration and its nearest exact lock link grant this
+    /// position. Arbitrary local descriptors never authorize a new manifest.
+    pub links: BTreeMap<String, String>,
+}
+
+pub(super) fn capture_file_dependencies(
+    capture: &mut Capture,
+    manifests: &mut BTreeMap<String, Value>,
+    lock: Option<&Value>,
+    packages: &BTreeMap<String, LockedPackage>,
+) -> Result<LocalDependencies> {
+    let mut local = LocalDependencies::default();
+    let mut pending: Vec<_> = manifests.keys().cloned().collect();
+    let mut count = 0;
+    while let Some(consumer) = pending.pop() {
+        time_remaining(capture.deadline)?;
+        let manifest = manifests[&consumer].clone();
+        let edges = declaration_selection::select(
+            &manifest,
+            !local.directories.contains(&consumer),
+            capture.deadline,
+            &mut count,
+            MAX_PACKAGES,
+        )?;
+        for edge in edges {
+            // Keep unsupported file requests opaque for the declaration review
+            // pass. No external, encoded or tarball path is opened here.
+            let Ok(Some(target)) = npm_file_dependency_target(&consumer, edge.request) else {
+                continue;
+            };
+            ensure!(
+                manifests[""].get("overrides").is_none_or(|rules| {
+                    rules.as_object().is_some_and(serde_json::Map::is_empty)
+                }),
+                "file: dependencies with root overrides require explicit review"
+            );
+            let selected = nearest_package(packages, &manifest_path(&consumer), edge.installed_as);
+            if selected.is_none() && edge.optional {
+                continue;
+            }
+            let selected = selected.context("file: dependency has no nearest locked installation")?;
+            let records = lock
+                .filter(|lock| matches!(lock.get("lockfileVersion").and_then(Value::as_u64), Some(2 | 3)))
+                .and_then(|lock| lock.get("packages"))
+                .and_then(Value::as_object)
+                .context("file: directory links require an npm v2/v3 packages lock")?;
+            ensure!(
+                selected.linked
+                    && !selected.unresolved
+                    && records.get(&selected.path)
+                        .and_then(|record| record.get("resolved"))
+                        .and_then(Value::as_str) == Some(target.as_str()),
+                "file: request differs from its nearest locked link target"
+            );
+            let recorded = records.get(&target).context("file: link target descriptor is missing")?;
+            if !manifests.contains_key(&target) {
+                ensure!(manifests.len() < MAX_MANIFESTS, "file dependency manifest count exceeds limit");
+                let value = capture.read(&manifest_path(&target), MAX_MANIFEST_BYTES)?
+                    .context("file: dependency target manifest is missing")?;
+                ensure!(value.get("workspaces").is_none(), "file: dependency cannot introduce another workspace authority");
+                manifests.insert(target.clone(), value);
+                local.directories.insert(target.clone());
+                pending.push(target.clone());
+            }
+            let value = &manifests[&target];
+            ensure!(
+                value.get("name").and_then(Value::as_str) == Some(edge.installed_as)
+                    && selected.name == edge.installed_as
+                    && selected.version.as_deref() == value.get("version").and_then(Value::as_str)
+                    && npm_file_manifest_matches(value, recorded),
+                "file: dependency name, version or runtime declarations differ from its captured lock descriptor"
+            );
+            if let Some(previous) = local.links.insert(selected.path.clone(), target.clone()) {
+                ensure!(previous == target, "conflicting file: dependency link targets");
+            }
+        }
+    }
+    Ok(local)
+}
+
 pub(super) fn manifest_findings(
     report: &mut DependencyAdmission,
     manifest: &Value,
@@ -190,12 +277,13 @@ pub(super) fn bind_links(
     manifests: &BTreeMap<String, Value>,
     lock: Option<&Value>,
     packages: &BTreeMap<String, LockedPackage>,
+    local: &LocalDependencies,
     report: &mut DependencyAdmission,
 ) -> Result<BTreeSet<String>> {
     let recorded = lock
         .and_then(|lock| lock.get("packages"))
         .and_then(Value::as_object);
-    let mut admitted = BTreeSet::new();
+    let mut admitted: BTreeSet<_> = local.links.keys().cloned().collect();
     for (path, manifest) in manifests {
         time_remaining(capture.deadline)?;
         let fd = directory(&capture.root, path)?;
@@ -235,6 +323,9 @@ pub(super) fn bind_links(
                     "Workspace has an independent lockfile; assess it as a separate project instead of mixing lock authorities",
                 )?;
             }
+        }
+        if local.directories.contains(path) {
+            continue;
         }
         let package = name(bounded_text(
             manifest.get("name").context("workspace name missing")?,
@@ -324,6 +415,197 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    fn npm_file_fixture() -> tempfile::TempDir {
+        use std::os::unix::fs::symlink;
+        let app = json!({"name":"local-app","version":"1.0.0",
+            "dependencies":{"shared":"file:./packages/shared","dep":"^1"}});
+        let shared = json!({"name":"shared","version":"1.0.0",
+            "dependencies":{"leaf":"file:../leaf","dep":"^2"},
+            "devDependencies":{"never-installed":"99"}});
+        let leaf = json!({"name":"leaf","version":"1.0.0",
+            "dependencies":{"shared":"file:../shared"}});
+        let root = fixture(app.clone(), Some(json!({"lockfileVersion":3,"packages":{
+            "":app, "packages/shared":shared, "packages/leaf":leaf,
+            "node_modules/shared":{"resolved":"packages/shared","link":true},
+            "node_modules/leaf":{"resolved":"packages/leaf","link":true},
+            "node_modules/dep":{"name":"dep","version":"1.4.0"},
+            "packages/shared/node_modules/dep":{"name":"dep","version":"2.1.0"}
+        }})));
+        write(root.path(), "packages/shared", shared);
+        write(root.path(), "packages/leaf", leaf);
+        write(root.path(), "node_modules/dep", json!({"name":"dep","version":"1.4.0"}));
+        write(root.path(), "packages/shared/node_modules/dep", json!({"name":"dep","version":"2.1.0"}));
+        symlink("../packages/shared", root.path().join("node_modules/shared")).unwrap();
+        symlink("../packages/leaf", root.path().join("node_modules/leaf")).unwrap();
+        root
+    }
+
+    #[test]
+    fn npm_file_links_bind_cycles_private_versions_and_runtime_only_consumers() {
+        use super::super::inspect_for_execution;
+        use crate::supply_chain::module_resolution_graph::{
+            build_canonical_module_resolution_graph, dependency_topology,
+        };
+        for version in [2, 3] {
+            let root = npm_file_fixture();
+            let path = root.path().join("package-lock.json");
+            let mut lock: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            lock["lockfileVersion"] = json!(version);
+            fs::write(&path, serde_json::to_vec(&lock).unwrap()).unwrap();
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(report.installation_checked && !report.requires_review(), "{report:?}");
+            assert_eq!(report.packages_scanned, 4);
+            assert_eq!(report.installed_packages_scanned, 4);
+            assert_eq!(report.manifests_scanned, 5);
+            assert!(report.inputs.iter().any(|input| input.path == "packages/shared/package.json"));
+            assert!(report.scope.contains("project-contained npm file:"));
+            let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
+            assert_eq!(graph.packages.len(), 3);
+            assert!(graph.packages.iter().all(|package| !package.workspace));
+            assert_eq!(graph.root_package_id, graph.packages.iter()
+                .find(|package| package.relative_manifest_path == "package.json").unwrap().package_id);
+            assert!(!graph.dependency_edges.iter().any(|edge| edge.dependency_name == "never-installed"));
+            let topology = dependency_topology::build(root.path()).unwrap();
+            let projection = topology.trust_graph_projection().unwrap();
+            assert_eq!(projection.dependencies["shared"], BTreeSet::from(["dep".into(), "leaf".into()]));
+            assert_eq!(projection.dependencies["leaf"], BTreeSet::from(["shared".into()]));
+            assert!(projection.placements.iter().any(|pin| {
+                pin.location == "packages/shared/node_modules/dep" && pin.version.as_deref() == Some("2.1.0")
+            }));
+            assert!(projection.placements.iter().any(|pin| {
+                pin.location == "node_modules/shared"
+                    && pin.source == dependency_topology::PackageSource::LocalDirectoryLink
+            }));
+            assert!(projection.coverage.metadata_complete);
+            assert_eq!(projection.coverage.unresolved_required_edges, 0);
+        }
+    }
+
+    #[test]
+    fn npm_file_links_refuse_manifest_target_and_authority_substitution() {
+        use crate::supply_chain::module_resolution_graph::dependency_topology;
+        for mutation in ["request", "lock-target", "version", "dependency", "name", "override", "nested-lock"] {
+            let root = npm_file_fixture();
+            let path = root.path().join("packages/shared/package.json");
+            let mut local: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            match mutation {
+                "request" => {
+                    let path = root.path().join("package.json");
+                    let mut app: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    app["dependencies"]["shared"] = json!("file:packages/other");
+                    fs::write(path, serde_json::to_vec(&app).unwrap()).unwrap();
+                }
+                "lock-target" => {
+                    let path = root.path().join("package-lock.json");
+                    let mut lock: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    lock["packages"]["node_modules/shared"]["resolved"] = json!("packages/leaf");
+                    fs::write(path, serde_json::to_vec(&lock).unwrap()).unwrap();
+                }
+                "version" => local["version"] = json!("1.0.1"),
+                "dependency" => local["dependencies"]["dep"] = json!("^1"),
+                "name" => local["name"] = json!("different-package"),
+                "override" => {
+                    let path = root.path().join("package.json");
+                    let mut app: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    app["overrides"] = json!({"dep":"^1"});
+                    fs::write(path, serde_json::to_vec(&app).unwrap()).unwrap();
+                }
+                "nested-lock" => fs::write(root.path().join("packages/shared/package-lock.json"), "{}").unwrap(),
+                _ => unreachable!(),
+            }
+            fs::write(path, serde_json::to_vec(&local).unwrap()).unwrap();
+            let admission = inspect(root.path(), deadline());
+            assert!(admission.is_err() || admission.unwrap().requires_review(), "{mutation}");
+            assert!(dependency_topology::build(root.path()).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn npm_file_links_refuse_changed_installation_routes_and_link_text() {
+        use super::super::inspect_for_execution;
+        use std::os::unix::fs::symlink;
+        for mutation in ["target", "private-version", "missing-private"] {
+            let root = npm_file_fixture();
+            match mutation {
+                "target" => {
+                    let path = root.path().join("node_modules/shared");
+                    fs::rename(&path, root.path().join("retained-original-link")).unwrap();
+                    symlink("../packages/leaf", path).unwrap();
+                }
+                "private-version" => write(root.path(), "packages/shared/node_modules/dep",
+                    json!({"name":"dep","version":"1.4.0"})),
+                "missing-private" => fs::rename(
+                    root.path().join("packages/shared/node_modules/dep"),
+                    root.path().join("retained-private-package"),
+                ).unwrap(),
+                _ => unreachable!(),
+            }
+            let report = inspect_for_execution(root.path(), deadline());
+            assert!(report.is_err() || report.unwrap().requires_review(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn npm_file_paths_and_target_metadata_cannot_escape_capture() {
+        use crate::supply_chain::module_resolution_graph::{dependency_topology, npm_file_dependency_target};
+        use std::os::unix::fs::symlink;
+        assert_eq!(npm_file_dependency_target("packages/shared", "file:../leaf").unwrap(), Some("packages/leaf".into()));
+        for request in ["file:", "file:../outside", "file:/tmp/shared", "file:~/shared",
+            "file:packages/%2e%2e/shared", "file:packages/shared.tgz", "file:node_modules/shared",
+            "file:.franken-node/shared", "file:packages/shared?query"] {
+            assert!(npm_file_dependency_target("", request).is_err(), "{request}");
+        }
+        let root = npm_file_fixture();
+        let path = root.path().join("packages/shared/package.json");
+        let retained = root.path().join("retained-package.json");
+        fs::rename(&path, &retained).unwrap();
+        symlink("../../retained-package.json", path).unwrap();
+        assert!(inspect(root.path(), deadline()).is_err());
+        assert!(dependency_topology::build(root.path()).is_err());
+    }
+
+    #[test]
+    fn npm_file_links_preserve_lifecycle_and_native_payload_refusals() {
+        use super::super::inspect_for_execution;
+        for marker in ["lifecycle", "gyp", "native-payload"] {
+            let root = npm_file_fixture();
+            match marker {
+                "lifecycle" => {
+                    let path = root.path().join("packages/shared/package.json");
+                    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    manifest["scripts"] = json!({"prepare":"node build.js"});
+                    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                }
+                "gyp" => fs::write(root.path().join("packages/shared/binding.gyp"), "{}").unwrap(),
+                "native-payload" => fs::write(root.path().join("packages/shared/addon.node"), b"native").unwrap(),
+                _ => unreachable!(),
+            }
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(report.requires_review(), "{marker}: {report:?}");
+        }
+    }
+
+    #[test]
+    fn npm_file_optional_absence_never_grants_an_unrequested_local_link() {
+        use crate::supply_chain::module_resolution_graph::dependency_topology;
+        let root = fixture(json!({"optionalDependencies":{"absent":"file:packages/absent"}}),
+            Some(json!({"lockfileVersion":3,"packages":{}})));
+        assert!(!inspect(root.path(), deadline()).unwrap().requires_review());
+        let projection = dependency_topology::build(root.path()).unwrap().trust_graph_projection().unwrap();
+        assert_eq!(projection.coverage.unresolved_optional_edges, 1);
+
+        let root = npm_file_fixture();
+        let path = root.path().join("package-lock.json");
+        let mut lock: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        lock["packages"]["packages/leaf/node_modules/shared"] =
+            json!({"resolved":"packages/shared","link":true});
+        lock["packages"]["node_modules/unrequested"] =
+            json!({"resolved":"packages/shared","link":true});
+        fs::write(path, serde_json::to_vec(&lock).unwrap()).unwrap();
+        assert!(inspect(root.path(), deadline()).unwrap().requires_review());
+        assert!(dependency_topology::build(root.path()).is_err());
     }
 
     #[test]

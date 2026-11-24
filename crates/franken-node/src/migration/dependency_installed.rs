@@ -16,7 +16,7 @@ use super::{
 use anyhow::{Context, Result, ensure};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, readlinkat, statat};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
@@ -496,7 +496,7 @@ impl Inspector<'_> {
 /// copy. Optional absence is allowed; a present wrong optional copy is not.
 fn routes(
     manifests: &BTreeMap<String, Value>,
-    project: bool,
+    development_roots: &BTreeSet<String>,
     actual: &BTreeMap<String, LockedPackage>,
     locked: &BTreeMap<String, LockedPackage>,
     report: &mut DependencyAdmission,
@@ -505,11 +505,13 @@ fn routes(
 ) -> Result<()> {
     for (consumer, manifest) in manifests {
         time_remaining(deadline)?;
-        if !project && actual.get(consumer).is_some_and(|package| package.linked) {
+        if actual.get(consumer).is_some_and(|package| package.linked) {
             continue;
         }
         let source = workspaces::manifest_path(consumer);
-        for edge in declaration_selection::select(manifest, project, deadline, edges, MAX_EDGES)? {
+        for edge in declaration_selection::select(
+            manifest, development_roots.contains(consumer), deadline, edges, MAX_EDGES,
+        )? {
             let selected = nearest_package(actual, &source, edge.installed_as);
             if selected.is_none() && edge.optional {
                 continue;
@@ -541,6 +543,7 @@ pub(super) fn inspect(
     projects: &BTreeMap<String, Value>,
     lock: Option<&Value>,
     overrides: &declaration_selection::Overrides,
+    local_directories: &BTreeSet<String>,
     report: &mut DependencyAdmission,
 ) -> Result<()> {
     let layout = isolated::Layout::capture(capture, locked, projects, lock, report)?;
@@ -562,9 +565,13 @@ pub(super) fn inspect(
         layout.populate_aliases(&mut inspector.actual, inspector.capture.deadline)?;
     }
     let mut edges = 0;
+    let development_roots = projects.keys()
+        .filter(|directory| !local_directories.contains(*directory))
+        .cloned()
+        .collect();
     routes(
         projects,
-        true,
+        &development_roots,
         &inspector.actual,
         locked,
         inspector.report,
@@ -573,7 +580,7 @@ pub(super) fn inspect(
     )?;
     routes(
         &inspector.manifests,
-        false,
+        &development_roots,
         &inspector.actual,
         locked,
         inspector.report,

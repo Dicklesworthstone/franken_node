@@ -1562,9 +1562,9 @@ fn build_graph_parts(
 
     let captured_lockfile = capture_package_lock(project_root)?;
     let bun = captured_lockfile.as_ref().is_some_and(|lock| lock.bun);
-    // Capture the root once. Ordinary npm projects can release its parsed
-    // value immediately; Bun and root overrides need the same captured
-    // manifests for authority binding, never a second filesystem read.
+    // Capture each manifest once. File-directory dependencies, Bun and root
+    // overrides use these same values for authority binding, never a second
+    // filesystem read that could select different package declarations.
     let mut captured_manifests = Some(CapturedManifests::default());
     let root_manifest = parse_manifest(
         project_root,
@@ -1572,14 +1572,12 @@ fn build_graph_parts(
         false,
         captured_manifests.as_mut(),
     )?;
+    #[cfg(not(target_os = "linux"))]
     let root_overrides = captured_manifests
         .as_ref()
         .and_then(|captured| captured.values.get(""))
         .and_then(|root| root.get("overrides"))
         .is_some_and(|rules| !rules.as_object().is_some_and(serde_json::Map::is_empty));
-    if !bun && !root_overrides {
-        captured_manifests = None;
-    }
     #[cfg(not(target_os = "linux"))]
     if root_overrides {
         return invalid_metadata(
@@ -1619,6 +1617,17 @@ fn build_graph_parts(
         pins: lockfile_pins,
         details,
     } = read_package_lock(captured_lockfile, captured_manifests.as_mut())?;
+    let file_links = if !bun {
+        capture_npm_file_manifests(
+            project_root,
+            &mut manifests,
+            captured_manifests.as_mut().expect("root manifests are retained"),
+            &lockfile_pins,
+            &details,
+        )?
+    } else {
+        BTreeSet::new()
+    };
     if let Some(captured) = captured_manifests.filter(|_| bun) {
         for manifest in &mut manifests {
             let directory = manifest_directory(&manifest.relative_manifest_path);
@@ -1642,27 +1651,33 @@ fn build_graph_parts(
         .collect::<Vec<_>>();
     let root_package_id = packages
         .iter()
-        .find(|package| !package.workspace)
+        .find(|package| package.relative_manifest_path == "package.json")
         .map(|package| package.package_id.clone())
         .unwrap_or_default();
     let mut workspace_by_name = BTreeMap::new();
     let mut workspace_by_path = BTreeMap::new();
-    for package in packages.iter().filter(|package| package.workspace) {
-        if let Some(name) = &package.name
+    for package in &packages {
+        if package.workspace
+            && let Some(name) = &package.name
             && workspace_by_name
                 .insert(name.clone(), package.package_id.clone())
                 .is_some()
         {
             return invalid_metadata(format!("duplicate workspace package name {name:?}"));
         }
-        workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
+        if package.relative_manifest_path != "package.json" {
+            workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
+        }
     }
 
     for (path, target) in &details.links {
-        if !workspace_by_path.contains_key(target.as_str()) {
+        let Some(package) = workspace_by_path.get(target.as_str()) else {
             return invalid_metadata(format!(
-                "lockfile link {path:?} targets an uncaptured workspace {target:?}"
+                "lockfile link {path:?} targets an uncaptured workspace or file dependency {target:?}"
             ));
+        };
+        if !package.workspace && !file_links.contains(path) {
+            return invalid_metadata("local directory link has no independently captured file: declaration");
         }
     }
     let lockfile_by_path = lockfile_pins
@@ -2235,6 +2250,7 @@ struct Lockfile {
 struct LockfileDetails {
     lockfile_source: Option<dependency_topology::CapturedLockfileSource>,
     links: BTreeMap<String, String>,
+    local_records: BTreeMap<String, Value>,
     requirements: BTreeMap<String, Vec<DependencySpec>>,
     dependency_kinds_complete: bool,
     edges: usize,
@@ -2267,6 +2283,170 @@ fn invalid_metadata<T>(detail: impl Into<String>) -> ModuleResolutionGraphResult
 
 fn manifest_directory(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+/// npm <=11 directory requests are relative to the declaring package. Admit
+/// only project-contained paths, not tarballs, URL encodings or global links.
+/// Both checked migration and trust topology use this exact interpretation.
+/// Contract: docs.npmjs.com/cli/v11/commands/npm-install/#description
+pub(crate) fn npm_file_dependency_target(
+    consumer: &str,
+    request: &str,
+) -> ModuleResolutionGraphResult<Option<String>> {
+    let Some(path) = request.strip_prefix("file:") else {
+        return Ok(None);
+    };
+    if path.is_empty()
+        || path.len() > 4096
+        || path.starts_with(['/', '~'])
+        || path.contains(['\\', ':', '%', '?', '#'])
+        || path.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || [".tgz", ".tar", ".tar.gz"].iter().any(|suffix| path.ends_with(*suffix))
+    {
+        return invalid_metadata("file: dependency must name a bounded project-local directory");
+    }
+    let mut parts: Vec<_> = consumer.split('/').filter(|part| !part.is_empty()).collect();
+    for part in path.split('/') {
+        match part {
+            "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return invalid_metadata("file: dependency escapes its project root");
+                }
+            }
+            "" | ".git" | ".franken-node" | "node_modules" => {
+                return invalid_metadata("file: dependency targets a reserved or ambiguous directory");
+            }
+            _ => parts.push(part),
+        }
+        enforce_len("file dependency path components", parts.len(), 64)?;
+    }
+    if parts.is_empty() {
+        return invalid_metadata("file: dependency cannot target the project root");
+    }
+    let target = parts.join("/");
+    enforce_len("file dependency path bytes", target.len(), 4096)?;
+    validate_lock_path(&target)?;
+    Ok(Some(target))
+}
+
+/// A lock's local-package descriptor cannot supply the manifest it purports
+/// to pin. Compare it with separately captured bytes, including runtime peers
+/// and optionality. Local development dependencies are not installed edges.
+pub(crate) fn npm_file_manifest_matches(manifest: &Value, recorded: &Value) -> bool {
+    let Some(name) = manifest.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(version) = manifest.get("version").and_then(Value::as_str) else {
+        return false;
+    };
+    if validate_package_name(name).is_err()
+        || version.is_empty()
+        || version.len() > 256
+        || version.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || recorded.get("version").and_then(Value::as_str) != Some(version)
+        || recorded.get("name").is_some_and(|value| value.as_str() != Some(name))
+        || recorded.get("link").is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return false;
+    }
+    let empty = serde_json::Map::new();
+    ["dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta"]
+        .into_iter()
+        .all(|field| {
+            let left = manifest.get(field).map_or(Some(&empty), Value::as_object);
+            let right = recorded.get(field).map_or(Some(&empty), Value::as_object);
+            left.is_some() && left == right
+        })
+}
+
+fn capture_npm_file_manifests(
+    project_root: &Path,
+    manifests: &mut Vec<ParsedManifest>,
+    captured: &mut CapturedManifests,
+    pins: &[LockfilePin],
+    details: &LockfileDetails,
+) -> ModuleResolutionGraphResult<BTreeSet<String>> {
+    let by_path = pins.iter().map(|pin| (pin.package_path.as_str(), pin)).collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut visited = 0;
+    let mut edges = 0;
+    let mut bound = BTreeSet::new();
+    while visited < manifests.len() {
+        if std::time::Instant::now() >= deadline {
+            return invalid_metadata("file dependency capture deadline exceeded");
+        }
+        let manifest = &manifests[visited];
+        let consumer = manifest_directory(&manifest.relative_manifest_path).to_owned();
+        // The ordinary graph retains all kinds; file discovery follows npm's
+        // winning declaration so a superseded optional edge grants no access.
+        let mut selected = BTreeMap::new();
+        for kind in [DependencyKind::Peer, DependencyKind::Production,
+            DependencyKind::Optional, DependencyKind::Development] {
+            for edge in manifest.dependencies.iter().filter(|edge| edge.kind == kind) {
+                selected.insert(edge.name.clone(), edge.clone());
+            }
+        }
+        visited += 1;
+        for edge in selected.into_values() {
+            edges += 1;
+            enforce_len("file dependency edges", edges, MAX_DEPENDENCY_EDGES)?;
+            let Some(target) = npm_file_dependency_target(&consumer, &edge.requested_range)? else {
+                continue;
+            };
+            if captured.values[""].get("overrides").is_some_and(|rules| {
+                !rules.as_object().is_some_and(serde_json::Map::is_empty)
+            }) {
+                return invalid_metadata("file: dependencies with root overrides require explicit review");
+            }
+            let Some(pin) = nearest_lockfile_pin(&consumer, &edge.name, &by_path) else {
+                if edge.optional {
+                    continue;
+                }
+                return invalid_metadata("file: dependency has no nearest locked installation");
+            };
+            if details.links.get(&pin.package_path) != Some(&target) {
+                return invalid_metadata("file: request differs from its nearest locked link target");
+            }
+            let record = details.local_records.get(&target).ok_or_else(|| {
+                ModuleResolutionGraphError::InvalidMetadata {
+                    detail: "file: link has no captured local lock descriptor".into(),
+                }
+            })?;
+            if !captured.values.contains_key(&target) {
+                enforce_len("package manifests", manifests.len() + 1, MAX_PACKAGE_MANIFESTS)?;
+                let mut local = parse_manifest(
+                    project_root,
+                    &project_root.join(&target).join("package.json"),
+                    true,
+                    Some(&mut *captured),
+                )?;
+                let value = &captured.values[&target];
+                if value.get("workspaces").is_some() {
+                    return invalid_metadata("file: dependency cannot introduce another workspace authority");
+                }
+                local.package.workspace = false;
+                local.dependencies = effective_dependencies(value, false)?;
+                manifests.push(local);
+            }
+            let value = &captured.values[&target];
+            if value.get("name").and_then(Value::as_str) != Some(edge.name.as_str())
+                || !npm_file_manifest_matches(value, record)
+            {
+                return invalid_metadata("file: dependency name, version or runtime declarations differ from its captured lock descriptor");
+            }
+            bound.insert(pin.package_path.clone());
+            for name in ["package-lock.json", "npm-shrinkwrap.json", "bun.lock"] {
+                let path = Path::new(&target).join(name);
+                match read_project_metadata(project_root, &path, 0) {
+                    Err(ModuleResolutionGraphError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return invalid_metadata("file: dependency has an independent lock authority"),
+                }
+            }
+        }
+    }
+    Ok(bound)
 }
 
 pub(crate) fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
@@ -2574,6 +2754,12 @@ fn read_package_lock(
                     return invalid_metadata(format!(
                         "invalid installed package location {package_path:?}"
                     ));
+                }
+                if matches!(value.get("lockfileVersion").and_then(Value::as_u64), Some(2 | 3)) {
+                    lockfile
+                        .details
+                        .local_records
+                        .insert(package_path.clone(), package.clone());
                 }
                 continue;
             };
