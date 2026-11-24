@@ -38,10 +38,10 @@ use super::engine_dispatcher::{
     RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH, RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY,
     RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH, RUNTIME_EVIDENCE_STATE_DIRECTORY,
     RuntimeEvidenceIdentityCapture, create_new_runtime_evidence_private_file,
-    ensure_runtime_evidence_directory, load_or_create_runtime_evidence_product_root,
-    load_runtime_evidence_product_root, prepare_runtime_evidence_directories,
-    read_runtime_evidence_private_file, runtime_evidence_user_state_home,
-    validate_runtime_evidence_private_file_metadata,
+    ensure_runtime_evidence_directory, ensure_runtime_evidence_directory_with_status,
+    load_or_create_runtime_evidence_product_root, load_runtime_evidence_product_root,
+    prepare_runtime_evidence_directories, read_runtime_evidence_private_file,
+    runtime_evidence_user_state_home, validate_runtime_evidence_private_file_metadata,
 };
 
 const INVENTORY_SCHEMA: &str = "franken-node/native-session-inventory/v1";
@@ -1150,7 +1150,7 @@ fn inventory_reservation_usage(tx: &Transaction<'_>) -> Result<(usize, usize)> {
     Ok((count, bytes))
 }
 
-fn validate_private_path_if_present(path: &Path) -> Result<bool> {
+fn validate_private_path_metadata_if_present(path: &Path) -> Result<Option<std::fs::Metadata>> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -1167,11 +1167,15 @@ fn validate_private_path_if_present(path: &Path) -> Result<bool> {
                     bail!("native-session inventory file must be owned and have a single link");
                 }
             }
-            Ok(true)
+            Ok(Some(metadata))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
     }
+}
+
+fn validate_private_path_if_present(path: &Path) -> Result<bool> {
+    Ok(validate_private_path_metadata_if_present(path)?.is_some())
 }
 
 #[cfg(unix)]
@@ -1203,10 +1207,9 @@ fn check_source_capsule_capacity(
         std::fs::read_dir(directory).context("enumerate retained native-session sources")?
     {
         let path = entry?.path();
-        if !validate_private_path_if_present(&path)? {
+        let Some(metadata) = validate_private_path_metadata_if_present(&path)? else {
             bail!("retained native-session source disappeared during capacity accounting");
-        }
-        let metadata = std::fs::symlink_metadata(&path)?;
+        };
         files = files.saturating_add(1);
         bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
         if files > max_files || bytes > max_bytes {
@@ -1243,7 +1246,7 @@ pub(crate) fn retain_native_session_source_capsule(
     validate_source_capsule_binding(&binding)?;
     ensure_runtime_evidence_directory(protected_root, true)?;
     let directory = protected_root.join(SOURCE_CAPSULE_DIRECTORY);
-    ensure_runtime_evidence_directory(&directory, true)?;
+    let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
     let _write_lock = lock_inventory_file(protected_root, true)?;
     let path = source_capsule_path(protected_root, &binding)?;
     let exists = validate_private_path_if_present(&path)?;
@@ -1254,19 +1257,25 @@ pub(crate) fn retain_native_session_source_capsule(
         MAX_STORED_SESSIONS,
         MAX_RETAINED_SOURCE_CAPSULE_BYTES,
     )?;
-    if !exists {
-        create_new_runtime_evidence_private_file(&path, encoded.bytes())?;
+    let created_capsule = if !exists {
+        create_new_runtime_evidence_private_file(&path, encoded.bytes())?
+    } else {
+        false
+    };
+    if !created_capsule {
+        // Re-read through the same private, no-follow reader used by forensics.
+        // This also rejects a conflicting object that raced publication.
+        if !validate_private_path_if_present(&path)? {
+            bail!("native-session source capsule disappeared after retention");
+        }
+        let retained = read_runtime_evidence_private_file(&path, capsule::MAX_CAPSULE_BYTES)?;
+        if retained.as_slice() != encoded.bytes() {
+            bail!("retained native-session source capsule conflicts with the admitted capture");
+        }
     }
-    // Re-read through the same private, no-follow reader used by forensics.
-    // This also rejects a conflicting object that raced publication.
-    if !validate_private_path_if_present(&path)? {
-        bail!("native-session source capsule disappeared after retention");
+    if created_directory {
+        std::fs::File::open(protected_root)?.sync_all()?;
     }
-    let retained = read_runtime_evidence_private_file(&path, capsule::MAX_CAPSULE_BYTES)?;
-    if retained.as_slice() != encoded.bytes() {
-        bail!("retained native-session source capsule conflicts with the admitted capture");
-    }
-    std::fs::File::open(protected_root)?.sync_all()?;
     Ok(binding)
 }
 
@@ -1347,8 +1356,12 @@ fn protect_sidecar_if_present(path: &Path) -> Result<()> {
         {
             bail!("native-session inventory sidecar identity or owner is invalid");
         }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        validate_runtime_evidence_private_file_metadata(path, &file.metadata()?)?;
+        if (opened.permissions().mode() & 0o7777) != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            validate_runtime_evidence_private_file_metadata(path, &file.metadata()?)?;
+        } else {
+            validate_runtime_evidence_private_file_metadata(path, &opened)?;
+        }
     }
     #[cfg(not(unix))]
     validate_runtime_evidence_private_file_metadata(path, &observed)?;
@@ -1362,17 +1375,32 @@ fn protect_sidecars(protected_root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn lock_file_identity(file: Option<&std::fs::File>) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file?.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn lock_file_identity(_file: Option<&std::fs::File>) -> Option<(u64, u64)> {
+    None
+}
+
 fn lock_inventory_file(protected_root: &Path, create: bool) -> Result<Option<std::fs::File>> {
     let database_path = protected_root.join(INVENTORY_FILE);
-    if !validate_private_path_if_present(&database_path)? {
-        if !create {
-            return Ok(None);
+    let observed = match validate_private_path_metadata_if_present(&database_path)? {
+        Some(metadata) => metadata,
+        None => {
+            if !create {
+                return Ok(None);
+            }
+            create_new_runtime_evidence_private_file(&database_path, &[])?;
+            validate_private_path_metadata_if_present(&database_path)?
+                .context("native-session inventory disappeared after creation")?
         }
-        create_new_runtime_evidence_private_file(&database_path, &[])?;
-        validate_private_path_if_present(&database_path)?;
-    }
-    let observed = std::fs::symlink_metadata(&database_path)
-        .with_context(|| format!("inspect {}", database_path.display()))?;
+    };
     #[cfg(unix)]
     let file = {
         use rustix::fs::{Mode, OFlags, open};
@@ -1415,6 +1443,25 @@ fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connecti
     open_inventory_unlocked(protected_root, create)
 }
 
+fn inventory_schema_is_current(connection: &Connection) -> bool {
+    connection
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN (
+                   'native_sessions',
+                   'native_session_drains',
+                   'native_session_admission_serialization'
+               );",
+        )
+        .is_ok_and(|rows| {
+            matches!(
+                rows.as_slice(),
+                [row] if matches!(row.values(), [SqliteValue::Integer(3)])
+            )
+        })
+}
+
 fn open_inventory_unlocked(protected_root: &Path, create: bool) -> Result<Option<Connection>> {
     let database_path = protected_root.join(INVENTORY_FILE);
     let database_name = database_path
@@ -1440,7 +1487,7 @@ fn open_inventory_unlocked(protected_root: &Path, create: bool) -> Result<Option
                 .query(pragma)
                 .context("configure native-session inventory durability")?;
         }
-        if create {
+        if create && !inventory_schema_is_current(&connection) {
             let mut tx = connection.transaction()?;
             tx.execute(
                 "CREATE TABLE IF NOT EXISTS native_sessions (
@@ -1571,11 +1618,11 @@ fn check_admission_record_capacity(
         std::fs::read_dir(directory).context("enumerate retained native-session admissions")?
     {
         let path = entry?.path();
-        if !validate_private_path_if_present(&path)? {
+        let Some(metadata) = validate_private_path_metadata_if_present(&path)? else {
             bail!("retained native-session admission disappeared during capacity accounting");
-        }
+        };
         files = files.saturating_add(1);
-        bytes = bytes.saturating_add(usize::try_from(std::fs::symlink_metadata(&path)?.len())?);
+        bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
         if files > max_files || bytes > max_bytes {
             bail!(
                 "native-session admission record capacity exceeded: {files}/{max_files} retained \
@@ -1592,22 +1639,42 @@ fn check_admission_record_capacity(
 /// Publish while holding the inventory writer lock, after the original signed
 /// receipt and before worker admission. Repeated publication verifies the
 /// existing object; immutable evidence is never overwritten or re-signed here.
+#[cfg_attr(not(test), allow(dead_code))]
 fn retain_admission_record(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
 ) -> Result<()> {
-    use std::io::Write as _;
-
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
     let key = root.verifying_key();
     drop(root);
-    read_admission_receipt(protected_root, admission, &key)?
-        .context("native-session admission record requires its original signed receipt")?;
-    let bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
+    retain_admission_record_with_root(protected_root, admission, &key, None, false)
+}
+
+fn retain_admission_record_with_root(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+    pre_encoded_json: Option<&str>,
+    receipt_already_verified: bool,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    if !receipt_already_verified {
+        read_admission_receipt(protected_root, admission, verifying_key)?
+            .context("native-session admission record requires its original signed receipt")?;
+    }
+    let owned_bytes;
+    let bytes = match pre_encoded_json {
+        Some(json) => json,
+        None => {
+            owned_bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
+            owned_bytes.as_str()
+        }
+    };
     let directory = protected_root.join(ADMISSION_RECORD_DIRECTORY);
-    ensure_runtime_evidence_directory(&directory, true)?;
+    let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
     let path = admission_record_path(protected_root, &admission.session_nonce);
     let exists = validate_private_path_if_present(&path)?;
     check_admission_record_capacity(
@@ -1617,29 +1684,37 @@ fn retain_admission_record(
         MAX_STORED_SESSIONS,
         MAX_RETAINED_ADMISSION_BYTES,
     )?;
+    let mut published_new = false;
     if !exists {
         let mut staged = tempfile::NamedTempFile::new_in(&directory)
             .context("stage private native-session admission record")?;
         staged.write_all(bytes.as_bytes())?;
         staged.as_file().sync_all()?;
         match staged.persist_noclobber(&path) {
-            Ok(_) => {}
+            Ok(_) => published_new = true,
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(error.error).context("publish native-session admission record");
             }
         }
     }
-    let (retained, _) =
-        read_retained_admission_record(protected_root, &admission.session_nonce, &key)?
-            .context("retained native-session admission record disappeared during publication")?;
-    if &retained != admission {
-        bail!("retained native-session admission record conflicts with the admitted body");
+    if !published_new {
+        let (retained, _) = read_retained_admission_record(
+            protected_root,
+            &admission.session_nonce,
+            verifying_key,
+        )?
+        .context("retained native-session admission record disappeared during publication")?;
+        if &retained != admission {
+            bail!("retained native-session admission record conflicts with the admitted body");
+        }
     }
     #[cfg(unix)]
-    {
+    if published_new {
         std::fs::File::open(&directory)?.sync_all()?;
-        std::fs::File::open(protected_root)?.sync_all()?;
+        if created_directory {
+            std::fs::File::open(protected_root)?.sync_all()?;
+        }
     }
     Ok(())
 }
@@ -1660,28 +1735,47 @@ fn read_admission_receipt(
     Ok(Some(receipt))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn retain_admission_receipt(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
 ) -> Result<()> {
-    use std::io::Write as _;
-    verify_admission_capture(protected_root, admission)?;
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    if admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
+        bail!("native-session capture is outside its protected capture directory");
+    }
+    ensure_runtime_evidence_directory(&capture_directory, true)?;
+    ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
-    let receipt = NativeSessionAdmissionReceipt::issue(admission, &root)?;
+    let key = root.verifying_key();
+    verify_admission_capture_with_root(protected_root, admission, &key)?;
+    retain_admission_receipt_with_root(protected_root, admission, &root, &key)
+}
+
+fn retain_admission_receipt_with_root(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    root: &ed25519_dalek::SigningKey,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    let receipt = NativeSessionAdmissionReceipt::issue(admission, root)?;
     let bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
     let directory = protected_root.join(ADMISSION_RECEIPT_DIRECTORY);
-    ensure_runtime_evidence_directory(&directory, true)?;
+    let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
     let path = admission_receipt_path(protected_root, &admission.session_nonce);
     let mut staged = tempfile::NamedTempFile::new_in(&directory)
         .context("stage private native-session admission receipt")?;
     staged.write_all(bytes.as_bytes())?;
     staged.as_file().sync_all()?;
+    let mut published_new = false;
     match staged.persist_noclobber(&path) {
-        Ok(_) => {}
+        Ok(_) => published_new = true,
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            read_admission_receipt(protected_root, admission, &root.verifying_key())?
+            read_admission_receipt(protected_root, admission, verifying_key)?
                 .context("retained native-session admission disappeared during publication")?;
         }
         Err(error) => return Err(error.error).context("publish native-session admission receipt"),
@@ -1689,9 +1783,11 @@ fn retain_admission_receipt(
     // A receipt with no committed inventory row never certifies that the
     // worker ran or stopped; its identity capture stays untracked/indeterminate.
     #[cfg(unix)]
-    {
+    if published_new {
         std::fs::File::open(&directory)?.sync_all()?;
-        std::fs::File::open(protected_root)?.sync_all()?;
+        if created_directory {
+            std::fs::File::open(protected_root)?.sync_all()?;
+        }
     }
     Ok(())
 }
@@ -1776,23 +1872,31 @@ fn retain_outcome_receipt(
 ) -> Result<()> {
     use std::io::Write as _;
 
-    verify_admission_capture(protected_root, admission)?;
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    if admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
+        bail!("native-session capture is outside its protected capture directory");
+    }
+    ensure_runtime_evidence_directory(&capture_directory, true)?;
+    ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
+    let key = root.verifying_key();
+    verify_admission_capture_with_root(protected_root, admission, &key)?;
     let receipt = NativeSessionOutcomeReceipt::issue(admission, outcome, &root)?;
     let bytes = bounded_json(&receipt, MAX_OUTCOME_RECEIPT_BYTES)?;
     let directory = protected_root.join(OUTCOME_RECEIPT_DIRECTORY);
-    ensure_runtime_evidence_directory(&directory, true)?;
+    let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
     let path = outcome_receipt_path(protected_root, &admission.session_nonce);
     let mut staged = tempfile::NamedTempFile::new_in(&directory)
         .context("stage private native-session outcome receipt")?;
     staged.write_all(bytes.as_bytes())?;
     staged.as_file().sync_all()?;
+    let mut published_new = false;
     match staged.persist_noclobber(&path) {
-        Ok(_) => {}
+        Ok(_) => published_new = true,
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = read_outcome_receipt(protected_root, admission, &root.verifying_key())?
+            let existing = read_outcome_receipt(protected_root, admission, &key)?
                 .context("retained native-session outcome disappeared during publication")?;
             if existing.outcome != *outcome {
                 bail!("native-session outcome receipt is immutable once observed");
@@ -1804,9 +1908,11 @@ fn retain_outcome_receipt(
     // update. A crash before publication leaves no authority to recover; a
     // crash afterwards can recover only the authenticated exact observation.
     #[cfg(unix)]
-    {
+    if published_new {
         std::fs::File::open(&directory)?.sync_all()?;
-        std::fs::File::open(protected_root)?.sync_all()?;
+        if created_directory {
+            std::fs::File::open(protected_root)?.sync_all()?;
+        }
     }
     Ok(())
 }
@@ -1954,6 +2060,7 @@ fn recover_admission_capacity(
 /// retained. Neither missing process liveness nor elapsed time can resolve it.
 pub(crate) struct NativeSessionInventoryGuard {
     connection: Connection,
+    database_identity: Option<(u64, u64)>,
     protected_root: PathBuf,
     admission: NativeSessionAdmission,
     session_nonce: String,
@@ -1982,15 +2089,38 @@ impl NativeSessionInventoryGuard {
             .keys()
             .flat_map(|project| project.ancestors())
             .collect();
-        verify_admission_capture(protected_root, &admission)?;
+        let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+        if admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
+            bail!("native-session capture is outside its protected capture directory");
+        }
+        ensure_runtime_evidence_directory(&capture_directory, true)?;
+        ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
+        let product_root = load_runtime_evidence_product_root(
+            &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+        )?;
+        let verifying_key = product_root.verifying_key();
+        verify_admission_capture_with_root(protected_root, &admission, &verifying_key)?;
         read_retained_native_session_source_capsule(protected_root, &admission)
             .context("native-session sources must be retained before admission")?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let write_lock = lock_inventory_file(protected_root, true)?;
+        let database_identity = lock_file_identity(write_lock.as_ref());
         let connection = retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
             .context("native-session inventory was not created")?;
-        retain_admission_receipt(protected_root, &admission)?;
-        retain_admission_record(protected_root, &admission)?;
+        retain_admission_receipt_with_root(
+            protected_root,
+            &admission,
+            &product_root,
+            &verifying_key,
+        )?;
+        drop(product_root);
+        retain_admission_record_with_root(
+            protected_root,
+            &admission,
+            &verifying_key,
+            Some(&admission_json),
+            true,
+        )?;
         // A refused attempt keeps the same decision and timestamp through
         // transaction retries. Its receipt is issued only after this unique
         // insertion commits, so a duplicate/losing admission cannot create a
@@ -2083,6 +2213,7 @@ impl NativeSessionInventoryGuard {
         }
         Ok(Self {
             connection,
+            database_identity,
             protected_root: protected_root.to_path_buf(),
             session_nonce: admission.session_nonce.clone(),
             admission,
@@ -2198,9 +2329,17 @@ impl NativeSessionInventoryGuard {
 
     fn persist_outcome(&self, outcome: &NativeSessionOutcome) -> Result<()> {
         retain_outcome_receipt(&self.protected_root, &self.admission, outcome)?;
-        let _write_lock = lock_inventory_file(&self.protected_root, false)?;
+        let write_lock = lock_inventory_file(&self.protected_root, false)?;
+        let reuse_connection = self.database_identity.is_some()
+            && lock_file_identity(write_lock.as_ref()) == self.database_identity;
+        let mut attempt = 0_u32;
         retry_snapshot_conflict(|| {
-            let fresh = open_inventory_unlocked(&self.protected_root, false)?;
+            let fresh = if attempt == 0 && reuse_connection {
+                None
+            } else {
+                open_inventory_unlocked(&self.protected_root, false)?
+            };
+            attempt = attempt.saturating_add(1);
             let active_conn = fresh.as_ref().unwrap_or(&self.connection);
             let mut tx = active_conn.transaction()?;
             write_observed_outcome(&mut tx, &self.admission, outcome)?;
@@ -2390,19 +2529,29 @@ fn publish_control_hint(protected_root: &Path, report: &NativeSessionDrainReport
 fn serialize_project_admission(tx: &mut Transaction<'_>, project_root: &Path) -> Result<()> {
     let key = SqliteValue::Text(project_key(project_root)?.to_owned().into());
     tx.execute_with_params(
-        "INSERT OR IGNORE INTO native_session_admission_serialization(project_root, transaction_nonce)
-         VALUES (?1, ?2);",
-        &[key.clone(), SqliteValue::Text(uuid::Uuid::now_v7().to_string().into())],
-    )?;
-    tx.execute_with_params(
-        "UPDATE native_session_admission_serialization SET transaction_nonce = ?1
-         WHERE project_root = ?2;",
+        "INSERT INTO native_session_admission_serialization(project_root, transaction_nonce)
+         VALUES (?1, ?2)
+         ON CONFLICT(project_root) DO UPDATE SET transaction_nonce = excluded.transaction_nonce;",
         &[
-            SqliteValue::Text(uuid::Uuid::now_v7().to_string().into()),
             key,
+            SqliteValue::Text(uuid::Uuid::now_v7().to_string().into()),
         ],
     )?;
     Ok(())
+}
+
+fn drains_table_has_rows(tx: &Transaction<'_>) -> Result<bool> {
+    if tx
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_session_drains';",
+        )?
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    Ok(!tx
+        .query("SELECT 1 FROM native_session_drains LIMIT 1;")?
+        .is_empty())
 }
 
 fn latest_drain(
@@ -2415,6 +2564,14 @@ fn latest_drain(
     )?.is_empty() {
         return Ok(None);
     }
+    latest_drain_unchecked_table(tx, project_root, key)
+}
+
+fn latest_drain_unchecked_table(
+    tx: &Transaction<'_>,
+    project_root: &Path,
+    key: &str,
+) -> Result<Option<StoredNativeSessionDrain>> {
     let rows = tx.query_with_params(
         "SELECT drain_id, generation, state_json FROM native_session_drains
          WHERE project_root = ?1 ORDER BY generation DESC LIMIT 1;",
@@ -2489,10 +2646,14 @@ fn admission_scope_state(
     project_root: &Path,
 ) -> Result<(Option<u64>, Option<String>)> {
     project_key(project_root)?;
+    if !drains_table_has_rows(tx)? {
+        return Ok((Some(0), None));
+    }
     let mut generation = Some(0_u64);
     let mut held_fence = None;
     for scope in project_root.ancestors() {
-        if let Some(drain) = latest_drain(tx, scope)? {
+        let key = project_key(scope)?;
+        if let Some(drain) = latest_drain_unchecked_table(tx, scope, key)? {
             generation = generation.and_then(|value| value.checked_add(drain.generation));
             if drain.fence_held && held_fence.is_none() {
                 held_fence = Some(drain.drain_id);
@@ -2579,9 +2740,12 @@ fn enforce_reference_admission_at(protected_root: &Path, project_root: &Path) ->
             return Ok(());
         };
         let mut tx = connection.transaction()?;
-        for scope in project_root.ancestors() {
-            let drain = latest_drain(&tx, scope)?;
-            require_open_admission(drain.as_ref())?;
+        if drains_table_has_rows(&tx)? {
+            for scope in project_root.ancestors() {
+                let key = project_key(scope)?;
+                let drain = latest_drain_unchecked_table(&tx, scope, key)?;
+                require_open_admission(drain.as_ref())?;
+            }
         }
         tx.commit()?;
         protect_sidecars(protected_root)?;

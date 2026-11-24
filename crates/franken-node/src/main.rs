@@ -8,6 +8,7 @@ const MAX_EVIDENCE_INPUT_BYTES: u64 = 10 << 20; // 10 MiB for evidence input fil
 const MAX_CAPTURED_INCIDENT_BYTES: u64 = 64 << 20; // Match replay evidence's 64 MiB limit
 const MAX_MANIFEST_FILE_BYTES: u64 = 5 << 20; // 5 MiB for manifest files
 const MAX_POLICY_FILE_BYTES: u64 = 2 << 20; // 2 MiB for policy files
+#[cfg(test)]
 const MAX_LOCKFILE_BYTES: u64 = 1 << 20; // 1 MiB for lockfiles
 const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20; // 10 MiB for general CLI input files
 const MAX_SIGNING_KEY_BYTES: u64 = 64 << 10; // 64 KiB for signing keys
@@ -29158,8 +29159,11 @@ fn normalized_directory(path: &Path) -> &Path {
 
 fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed creating {}", parent.display()))?;
+    let parent_existed = parent.is_dir();
+    if !parent_existed {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
 
     let file_name = path
         .file_name()
@@ -29188,7 +29192,7 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     })?;
     temp_guard.defuse();
     sync_directory(parent)?;
-    if let Some(ancestor) = parent.parent() {
+    if !parent_existed && let Some(ancestor) = parent.parent() {
         let ancestor = normalized_directory(ancestor);
         if ancestor != parent {
             sync_directory(ancestor)?;

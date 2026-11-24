@@ -811,6 +811,14 @@ pub(super) fn ensure_runtime_evidence_directory(
     path: &Path,
     require_private_mode: bool,
 ) -> Result<()> {
+    ensure_runtime_evidence_directory_with_status(path, require_private_mode).map(|_| ())
+}
+
+#[cfg(feature = "engine")]
+pub(super) fn ensure_runtime_evidence_directory_with_status(
+    path: &Path,
+    require_private_mode: bool,
+) -> Result<bool> {
     let created = match std::fs::create_dir(path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
@@ -840,43 +848,53 @@ pub(super) fn ensure_runtime_evidence_directory(
     }
 
     #[cfg(unix)]
-    if created || require_private_mode {
+    let changed_permissions = {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restrict runtime evidence directory {}", path.display()))?;
-    }
+        let needs_chmod =
+            created || (require_private_mode && (metadata.permissions().mode() & 0o7777) != 0o700);
+        if needs_chmod {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).with_context(
+                || format!("restrict runtime evidence directory {}", path.display()),
+            )?;
+        }
+        needs_chmod
+    };
+    #[cfg(not(unix))]
+    let changed_permissions = false;
 
-    // Re-open the path metadata after the permission transition so a raced
-    // replacement cannot inherit trust from the pre-chmod observation.
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("inspect runtime evidence directory {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        anyhow::bail!(
-            "runtime evidence directory {} must be a non-symlink directory",
-            path.display()
-        );
-    }
-    #[cfg(unix)]
-    if require_private_mode {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
+    if changed_permissions {
+        // Re-open the path metadata after the permission transition so a raced
+        // replacement cannot inherit trust from the pre-chmod observation.
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("inspect runtime evidence directory {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             anyhow::bail!(
-                "runtime evidence directory {} must not grant group or other access",
+                "runtime evidence directory {} must be a non-symlink directory",
                 path.display()
             );
         }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != linux_process_identity()?.effective_uid {
-            anyhow::bail!(
-                "runtime evidence directory {} is not owned by the current effective user",
-                path.display()
-            );
+        #[cfg(unix)]
+        if require_private_mode {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                anyhow::bail!(
+                    "runtime evidence directory {} must not grant group or other access",
+                    path.display()
+                );
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != linux_process_identity()?.effective_uid {
+                anyhow::bail!(
+                    "runtime evidence directory {} is not owned by the current effective user",
+                    path.display()
+                );
+            }
         }
     }
-    Ok(())
+    Ok(created)
 }
 
 #[cfg(feature = "engine")]
@@ -5365,20 +5383,46 @@ fn recheck_native_run_controls(
     operator_fleet_high_water: &mut Option<ActiveFleetPolicy>,
     cancelled: &AtomicBool,
 ) -> std::result::Result<(), NativeRunControlTrigger> {
-    crate::ops::native_session_inventory::native_session_admission_ticket(
-        project_paths.project_root(),
+    recheck_native_run_controls_with_options(
+        project_paths,
+        config,
+        requirements,
+        fleet_high_water,
+        operator_fleet_high_water,
+        cancelled,
+        true,
     )
-    .map_err(|error| {
-        NativeRunControlTrigger::new(NativeRunControlKind::FleetDrain, format_args!("{error:#}"))
-    })?;
-    if let Some(operator_project) = &requirements.operator_fleet_project_root {
-        crate::ops::native_session_inventory::native_session_admission_ticket(operator_project)
-            .map_err(|error| {
-                NativeRunControlTrigger::new(
-                    NativeRunControlKind::FleetDrain,
-                    format_args!("deployment operator scope: {error:#}"),
-                )
-            })?;
+}
+
+#[cfg(feature = "engine")]
+fn recheck_native_run_controls_with_options(
+    project_paths: &RunProjectPaths,
+    config: &Config,
+    requirements: &RunTrustRequirements,
+    fleet_high_water: &mut Option<ActiveFleetPolicy>,
+    operator_fleet_high_water: &mut Option<ActiveFleetPolicy>,
+    cancelled: &AtomicBool,
+    check_drain_fence: bool,
+) -> std::result::Result<(), NativeRunControlTrigger> {
+    if check_drain_fence {
+        crate::ops::native_session_inventory::native_session_admission_ticket(
+            project_paths.project_root(),
+        )
+        .map_err(|error| {
+            NativeRunControlTrigger::new(
+                NativeRunControlKind::FleetDrain,
+                format_args!("{error:#}"),
+            )
+        })?;
+        if let Some(operator_project) = &requirements.operator_fleet_project_root {
+            crate::ops::native_session_inventory::native_session_admission_ticket(operator_project)
+                .map_err(|error| {
+                    NativeRunControlTrigger::new(
+                        NativeRunControlKind::FleetDrain,
+                        format_args!("deployment operator scope: {error:#}"),
+                    )
+                })?;
+        }
     }
     project_paths
         .enforce_admitted_safe_mode()
@@ -5573,6 +5617,7 @@ impl NativeRunControlMonitor {
         config: Config,
         requirements: RunTrustRequirements,
         mut fleet_high_water: Option<ActiveFleetPolicy>,
+        mut wakeup: NativeRunControlWakeup,
     ) -> io::Result<Self> {
         let mut operator_fleet_high_water = requirements.operator_fleet_policy.clone();
         let (stop, stop_receiver) = std::sync::mpsc::channel();
@@ -5583,13 +5628,20 @@ impl NativeRunControlMonitor {
         let worker = thread::Builder::new()
             .name("franken-node-live-control".to_string())
             .spawn(move || {
-                // Observe hints before the full check: reading them afterward
-                // could swallow a fence committed during that check.
-                let mut wakeup = NativeRunControlWakeup::for_projects(
-                    project_paths.project_root(),
-                    requirements.operator_fleet_project_root.as_deref(),
-                );
+                // `wakeup` captured the pre-admission hint snapshot, and the
+                // supervisor already completed a full control check and atomic
+                // inventory admission right before spawning this observer.
+                // Waiting first avoids a redundant t=0 SQLite open on fast
+                // runs while still waking immediately on any hint transition
+                // (including one committed between admission and spawn).
+                let mut checked_at = last_checked;
                 while !worker_cancelled.load(Ordering::Acquire) {
+                    if !wakeup.wait(&stop_receiver, checked_at) {
+                        return;
+                    }
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
                     let result = recheck_native_run_controls(
                         &project_paths,
                         &config,
@@ -5599,14 +5651,11 @@ impl NativeRunControlMonitor {
                         &worker_cancelled,
                     );
                     let denied = result.is_err();
-                    let checked_at = Instant::now();
+                    checked_at = Instant::now();
                     if worker_cancelled.load(Ordering::Acquire)
                         || update_sender.send((checked_at, result)).is_err()
                         || denied
                     {
-                        return;
-                    }
-                    if !wakeup.wait(&stop_receiver, checked_at) {
                         return;
                     }
                 }
@@ -10544,7 +10593,6 @@ impl EngineDispatcher {
             })?;
         }
 
-        let serialized_config = config.to_toml()?;
         let temp_dir = create_telemetry_socket_directory(&std::env::temp_dir())?;
         let socket_path = temp_dir
             .path()
@@ -10555,67 +10603,70 @@ impl EngineDispatcher {
         // The killable native-session worker owns telemetry too; otherwise a
         // wedged telemetry join in the parent would recreate the very
         // unbounded cleanup seam this supervisor closes. The external-engine
-        // compatibility path retains its parent-owned bridge.
+        // compatibility path retains its parent-owned bridge and command setup.
         #[cfg(not(feature = "engine"))]
-        let telemetry_handle = {
+        let (telemetry_handle, mut cmd) = {
+            let serialized_config = config.to_toml()?;
             let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-            TelemetryBridge::new(&socket_path, adapter)
+            let telemetry_handle = TelemetryBridge::new(&socket_path, adapter)
                 .start()
-                .context("Failed to start telemetry bridge")?
+                .context("Failed to start telemetry bridge")?;
+
+            let mut cmd = Command::new(&bin_path);
+            cmd.arg("run")
+                .arg(app_path)
+                .arg("--policy")
+                .arg(policy_mode)
+                .env("FRANKEN_ENGINE_POLICY_PAYLOAD", &serialized_config)
+                .env("FRANKEN_ENGINE_TELEMETRY_SOCKET", &socket_path);
+
+            // Wire network policy enforcement to spawned engine process (bd-3pogm).
+            // These env vars provide a fast path for the engine to read policy without
+            // parsing the full TOML config payload.
+            let network_policy = &config.security.network_policy;
+
+            // SSRF enforcement mode: none, monitor, or block
+            let enforcement_mode = match network_policy.ssrf_enforcement {
+                crate::config::SsrfEnforcementMode::None => "none",
+                crate::config::SsrfEnforcementMode::Monitor => "monitor",
+                crate::config::SsrfEnforcementMode::Block => "block",
+            };
+            cmd.env("FRANKEN_ENGINE_NETWORK_SSRF_ENFORCEMENT", enforcement_mode);
+
+            cmd.env(
+                "FRANKEN_ENGINE_NETWORK_SSRF_PROTECTION_ENABLED",
+                if network_policy.ssrf_protection_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FRANKEN_ENGINE_NETWORK_BLOCK_CLOUD_METADATA",
+                if network_policy.block_cloud_metadata {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
+            .env(
+                "FRANKEN_ENGINE_NETWORK_AUDIT_BLOCKED",
+                if network_policy.audit_blocked_requests {
+                    "1"
+                } else {
+                    "0"
+                },
+            );
+
+            // Serialize allowlist as JSON for structured parsing by the engine.
+            if !network_policy.allowlist.is_empty() {
+                let allowlist_json = serde_json::to_string(&network_policy.allowlist)
+                    .unwrap_or_else(|_| "[]".to_string());
+                cmd.env("FRANKEN_ENGINE_NETWORK_ALLOWLIST", allowlist_json);
+            }
+
+            (telemetry_handle, cmd)
         };
-
-        let mut cmd = Command::new(&bin_path);
-        cmd.arg("run")
-            .arg(app_path)
-            .arg("--policy")
-            .arg(policy_mode)
-            .env("FRANKEN_ENGINE_POLICY_PAYLOAD", &serialized_config)
-            .env("FRANKEN_ENGINE_TELEMETRY_SOCKET", &socket_path);
-
-        // Wire network policy enforcement to spawned engine process (bd-3pogm).
-        // These env vars provide a fast path for the engine to read policy without
-        // parsing the full TOML config payload.
-        let network_policy = &config.security.network_policy;
-
-        // SSRF enforcement mode: none, monitor, or block
-        let enforcement_mode = match network_policy.ssrf_enforcement {
-            crate::config::SsrfEnforcementMode::None => "none",
-            crate::config::SsrfEnforcementMode::Monitor => "monitor",
-            crate::config::SsrfEnforcementMode::Block => "block",
-        };
-        cmd.env("FRANKEN_ENGINE_NETWORK_SSRF_ENFORCEMENT", enforcement_mode);
-
-        cmd.env(
-            "FRANKEN_ENGINE_NETWORK_SSRF_PROTECTION_ENABLED",
-            if network_policy.ssrf_protection_enabled {
-                "1"
-            } else {
-                "0"
-            },
-        )
-        .env(
-            "FRANKEN_ENGINE_NETWORK_BLOCK_CLOUD_METADATA",
-            if network_policy.block_cloud_metadata {
-                "1"
-            } else {
-                "0"
-            },
-        )
-        .env(
-            "FRANKEN_ENGINE_NETWORK_AUDIT_BLOCKED",
-            if network_policy.audit_blocked_requests {
-                "1"
-            } else {
-                "0"
-            },
-        );
-
-        // Serialize allowlist as JSON for structured parsing by the engine.
-        if !network_policy.allowlist.is_empty() {
-            let allowlist_json = serde_json::to_string(&network_policy.allowlist)
-                .unwrap_or_else(|_| "[]".to_string());
-            cmd.env("FRANKEN_ENGINE_NETWORK_ALLOWLIST", allowlist_json);
-        }
 
         #[cfg(feature = "engine")]
         let (
@@ -11770,13 +11821,17 @@ impl EngineDispatcher {
             .transpose()?;
         let mut admitted_fleet_policy = fleet_policy.cloned();
         let mut admitted_operator_policy = trust_requirements.operator_fleet_policy.clone();
-        recheck_native_run_controls(
+        // `native_session_admission_ticket` just verified the drain fence for
+        // every control scope above, and `NativeSessionInventoryGuard::admit`
+        // re-checks the fence and generation atomically inside SQLite.
+        recheck_native_run_controls_with_options(
             project_paths,
             config,
             trust_requirements,
             &mut admitted_fleet_policy,
             &mut admitted_operator_policy,
             &AtomicBool::new(false),
+            false,
         )
         .map_err(|trigger| {
             if trigger.kind == NativeRunControlKind::ActivationInterrupted {
@@ -11925,6 +11980,13 @@ impl EngineDispatcher {
             .to_actionable()
         })?;
         let expected_evidence_capture = runtime_evidence_grant.capture.clone();
+        // Snapshot the advisory control-hint pages before inventory admission
+        // so even a drain fence published between admission and monitor spawn
+        // wakes the observer immediately on its first wait check.
+        let control_wakeup = NativeRunControlWakeup::for_projects(
+            project_paths.project_root(),
+            trust_requirements.operator_fleet_project_root.as_deref(),
+        );
         // Own the captured nonce before any fallible protocol or containment
         // setup. Ordinary startup failures now persist NotSpawned/NotStarted
         // instead of leaving a historical capture with unknown supervision.
@@ -12184,6 +12246,7 @@ impl EngineDispatcher {
             config.clone(),
             trust_requirements.clone(),
             fleet_policy.cloned(),
+            control_wakeup,
         )
         .map_err(|error| {
             EngineDispatchError::EngineExecutionError {
@@ -12420,6 +12483,7 @@ impl EngineDispatcher {
             }
         };
 
+        let mut poll_sleep = std::time::Duration::from_micros(100);
         let status = loop {
             if let Ok(error) = durable_failures.try_recv() {
                 let cleanup = native_session_cleanup_failure(
@@ -12447,7 +12511,8 @@ impl EngineDispatcher {
                     break status;
                 }
                 Ok(NativeSessionPoll::Running) => {
-                    thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                    thread::sleep(poll_sleep);
+                    poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
                 }
                 Ok(NativeSessionPoll::Interrupted {
                     control_trigger,

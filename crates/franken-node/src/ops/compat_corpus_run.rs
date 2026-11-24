@@ -1945,18 +1945,31 @@ pub fn run_corpus(
     let current_exe =
         crate::resolve_product_cli_executable().context("resolve current executable")?;
 
+    // Isolate protected native-session evidence in a run-scoped state home
+    // outside every workspace/case root so repeated 560-case corpus sweeps
+    // never exhaust the operator's global `~/.local/state/franken-node` store.
+    let state_home = tempfile::TempDir::new().context("create corpus state home dir")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(state_home.path(), std::fs::Permissions::from_mode(0o700))
+            .context("secure corpus state home dir")?;
+    }
+
     // Bootstrap ONE fail-closed-valid workspace template exactly as an
     // operator would (`franken-node init`), then clone it into every leg. The
     // franken leg needs this for config validation, while the reference legs
     // need the same visible filesystem scaffold so guest `readdir('.')`
     // observations compare runtime semantics rather than different sandboxes.
     let template = tempfile::TempDir::new().context("create workspace template dir")?;
-    let init = run_probe(
-        Command::new(&current_exe)
-            .args(["init", "--profile", "balanced", "--out-dir", "."])
-            .current_dir(template.path()),
-    )
-    .context("bootstrap workspace template via init")?;
+    let mut init_cmd = Command::new(&current_exe);
+    init_cmd
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(template.path())
+        .env("XDG_STATE_HOME", state_home.path());
+    #[cfg(windows)]
+    init_cmd.env("LOCALAPPDATA", state_home.path());
+    let init = run_probe(&mut init_cmd).context("bootstrap workspace template via init")?;
     if !init.status.success() {
         bail!(
             "workspace template init failed (exit {:?}): {}",
@@ -2091,7 +2104,10 @@ pub fn run_corpus(
             .arg("franken-engine")
             .arg("--engine-bin")
             .arg(&current_exe)
-            .current_dir(&franken_dir);
+            .current_dir(&franken_dir)
+            .env("XDG_STATE_HOME", state_home.path());
+        #[cfg(windows)]
+        franken_cmd.env("LOCALAPPDATA", state_home.path());
         configure_runtime_leg_environment(&mut franken_cmd, case.suppress_runtime_warnings);
         if process_authority.is_some() {
             configure_child_process_leg_environment(&mut franken_cmd);

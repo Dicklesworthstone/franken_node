@@ -133,7 +133,7 @@ fn validate_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_private_journal_directory(root: &Path) -> Result<PathBuf> {
+fn create_private_journal_directory(root: &Path) -> Result<(PathBuf, bool)> {
     validate_private_directory(root)?;
     let directory = root.join(NATIVE_SESSION_EFFECT_JOURNAL_DIRECTORY);
     let mut builder = std::fs::DirBuilder::new();
@@ -142,13 +142,13 @@ fn create_private_journal_directory(root: &Path) -> Result<PathBuf> {
         use std::os::unix::fs::DirBuilderExt as _;
         builder.mode(0o700);
     }
-    match builder.create(&directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+    let created = match builder.create(&directory) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(error).context("create private native-session journal directory"),
-    }
+    };
     validate_private_directory(&directory)?;
-    Ok(directory)
+    Ok((directory, created))
 }
 
 fn create_private_journal_file(path: &Path) -> Result<File> {
@@ -224,7 +224,7 @@ impl NativeSessionEffectJournalWriter {
         {
             bail!("native-session journal authority does not match its admission");
         }
-        let directory = create_private_journal_directory(protected_root)?;
+        let (directory, created_directory) = create_private_journal_directory(protected_root)?;
         let path = native_session_effect_journal_path(protected_root, session_nonce);
         let file = create_private_journal_file(&path)?;
         let mut writer = Self {
@@ -252,12 +252,14 @@ impl NativeSessionEffectJournalWriter {
             },
         )?;
         writer.append_record(header)?;
-        // The header, newly published file, and newly created directory must
-        // all survive before this writer can authorize any provider call.
+        // The header, newly published file, and any newly created directory
+        // must all survive before this writer can authorize any provider call.
         #[cfg(unix)]
         {
             File::open(&directory)?.sync_all()?;
-            File::open(protected_root)?.sync_all()?;
+            if created_directory {
+                File::open(protected_root)?.sync_all()?;
+            }
         }
         Ok(writer)
     }

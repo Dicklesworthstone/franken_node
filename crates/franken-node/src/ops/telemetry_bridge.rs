@@ -414,6 +414,7 @@ pub struct TelemetryRuntimeHandle {
     connection_worker_panicked: Arc<AtomicBool>,
     listener_handle: Option<JoinHandle<()>>,
     persistence_handle: Option<JoinHandle<()>>,
+    persistence_done: Option<Receiver<()>>,
 }
 
 impl TelemetryRuntimeHandle {
@@ -518,6 +519,7 @@ impl TelemetryRuntimeHandle {
         }
 
         // Join persistence thread (drains remaining queue items)
+        let persistence_done = self.persistence_done.take();
         if let Some(handle) = self.persistence_handle.take() {
             // Wait up to deadline for persistence to finish
             let remaining = deadline.saturating_sub(drain_start.elapsed());
@@ -525,16 +527,25 @@ impl TelemetryRuntimeHandle {
                 false
             } else if remaining.is_zero() {
                 true
+            } else if let Some(done_rx) = persistence_done {
+                matches!(
+                    done_rx.recv_timeout(remaining),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                )
             } else {
                 let park_start = Instant::now();
+                let mut poll_sleep = Duration::from_micros(100);
                 loop {
                     if handle.is_finished() {
                         break false;
                     }
-                    if park_start.elapsed() >= remaining {
+                    let left = remaining.saturating_sub(park_start.elapsed());
+                    if left.is_zero() {
                         break true;
                     }
-                    thread::sleep(timeouts::TELEMETRY_WORKER_JOIN_POLL_INTERVAL);
+                    thread::sleep(poll_sleep.min(left));
+                    poll_sleep =
+                        (poll_sleep * 2).min(timeouts::TELEMETRY_WORKER_JOIN_POLL_INTERVAL);
                 }
             };
 
@@ -648,14 +659,18 @@ impl TelemetryRuntimeHandle {
                     true
                 } else {
                     let park_start = Instant::now();
+                    let mut poll_sleep = Duration::from_micros(100);
                     loop {
                         if handle.is_finished() {
                             break false;
                         }
-                        if park_start.elapsed() >= remaining_time {
+                        let left = remaining_time.saturating_sub(park_start.elapsed());
+                        if left.is_zero() {
                             break true;
                         }
-                        thread::sleep(timeouts::TELEMETRY_WORKER_JOIN_POLL_INTERVAL);
+                        thread::sleep(poll_sleep.min(left));
+                        poll_sleep =
+                            (poll_sleep * 2).min(timeouts::TELEMETRY_WORKER_JOIN_POLL_INTERVAL);
                     }
                 };
 
@@ -835,7 +850,9 @@ impl TelemetryBridge {
         // failed start path cannot briefly detach a worker without a handle.
         let persistence_state = Arc::clone(&state);
         let persistence_abort_for_worker = Arc::clone(&persistence_abort);
+        let (persistence_done_tx, persistence_done_rx) = mpsc::sync_channel::<()>(1);
         let persistence_handle = thread::spawn(move || {
+            let _done_signal = persistence_done_tx;
             Self::run_persistence_loop(
                 receiver,
                 adapter,
@@ -884,6 +901,7 @@ impl TelemetryBridge {
             connection_worker_panicked,
             listener_handle: Some(listener_handle),
             persistence_handle: Some(persistence_handle),
+            persistence_done: Some(persistence_done_rx),
         })
     }
 
