@@ -20,6 +20,8 @@
 //!   product-oracle results.
 //! - INV-NVO-DETERMINISTIC: Oracle results are deterministic for the same
 //!   inputs; BTreeMap used for ordered output.
+//! - Recorded checks and votes retain their original evidence. Only registered
+//!   runtimes participate, and their cohort is fixed once measurement starts.
 
 use crate::push_bounded;
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,9 @@ pub mod error_codes {
     pub const ERR_NVO_RUNTIME_NOT_FOUND: &str = "ERR_NVO_RUNTIME_NOT_FOUND";
     pub const ERR_NVO_CHECK_NOT_FOUND: &str = "ERR_NVO_CHECK_NOT_FOUND";
     pub const ERR_NVO_CHECK_ALREADY_RUNNING: &str = "ERR_NVO_CHECK_ALREADY_RUNNING";
+    pub const ERR_NVO_CHECK_ALREADY_RECORDED: &str = "ERR_NVO_CHECK_ALREADY_RECORDED";
+    pub const ERR_NVO_REGISTRY_FROZEN: &str = "ERR_NVO_REGISTRY_FROZEN";
+    pub const ERR_NVO_CONFLICTING_VOTE: &str = "ERR_NVO_CONFLICTING_VOTE";
     pub const ERR_NVO_DIVERGENCE_UNRESOLVED: &str = "ERR_NVO_DIVERGENCE_UNRESOLVED";
     pub const ERR_NVO_POLICY_MISSING: &str = "ERR_NVO_POLICY_MISSING";
     pub const ERR_NVO_INVALID_RECEIPT: &str = "ERR_NVO_INVALID_RECEIPT";
@@ -506,7 +511,21 @@ impl RuntimeOracle {
         oracle
     }
 
-    /// Register a reference runtime for comparison.
+    /// Configure the participant cohort before recording any measurement.
+    /// A fresh oracle is required for a different cohort: otherwise changing
+    /// membership could rewrite a report's executor set or quorum denominator.
+    fn ensure_registry_mutable(&self) -> Result<(), OracleError> {
+        if !self.checks.is_empty() || !self.voting_results.is_empty() {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_REGISTRY_FROZEN,
+                message: "runtime membership is fixed after the first recorded check or vote"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Register a reference runtime before the first recorded check or vote.
     pub fn register_runtime(&mut self, entry: RuntimeEntry) -> Result<(), OracleError> {
         if self.runtimes.contains_key(&entry.runtime_id) {
             return Err(OracleError {
@@ -514,6 +533,7 @@ impl RuntimeOracle {
                 message: format!("runtime '{}' already registered", entry.runtime_id),
             });
         }
+        self.ensure_registry_mutable()?;
         // K-9 (EngineIdentity) guard: reject a DISTINCT runtime_id that resolves to the SAME
         // executor fingerprint as an already-registered runtime. Without this, the same executor
         // registered under two ids would emit byte-identical outputs and fake "agreement".
@@ -539,8 +559,9 @@ impl RuntimeOracle {
         Ok(())
     }
 
-    /// Remove a runtime from the registry.
+    /// Remove a runtime before the first recorded check or vote.
     pub fn remove_runtime(&mut self, runtime_id: &str) -> Result<RuntimeEntry, OracleError> {
+        self.ensure_registry_mutable()?;
         self.runtimes.remove(runtime_id).ok_or_else(|| OracleError {
             code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
             message: format!("runtime '{runtime_id}' not found"),
@@ -556,7 +577,8 @@ impl RuntimeOracle {
     ///
     /// `runtime_outputs` provides the pre-computed output from each runtime
     /// for the given boundary check. The oracle compares outputs to determine
-    /// if they agree or diverge.
+    /// if they agree or diverge. Every participant must be registered, and a
+    /// completed check identifier cannot be reused to replace its evidence.
     pub fn run_cross_check(
         &mut self,
         check_id: &str,
@@ -596,12 +618,26 @@ impl RuntimeOracle {
             });
         }
 
-        self.active_checks.insert(check_id.to_string(), true);
+        if self.checks.contains_key(check_id) {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_CHECK_ALREADY_RECORDED,
+                message: format!("check '{check_id}' already has recorded evidence"),
+            });
+        }
+
+        if let Some(runtime_id) = runtime_outputs
+            .keys()
+            .find(|runtime_id| !self.runtimes.contains_key(*runtime_id))
+        {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
+                message: format!("runtime '{runtime_id}' is not a registered check participant"),
+            });
+        }
 
         let quorum_required =
             quorum_required_for(self.runtimes.len(), self.quorum_threshold_percent)?;
         if runtime_outputs.len() < quorum_required {
-            self.active_checks.remove(check_id);
             return Err(OracleError {
                 code: error_codes::ERR_NVO_QUORUM_FAILED,
                 message: format!(
@@ -612,6 +648,8 @@ impl RuntimeOracle {
                 ),
             });
         }
+
+        self.active_checks.insert(check_id.to_string(), true);
 
         let mut details = BTreeMap::new();
         details.insert("check_id".to_string(), check_id.to_string());
@@ -691,7 +729,8 @@ impl RuntimeOracle {
         divergence
     }
 
-    /// Submit a runtime's vote for a cross-check.
+    /// Submit a runtime's vote for a cross-check. Identical delivery retries
+    /// are idempotent; conflicting retries cannot overwrite recorded evidence.
     pub fn vote(
         &mut self,
         check_id: &str,
@@ -717,7 +756,24 @@ impl RuntimeOracle {
                 agreeing_voters: 0,
             });
 
+        if let Some(original) = entry.votes.get(runtime_id) {
+            if original == &output {
+                return Ok(());
+            }
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_CONFLICTING_VOTE,
+                message: format!(
+                    "runtime '{runtime_id}' already recorded a different vote for check '{check_id}'"
+                ),
+            });
+        }
         entry.votes.insert(runtime_id.to_string(), output);
+        // A previous tally describes a different set of observations. Do not
+        // expose its cached verdict until this new vote has been tallied.
+        entry.quorum_reached = false;
+        entry.quorum_threshold = 0;
+        entry.total_voters = 0;
+        entry.agreeing_voters = 0;
         Ok(())
     }
 
@@ -736,6 +792,16 @@ impl RuntimeOracle {
             return Err(OracleError {
                 code: error_codes::ERR_NVO_NO_RUNTIMES,
                 message: "no runtimes registered".to_string(),
+            });
+        }
+        if let Some(runtime_id) = entry
+            .votes
+            .keys()
+            .find(|runtime_id| !self.runtimes.contains_key(*runtime_id))
+        {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
+                message: format!("runtime '{runtime_id}' is not a registered voting participant"),
             });
         }
         let quorum_required = quorum_required_for(total, self.quorum_threshold_percent)?;
@@ -1234,6 +1300,152 @@ mod tests {
             }
             CheckOutcome::Agree { .. } => unreachable!("expected divergence"),
         }
+    }
+
+    #[test]
+    fn cross_check_rejects_unregistered_outputs_before_recording_evidence() {
+        let mut oracle = RuntimeOracle::new("trace-membership", 100);
+        oracle.register_runtime(sample_runtime("node")).unwrap();
+        oracle.register_runtime(sample_runtime("native")).unwrap();
+        let before = oracle.event_log.clone();
+        for outputs in [
+            BTreeMap::from([("ghost-a".into(), vec![1]), ("ghost-b".into(), vec![1])]),
+            BTreeMap::from([("node".into(), vec![1]), ("ghost".into(), vec![1])]),
+            BTreeMap::from([
+                ("node".into(), vec![1]),
+                ("native".into(), vec![1]),
+                ("ghost".into(), vec![1]),
+            ]),
+        ] {
+            let error = oracle
+                .run_cross_check("check-membership", BoundaryScope::IO, b"input", &outputs)
+                .expect_err("unknown participants cannot contribute to a cross-runtime quorum");
+            assert_eq!(error.code, error_codes::ERR_NVO_RUNTIME_NOT_FOUND);
+            assert!(oracle.checks.is_empty());
+            assert!(oracle.active_checks.is_empty());
+            assert_eq!(oracle.event_log, before);
+        }
+
+        let outputs = BTreeMap::from([("node".into(), vec![1]), ("native".into(), vec![1])]);
+        oracle
+            .run_cross_check("check-membership", BoundaryScope::IO, b"input", &outputs)
+            .expect("a corrected request can use the rejected check identifier");
+    }
+
+    #[test]
+    fn recorded_cross_check_cannot_be_replaced_with_later_agreement() {
+        let mut oracle = RuntimeOracle::new("trace-immutable-check", 100);
+        oracle.register_runtime(sample_runtime("node")).unwrap();
+        oracle.register_runtime(sample_runtime("native")).unwrap();
+        let divergent = BTreeMap::from([("node".into(), vec![1]), ("native".into(), vec![2])]);
+        let original = oracle
+            .run_cross_check("check", BoundaryScope::Security, b"original", &divergent)
+            .unwrap();
+        let agreeing = BTreeMap::from([("node".into(), vec![1]), ("native".into(), vec![1])]);
+        assert!(
+            oracle
+                .run_cross_check("check", BoundaryScope::IO, b"substituted", &agreeing)
+                .is_err(),
+            "completed check identifiers must preserve their original evidence"
+        );
+        assert_eq!(oracle.checks["check"], original);
+        assert!(oracle.active_checks.is_empty());
+        oracle
+            .run_cross_check("new-check", BoundaryScope::IO, b"new", &agreeing)
+            .expect("a new measurement gets a new identifier");
+    }
+
+    #[test]
+    fn runtime_membership_cannot_change_after_evidence_is_recorded() {
+        for use_votes in [false, true] {
+            let mut oracle = RuntimeOracle::new("trace-frozen-membership", 100);
+            oracle.register_runtime(sample_runtime("node")).unwrap();
+            oracle.register_runtime(sample_runtime("native")).unwrap();
+            if use_votes {
+                oracle.vote("check", "node", vec![1]).unwrap();
+            } else {
+                oracle
+                    .run_cross_check(
+                        "check",
+                        BoundaryScope::IO,
+                        b"input",
+                        &BTreeMap::from([("node".into(), vec![1]), ("native".into(), vec![2])]),
+                    )
+                    .unwrap();
+            }
+            let expected = oracle.runtimes.clone();
+            assert!(
+                oracle.remove_runtime("native").is_err(),
+                "removing an executor must not shrink a recorded quorum denominator"
+            );
+            assert!(
+                oracle.register_runtime(sample_runtime("later")).is_err(),
+                "a report's executor set cannot change after measurement starts"
+            );
+            assert_eq!(oracle.runtimes, expected);
+            if use_votes {
+                let tally = oracle.tally_votes("check").unwrap();
+                assert_eq!(tally.quorum_threshold, 2);
+                assert!(!tally.quorum_reached);
+            }
+        }
+    }
+
+    #[test]
+    fn conflicting_vote_cannot_rewrite_a_tallied_disagreement() {
+        let mut oracle = RuntimeOracle::new("trace-immutable-votes", 100);
+        oracle.register_runtime(sample_runtime("node")).unwrap();
+        oracle.register_runtime(sample_runtime("native")).unwrap();
+        oracle.vote("check", "node", vec![1]).unwrap();
+        oracle.vote("check", "native", vec![2]).unwrap();
+        let original = oracle.tally_votes("check").unwrap();
+        assert!(!original.quorum_reached);
+        oracle
+            .vote("check", "native", vec![2])
+            .expect("identical delivery retries are idempotent");
+        assert!(
+            oracle.vote("check", "native", vec![1]).is_err(),
+            "a conflicting duplicate vote must not erase a measured disagreement"
+        );
+        assert_eq!(oracle.tally_votes("check").unwrap(), original);
+    }
+
+    #[test]
+    fn newly_recorded_vote_invalidates_cached_tally_until_retallied() {
+        let mut oracle = RuntimeOracle::new("trace-tally-cache", 66);
+        for id in ["node", "bun", "native"] {
+            oracle.register_runtime(sample_runtime(id)).unwrap();
+        }
+        oracle.vote("check", "node", vec![1]).unwrap();
+        oracle.vote("check", "bun", vec![1]).unwrap();
+        assert!(oracle.tally_votes("check").unwrap().quorum_reached);
+        oracle.vote("check", "native", vec![2]).unwrap();
+        let pending = &oracle.voting_results["check"];
+        assert!(!pending.quorum_reached);
+        assert_eq!(pending.agreeing_voters, 0);
+        assert_eq!(pending.total_voters, 0);
+        let final_tally = oracle.tally_votes("check").unwrap();
+        assert_eq!(final_tally.total_voters, 3);
+        assert_eq!(final_tally.agreeing_voters, 2);
+        assert!(final_tally.quorum_reached);
+    }
+
+    #[test]
+    fn tally_rejects_unregistered_votes_even_in_retained_state() {
+        let mut oracle = RuntimeOracle::new("trace-retained-membership", 100);
+        oracle.register_runtime(sample_runtime("node")).unwrap();
+        oracle.register_runtime(sample_runtime("native")).unwrap();
+        oracle.vote("check", "node", vec![1]).unwrap();
+        oracle
+            .voting_results
+            .get_mut("check")
+            .unwrap()
+            .votes
+            .insert("ghost".into(), vec![1]);
+        assert_eq!(
+            oracle.tally_votes("check").unwrap_err().code,
+            error_codes::ERR_NVO_RUNTIME_NOT_FOUND
+        );
     }
 
     // 9) Duplicate active check ID rejected
