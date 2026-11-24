@@ -340,19 +340,21 @@ def _normalize_ru_maxrss_kb(raw_maxrss: int) -> int:
 
 
 def _run_once_with_rusage(
-    argv: list[str], cwd: Path
+    argv: list[str], cwd: Path, env: dict[str, str] | None = None
 ) -> tuple[float, int, subprocess.CompletedProcess[bytes]]:
     """Execute `argv` and capture wall-clock ms + child peak RSS (`ru_maxrss` KiB)."""
     if not hasattr(os, "wait4"):
         start = time.perf_counter_ns()
-        completed = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=RUN_TIMEOUT_SECONDS)
+        completed = subprocess.run(
+            argv, cwd=cwd, env=env, capture_output=True, timeout=RUN_TIMEOUT_SECONDS
+        )
         elapsed_ms = (time.perf_counter_ns() - start) / 1e6
         return elapsed_ms, 0, completed
 
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         timed_out = threading.Event()
         start = time.perf_counter_ns()
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=out_f, stderr=err_f)
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out_f, stderr=err_f)
 
         def _kill_on_timeout() -> None:
             timed_out.set()
@@ -396,10 +398,17 @@ def _run_once(argv: list[str], cwd: Path) -> tuple[float, subprocess.CompletedPr
     return elapsed_ms, completed
 
 
-def _setup_workspace(workspace: Path, binary: Path, policy: str, loopback_port: int) -> None:
+def _setup_workspace(
+    workspace: Path,
+    binary: Path,
+    policy: str,
+    loopback_port: int,
+    env: dict[str, str] | None = None,
+) -> None:
     init = subprocess.run(
         [str(binary), "init", "--profile", policy, "--out-dir", "."],
         cwd=workspace,
+        env=env,
         capture_output=True,
         timeout=RUN_TIMEOUT_SECONDS,
     )
@@ -606,15 +615,23 @@ def measure(
     warmup: int,
     bun: str | None = None,
 ) -> tuple[dict[str, Any], bytes | None]:
-    with tempfile.TemporaryDirectory(prefix="fn-bench-vs-node-") as tmp:
+    with (
+        tempfile.TemporaryDirectory(prefix="fn-bench-vs-node-") as tmp,
+        tempfile.TemporaryDirectory(prefix="fn-bench-state-") as state_tmp,
+    ):
         workspace = Path(tmp)
+        state_home = Path(state_tmp)
+        os.chmod(state_home, 0o700)
+        franken_env = {**os.environ, "XDG_STATE_HOME": str(state_home)}
         with ThreadingHTTPServer(("127.0.0.1", 0), _QuietLoopbackHandler) as httpd:
             loopback_port = int(httpd.server_address[1])
             server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             server_thread.start()
             try:
-                _setup_workspace(workspace, binary, policy, loopback_port)
-                measured = _measure_in(workspace, binary, node, policy, runs, warmup, bun=bun)
+                _setup_workspace(workspace, binary, policy, loopback_port, env=franken_env)
+                measured = _measure_in(
+                    workspace, binary, node, policy, runs, warmup, bun=bun, franken_env=franken_env
+                )
                 key_path = workspace / ".franken-node" / "keys" / "receipt-signing.key"
                 workspace_key = key_path.read_bytes() if key_path.is_file() else None
                 return measured, workspace_key
@@ -631,6 +648,7 @@ def _measure_in(
     runs: int,
     warmup: int,
     bun: str | None = None,
+    franken_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
     load_before = os.getloadavg()
@@ -658,7 +676,8 @@ def _measure_in(
         cold_order = rng.sample(active_runtimes, k=len(active_runtimes))
         cold_runs: dict[str, tuple[float, int, subprocess.CompletedProcess[bytes]]] = {}
         for runtime in cold_order:
-            cold_runs[runtime] = _run_once_with_rusage(argvs[runtime], workspace)
+            rt_env = franken_env if runtime == "franken-node" else None
+            cold_runs[runtime] = _run_once_with_rusage(argvs[runtime], workspace, env=rt_env)
 
         _, _, reference = cold_runs["node"]
         _, _, candidate = cold_runs["franken-node"]
@@ -701,8 +720,9 @@ def _measure_in(
             if iteration >= warmup:
                 interleave_schedule.append(perm)
             for runtime in perm:
+                rt_env = franken_env if runtime == "franken-node" else None
                 elapsed_ms, maxrss_kb, completed = _run_once_with_rusage(
-                    argvs[runtime], workspace
+                    argvs[runtime], workspace, env=rt_env
                 )
                 if completed.returncode != 0 or completed.stdout != reference.stdout:
                     raise RuntimeError(

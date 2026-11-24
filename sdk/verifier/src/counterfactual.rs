@@ -815,6 +815,14 @@ fn bind_promotion_report_context(
     context: &CounterfactualBaseline,
 ) -> Result<(), CounterfactualPromotionError> {
     let baseline = &context.baseline;
+    // ReplayBundle uses `skip_serializing_if = "Vec::is_empty"` on
+    // `evidence_refs`, while promotion reports and receipts always serialize an
+    // array (`[]` when empty). Normalize only an omitted baseline field to `[]`.
+    let empty_refs = Value::Array(Vec::new());
+    let expected_evidence_refs = context
+        .document
+        .get("evidence_refs")
+        .unwrap_or(&empty_refs);
     promotion_binding(
         report["bundle_id"].as_str() == Some(baseline.bundle_id.as_str())
             && report["incident_id"].as_str() == Some(baseline.incident_id.as_str())
@@ -822,7 +830,7 @@ fn bind_promotion_report_context(
             && report["bundle_integrity_hash"].as_str() == Some(baseline.integrity_hash.as_str())
             && report["original_policy"].as_str() == Some(baseline.policy_version.as_str())
             && report["counterfactual_policy"] == report["policy"]
-            && report.get("evidence_refs") == context.document.get("evidence_refs"),
+            && report.get("evidence_refs") == Some(expected_evidence_refs),
         "baseline",
     )
 }
@@ -1702,7 +1710,10 @@ mod tests {
             "original_policy": baseline["policy_version"],
             "counterfactual_policy": policy,
             "executor": "synthetic",
-            "evidence_refs": baseline["evidence_refs"],
+            "evidence_refs": baseline
+                .get("evidence_refs")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
             "total_decisions": total,
             "changed_decisions": changed,
             "severity_delta": severity,

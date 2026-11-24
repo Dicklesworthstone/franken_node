@@ -635,6 +635,27 @@ else:
         self.assertEqual(report["verdict"], "FAIL")
         self.assertIn("candidate binary changed during campaign", report["provenance_errors"])
 
+    def test_candidate_receives_isolated_state_home_outside_project(self):
+        self.native.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('candidate-state-check 1')\n"
+            "    raise SystemExit(0)\n"
+            "state_home = pathlib.Path(os.environ['XDG_STATE_HOME']).resolve()\n"
+            "cwd = pathlib.Path.cwd().resolve()\n"
+            "assert state_home.is_dir()\n"
+            "assert not state_home.is_relative_to(cwd)\n"
+            "if sys.argv[1] == 'init':\n"
+            "    (state_home / 'init.marker').write_text('ok')\n"
+            "    raise SystemExit(0)\n"
+            "assert (state_home / 'init.marker').read_text() == 'ok'\n"
+            "print(42)\n"
+        )
+        report = self.run_cases(case())
+        self.assertEqual(report["verdict"], "PASS", report)
+        self.assertTrue((self.root / "artifacts/answer/candidate/state/init.marker").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

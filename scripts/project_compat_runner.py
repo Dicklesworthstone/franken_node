@@ -406,14 +406,21 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
     if bun is not None:
         commands["bun"] = [str(bun), entry, *args]
     stdin = case.get("stdin")
+    candidate_env: dict[str, str] | None = None
     for runtime in runtimes:
         if runtime == "candidate":
+            # Isolate protected native-session evidence outside the guest
+            # project root so repeated multi-file corpus sweeps do not exhaust
+            # the operator's global `~/.local/state/franken-node` store.
+            state_home = (directory / "candidate" / "state").resolve()
+            state_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+            candidate_env = {**os.environ, "XDG_STATE_HOME": str(state_home)}
             # Retain independent reference observations even when candidate
             # initialization fails. Setup failure remains an ERROR, never a
             # successful comparison or a substitute native execution.
             native_cwd = directory / "candidate" / "project"
             setup = supervise([str(binary), "init", "--profile", policy, "--out-dir", "."],
-                              directory / "setup", cwd=native_cwd, **limits)
+                              directory / "setup", cwd=native_cwd, env=candidate_env, **limits)
             result["setup"] = observation(setup)
             if setup["outcome"] != "completed":
                 result["detail"] = "candidate initialization failed"
@@ -429,7 +436,9 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
         command = commands[runtime]
         receipt = supervise(command, directory / runtime / "execution",
                             cwd=directory / runtime / "project",
-                            stdin_data=stdin.encode("utf-8") if stdin is not None else None, **limits)
+                            stdin_data=stdin.encode("utf-8") if stdin is not None else None,
+                            env=candidate_env if runtime == "candidate" else None,
+                            **limits)
         result[runtime] = observation(receipt)
         result[runtime]["differences"] = differences(receipt, case["expected"])
         result[runtime]["files"] = {}

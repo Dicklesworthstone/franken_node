@@ -1043,7 +1043,7 @@ function promotedReport(baseline, options = {}) {
     timestamp: promotionTimestamp, bundle_id: baseline.bundle_id, incident_id: baseline.incident_id,
     bundle_created_at: baseline.created_at, bundle_integrity_hash: baseline.integrity_hash,
     policy, original_policy: baseline.policy_version, counterfactual_policy: policy, executor,
-    evidence_refs: baseline.evidence_refs, total_decisions: total, changed_decisions: changed,
+    evidence_refs: baseline.evidence_refs ?? [], total_decisions: total, changed_decisions: changed,
     severity_delta: severity, decision_deltas: output.divergence_points ?? [],
     counterfactual_digest: "sha256:" + hash("incident-counterfactual-report/v2\nexecutor=" + executor + "\n" + canonical(output)),
     counterfactual: output,
