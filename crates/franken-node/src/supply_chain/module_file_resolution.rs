@@ -901,14 +901,6 @@ impl Resolver {
         })
     }
 
-    fn selected_path(&self, directory: &str, request: &str) -> Result<(String, String)> {
-        if self.url_lookup {
-            metadata_url_path(directory, request)
-        } else {
-            url_path(directory, request)
-        }
-    }
-
     fn request(
         &mut self,
         directory: &str,
@@ -932,7 +924,7 @@ impl Resolver {
             || request.starts_with("../")
         {
             if mode == ResolutionMode::Import {
-                let (path, suffix) = self.selected_path(directory, request)?;
+                let (path, suffix) = module_url_path(directory, request)?;
                 return self.exact(&path, suffix, mode);
             }
             let path = normalize(directory, request)?;
@@ -1059,7 +1051,7 @@ impl Resolver {
                                 .map(|p| (p, String::new()))
                                 .ok_or_else(|| mode.missing(request));
                         }
-                        let (path, suffix) = self.selected_path(&package, &subpath)?;
+                        let (path, suffix) = module_url_path(&package, &subpath)?;
                         if path != package && !path.starts_with(&format!("{package}/")) {
                             return Err(error(
                                 "ERR_INVALID_MODULE_SPECIFIER",
@@ -1116,7 +1108,7 @@ impl Resolver {
         });
         match selection.target_kind {
             TargetKind::PackageRelative => {
-                let (path, suffix) = self.selected_path(directory, &selection.target)?;
+                let (path, suffix) = module_url_path(directory, &selection.target)?;
                 self.exact(
                     &path,
                     if mode == ResolutionMode::Import {
@@ -1181,17 +1173,38 @@ impl Resolver {
         suffix: String,
         mode: ResolutionMode,
     ) -> Result<(String, String)> {
-        let physical = if self.url_lookup {
-            normalize("", path)?
-        } else {
-            path.into()
-        };
+        // The lexical URL determines whether this is a directory request,
+        // even if the path before its final slash names a regular file.
+        // Never read that file's bytes for a rejected directory load.
+        if !self.url_lookup && (path.is_empty() || path.ends_with('/')) {
+            return Err(match mode {
+                ResolutionMode::Import => error(
+                    "ERR_UNSUPPORTED_DIR_IMPORT",
+                    format!("directory import: {path:?}"),
+                ),
+                ResolutionMode::Require => mode.missing(path),
+            });
+        }
+        // module_url_path already proved containment before removing the
+        // synthetic URL root. Empty URL segments are not filesystem parents.
+        // Metadata routes retain their lexical path for later use relative
+        // to the project root. Keep rejecting absolute-looking spellings there.
+        let physical = normalize(
+            "",
+            if self.url_lookup {
+                path
+            } else {
+                path.trim_start_matches('/')
+            },
+        )?;
         let entry = self.probe(&physical)?;
-        if entry.is_file() || self.url_lookup {
+        if self.url_lookup {
             // URL resolution admits missing paths and directories. The final
             // URL step realpaths regular files only, preserving directory and
             // absent-target spellings, including their terminal slash.
             Ok((path.into(), suffix))
+        } else if entry.is_file() {
+            Ok((physical, suffix))
         } else if entry.is_dir() && mode == ResolutionMode::Import {
             Err(error(
                 "ERR_UNSUPPORTED_DIR_IMPORT",
@@ -1429,17 +1442,6 @@ fn normalize(directory: &str, request: &str) -> Result<String> {
     }
     Ok(path)
 }
-fn url_path(directory: &str, request: &str) -> Result<(String, String)> {
-    // WHATWG URL parsing removes trailing ASCII space from the input.
-    // Controls are already refused by request/target admission. CommonJS
-    // literal paths do not pass through this URL-resolution path.
-    let request = request.trim_end_matches(' ');
-    let split = request.find(['?', '#']).unwrap_or(request.len());
-    let (path, suffix) = request.split_at(split);
-    let path = decoded_url_path(path)?;
-    Ok((normalize(directory, &path)?, serialized_url_suffix(suffix)?))
-}
-
 fn decoded_url_path(path: &str) -> Result<String> {
     let mut decoded = Vec::new();
     let mut bytes = path.bytes();
@@ -1471,7 +1473,7 @@ fn decoded_url_path(path: &str) -> Result<String> {
 
 /// A synthetic URL origin makes relative resolution independent of the host
 /// root. Keep URL empty segments, unlike canonical physical probe paths.
-fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)> {
+fn module_url_path(directory: &str, request: &str) -> Result<(String, String)> {
     const ROOT: &str = "/__franken_node_captured_project__/";
     // WHATWG trims trailing spaces from the whole input, not from the path
     // before a query or fragment. Match that before checking dot segments.
@@ -1504,12 +1506,17 @@ fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)>
             }
         }
     }
-    let base = url::Url::from_directory_path(Path::new(ROOT).join(directory)).map_err(|_| {
-        error(
-            "ERR_INVALID_MODULE_SPECIFIER",
-            "invalid captured URL origin",
-        )
-    })?;
+    let mut base = url::Url::parse("file:///").expect("static file URL");
+    base.set_path(ROOT);
+    if !directory.is_empty() {
+        // A physical directory may contain literal %, #, ? or Unicode. Push
+        // raw components so they are encoded as URL path segments exactly once.
+        base.path_segments_mut()
+            .expect("file URL supports path segments")
+            .pop_if_empty()
+            .extend(directory.split('/'))
+            .push("");
+    }
     let url = base
         .join(request)
         .map_err(|_| error("ERR_INVALID_URL", "invalid relative module URL"))?;
@@ -1524,7 +1531,7 @@ fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)>
         return Err(limit());
     }
     // Check containment/reserved components without changing URL spelling.
-    normalize("", &path)?;
+    normalize("", path.trim_start_matches('/'))?;
     let mut suffix = String::new();
     if let Some(query) = url.query() {
         suffix.push('?');
@@ -1538,41 +1545,6 @@ fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)>
         return Err(limit());
     }
     Ok((path, suffix))
-}
-
-/// Serialize the query and fragment of a contained file URL. These are module
-/// identity, not decoded filesystem components or form-encoded search params.
-/// WHATWG's special-query set applies to file: URLs; the fragment set differs
-/// for apostrophes and backticks. Existing percent escapes retain their exact
-/// spelling, so percent-escape case and encoded delimiters remain distinct.
-/// Spec: https://url.spec.whatwg.org/#special-query-percent-encode-set
-///       https://url.spec.whatwg.org/#fragment-percent-encode-set
-fn serialized_url_suffix(suffix: &str) -> Result<String> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut serialized = String::with_capacity(suffix.len().min(MAX_PATH));
-    let mut fragment = false;
-    for byte in suffix.bytes() {
-        if byte == b'#' {
-            fragment = true;
-        }
-        let encode = byte <= b' '
-            || byte >= 0x7f
-            || matches!(byte, b'"' | b'<' | b'>')
-            || (!fragment && byte == b'\'')
-            || (fragment && byte == b'`');
-        let width = if encode { 3 } else { 1 };
-        if serialized.len().saturating_add(width) > MAX_PATH {
-            return Err(limit());
-        }
-        if encode {
-            serialized.push('%');
-            serialized.push(char::from(HEX[usize::from(byte >> 4)]));
-            serialized.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        } else {
-            serialized.push(char::from(byte));
-        }
-    }
-    Ok(serialized)
 }
 
 fn package_parts(request: &str, commonjs: bool) -> Result<(&str, String)> {
@@ -1748,15 +1720,15 @@ mod tests {
     #[test]
     fn import_meta_resolve_url_walk_preserves_space_and_suffix_boundaries() {
         assert_eq!(
-            metadata_url_path("a", "../.. ").unwrap_err().code,
+            module_url_path("a", "../.. ").unwrap_err().code,
             "ERR_MODULE_OUTSIDE_PROJECT"
         );
         assert_eq!(
-            metadata_url_path("", "./a//../missing ").unwrap(),
+            module_url_path("", "./a//../missing ").unwrap(),
             ("a/missing".into(), String::new())
         );
         assert_eq!(
-            metadata_url_path("", "./a/.. ?query#fragment ").unwrap(),
+            module_url_path("", "./a/.. ?query#fragment ").unwrap(),
             ("a/.. ".into(), "?query#fragment".into())
         );
     }
@@ -3541,6 +3513,112 @@ mod tests {
                 .format_hint,
             "commonjs"
         );
+    }
+
+    #[test]
+    fn executable_urls_keep_empty_segments_until_after_dot_segment_resolution() {
+        let root = fixture();
+        put(root.path(), "value.mjs", b"export default 'outer';");
+        put(root.path(), "nested/value.mjs", b"export default 'inner';");
+        put(root.path(), "é %3F#?/app.mjs", b"");
+        put(root.path(), "é %3F#?/value.mjs", b"export default 12;");
+        assert_eq!(
+            run(
+                root.path(),
+                "é %3F#?/app.mjs",
+                "./value.mjs?tag#frag",
+                ResolutionMode::Import
+            )
+            .report
+            .path,
+            "é %3F#?/value.mjs"
+        );
+        for request in [
+            "./nested//../value.mjs?x#y",
+            "./nested//%2e%2e/value.mjs?x#y",
+            "./nested///../../value.mjs?x#y",
+        ] {
+            let found = run(root.path(), "app.js", request, ResolutionMode::Import);
+            assert_eq!(found.report.path, "nested/value.mjs", "{request}");
+            assert_eq!(found.report.url_suffix, "?x#y");
+            assert_eq!(found.source_bytes(), b"export default 'inner';");
+            assert!(!found.report.probes.iter().any(|p| p.path == "value.mjs"));
+        }
+        assert_eq!(
+            run(
+                root.path(),
+                "app.js",
+                ".//value.mjs",
+                ResolutionMode::Import
+            )
+            .report
+            .path,
+            "value.mjs"
+        );
+        // A CommonJS request is a filesystem path, not a URL.
+        assert_eq!(
+            run(
+                root.path(),
+                "app.js",
+                "./nested//../value.mjs",
+                ResolutionMode::Require
+            )
+            .report
+            .path,
+            "value.mjs"
+        );
+    }
+
+    #[test]
+    fn directory_url_refusals_never_capture_the_file_as_executable() {
+        use source_graph::{EdgeState, GraphOptions, capsule, capture};
+
+        let root = fixture();
+        put(root.path(), "value.mjs", b"export default 42;");
+        put(
+            root.path(),
+            "node_modules/tool/package.json",
+            br#"{"exports":"./value.mjs/"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/tool/value.mjs",
+            b"export default 9;",
+        );
+        put(
+            root.path(),
+            "app.mjs",
+            br#"import './value.mjs/?x#y';
+import('./value.mjs/%2e');
+import('./value.mjs/child/%2E%2E');
+import('./missing/');
+import 'tool';
+import 'tool/value.mjs/';"#,
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let report = graph.report();
+        assert_eq!(report.modules.len(), 1);
+        assert!(!report.fully_resolved);
+        assert_eq!(report.edges.len(), 6);
+        for edge in &report.edges {
+            assert_eq!(edge.state, EdgeState::Unresolved);
+            assert!(edge.target.is_none());
+            let code = if edge.specifier.as_deref() == Some("tool/value.mjs/") {
+                "ERR_PACKAGE_PATH_NOT_EXPORTED"
+            } else {
+                "ERR_UNSUPPORTED_DIR_IMPORT"
+            };
+            assert_eq!(edge.error.as_ref().unwrap().code, code);
+        }
+        assert!(!report.probes.iter().any(|p| p.path.ends_with("value.mjs")));
+        assert_eq!(
+            rejected(root.path(), "app.js", "tool", ResolutionMode::Require),
+            "MODULE_NOT_FOUND"
+        );
+        let encoded = capsule::encode(&graph).unwrap();
+        put(root.path(), "value.mjs", b"throw new Error('live');");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), report);
     }
 
     #[test]
