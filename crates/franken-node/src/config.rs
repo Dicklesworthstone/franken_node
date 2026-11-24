@@ -2981,7 +2981,7 @@ fn validate_child_process_execution_policy(
             "{field}.allowed_executables must contain at least one signed executable"
         )));
     }
-    let mut executable_identities = BTreeMap::<&Path, (&str, &str)>::new();
+    let mut executable_identities = BTreeMap::<&Path, (&str, &str, bool)>::new();
     for (alias, executable) in &policy.allowed_executables {
         let alias_is_valid = !alias.is_empty()
             && alias != "."
@@ -3012,17 +3012,26 @@ fn validate_child_process_execution_policy(
                 "{field}.allowed_executables.{alias}.sha256 must be 64 lowercase hexadecimal characters"
             )));
         }
-        if let Some((previous_alias, previous_digest)) =
-            executable_identities.insert(&executable.path, (alias, &executable.sha256))
-            && !bool::from(
+        if let Some((previous_alias, previous_digest, previous_trusted_system)) =
+            executable_identities.insert(
+                &executable.path,
+                (alias, &executable.sha256, executable.trusted_system),
+            )
+        {
+            if !bool::from(
                 previous_digest
                     .as_bytes()
                     .ct_eq(executable.sha256.as_bytes()),
-            )
-        {
-            return Err(ConfigError::ValidationFailed(format!(
-                "{field}.allowed_executables aliases {previous_alias:?} and {alias:?} map to the same path with different SHA-256 digests"
-            )));
+            ) {
+                return Err(ConfigError::ValidationFailed(format!(
+                    "{field}.allowed_executables aliases {previous_alias:?} and {alias:?} map to the same path with different SHA-256 digests"
+                )));
+            }
+            if previous_trusted_system != executable.trusted_system {
+                return Err(ConfigError::ValidationFailed(format!(
+                    "{field}.allowed_executables aliases {previous_alias:?} and {alias:?} map to the same path with conflicting trusted_system grants"
+                )));
+            }
         }
     }
     match (policy.allow_shell, policy.shell_executable_alias.as_deref()) {
@@ -3950,6 +3959,10 @@ pub enum ChildProcessSpawnBackend {
     Bubblewrap,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// One exact executable identity authorized by the signed process policy.
 /// The alias is the key in `allowed_executables`; ambient `PATH` lookup is
 /// never part of process dispatch.
@@ -3959,6 +3972,13 @@ pub struct ChildProcessExecutablePolicy {
     pub path: PathBuf,
     /// Lowercase SHA-256 of the executable bytes.
     pub sha256: String,
+    /// Explicit opt-in to execute a root-owned, non-writable system inode
+    /// directly via its held descriptor so multicall system utilities (e.g.
+    /// Ubuntu 26.04 uutils coreutils) retain their real `/proc/self/exe`
+    /// basename while still verifying root ancestry and exact SHA-256 on every
+    /// launch. Defaults to `false` (sealed immutable memfd snapshot).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted_system: bool,
 }
 
 /// Signed resource ceilings for every provider instance and child operation.
@@ -5661,6 +5681,7 @@ mod tests {
                     ChildProcessExecutablePolicy {
                         path: PathBuf::from("/usr/bin/true"),
                         sha256: "11".repeat(32),
+                        trusted_system: false,
                     },
                 )]),
                 jailed_cwd_root: PathBuf::from("/"),
@@ -5838,9 +5859,24 @@ mod tests {
             ChildProcessExecutablePolicy {
                 path: PathBuf::from("/usr/bin/true"),
                 sha256: "22".repeat(32),
+                trusted_system: false,
             },
         );
         assert_child_process_policy_error(process_spawn, "same path with different SHA-256");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allowed_executables.insert(
+            "same-path-conflicting-trust".to_string(),
+            ChildProcessExecutablePolicy {
+                path: PathBuf::from("/usr/bin/true"),
+                sha256: "11".repeat(32),
+                trusted_system: true,
+            },
+        );
+        assert_child_process_policy_error(
+            process_spawn,
+            "same path with conflicting trusted_system grants",
+        );
 
         let mut process_spawn = child_process_spawn_fixture();
         process_spawn.execution_policy.allowed_executables.insert(
@@ -5848,6 +5884,7 @@ mod tests {
             ChildProcessExecutablePolicy {
                 path: PathBuf::from("/usr/bin/true"),
                 sha256: "11".repeat(32),
+                trusted_system: false,
             },
         );
         let mut config = valid_base_config(Profile::LegacyRisky);
@@ -5855,6 +5892,20 @@ mod tests {
         config
             .validate()
             .expect("multiple aliases for the same exact identity are unambiguous");
+
+        let baseline_subject = child_process_policy_subject(child_process_spawn_fixture());
+        let mut trusted = child_process_spawn_fixture();
+        trusted
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .trusted_system = true;
+        assert_ne!(
+            child_process_policy_subject(trusted),
+            baseline_subject,
+            "enabling trusted_system must change the signed child-process policy subject"
+        );
     }
 
     #[test]

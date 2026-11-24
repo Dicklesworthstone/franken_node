@@ -1495,6 +1495,7 @@ mod tests {
                     ChildProcessExecutablePolicy {
                         path: "/usr/bin/true".into(),
                         sha256: "11".repeat(32),
+                        trusted_system: false,
                     },
                 )]),
                 jailed_cwd_root: "/".into(),

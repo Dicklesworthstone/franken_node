@@ -43626,6 +43626,56 @@ fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> 
         )
         .is_err();
 
+    let mut complexity_gate =
+        frankenengine_node::security::trust_complexity::TrustComplexityGate::new(
+            frankenengine_node::security::trust_complexity::ComplexityBudget::default(),
+            300,
+        );
+    let complexity_ctx = frankenengine_node::security::trust_complexity::TrustDecisionContext {
+        decision_id: format!("gov-audit-{}", args.artifact_id),
+        endpoint_group: "trust.governance-audit".to_string(),
+        token: "tok-gov-leaf".to_string(),
+        epoch: 1,
+        capability_set: vec!["trust.governance.promote".to_string()],
+        clock_value: "2026-11-23T00:00:00Z".to_string(),
+        chain_depth: u32::try_from(token_chain.depth()).unwrap_or(u32::MAX),
+    };
+    let complexity_recorded = complexity_gate
+        .record_decision(
+            frankenengine_node::security::trust_complexity::TrustDecision {
+                context: complexity_ctx.clone(),
+                outcome: frankenengine_node::security::trust_complexity::TrustOutcome::Grant,
+                reason: "governance promotion verified".to_string(),
+                decided_at: "2026-11-23T00:00:00Z".to_string(),
+            },
+        )
+        .is_ok();
+    let complexity_replay = complexity_gate.verify_replay(&complexity_ctx, |_| {
+        frankenengine_node::security::trust_complexity::TrustOutcome::Grant
+    });
+    let complexity_gate_pass =
+        complexity_recorded && complexity_replay.deterministic && complexity_gate.gate_pass();
+    let mut complexity_neg_gate =
+        frankenengine_node::security::trust_complexity::TrustComplexityGate::new(
+            frankenengine_node::security::trust_complexity::ComplexityBudget::default(),
+            300,
+        );
+    let complexity_budget_exceeded_denied = complexity_neg_gate
+        .record_decision(
+            frankenengine_node::security::trust_complexity::TrustDecision {
+                context: frankenengine_node::security::trust_complexity::TrustDecisionContext {
+                    chain_depth: 99,
+                    decision_id: format!("gov-audit-overflow-{}", args.artifact_id),
+                    ..complexity_ctx
+                },
+                outcome: frankenengine_node::security::trust_complexity::TrustOutcome::Grant,
+                reason: "negative control: chain depth overflow".to_string(),
+                decided_at: "2026-11-23T00:00:00Z".to_string(),
+            },
+        )
+        .is_err();
+    let complexity_summary = complexity_gate.summary();
+
     let ok = challenge_promoted
         && gate_after.passed
         && benign_decision.verdict == FirewallVerdict::Allow
@@ -43634,7 +43684,9 @@ fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> 
         && cross_role_rebind_denied
         && wrong_role_verify_denied
         && token_chain_verified
-        && token_replay_denied;
+        && token_replay_denied
+        && complexity_gate_pass
+        && complexity_budget_exceeded_denied;
 
     let payload = serde_json::json!({
         "schema_version": "franken-node/trust-governance-audit-cli/v1",
@@ -43671,6 +43723,12 @@ fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> 
             "replay_denied": token_replay_denied,
             "tokens_verified": token_validator.tokens_verified(),
             "tokens_rejected": token_validator.tokens_rejected(),
+        },
+        "trust_complexity": {
+            "gate_pass": complexity_gate_pass,
+            "replay_deterministic": complexity_replay.deterministic,
+            "budget_exceeded_denied": complexity_budget_exceeded_denied,
+            "decisions_recorded": complexity_summary.total_decisions,
         },
     });
     if args.json {
@@ -45210,17 +45268,44 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         && artifact_contract_ok
         && tree_tx_ok;
 
-    let scanner_registry = supply_chain::project_scanner::CompatibilityRegistry::new();
-    let scanner_usages = supply_chain::project_scanner::scan_text(
-        "archetype-probe.js",
-        "const fs = require('node:fs'); const path = require('node:path');",
-        &scanner_registry,
-    );
-    let mut scanner_risk = supply_chain::project_scanner::RiskDistribution::default();
-    for usage in &scanner_usages {
-        scanner_risk.increment(usage.risk_level);
-    }
-    let scanner_readiness = supply_chain::project_scanner::compute_readiness(&scanner_risk);
+    let scanner_registry =
+        supply_chain::project_scanner::load_default_registry().unwrap_or_default();
+    let scan_project_dir = args.project_path.as_deref().filter(|path| path.is_dir());
+    let (scanner_source, scanner_apis_detected, scanner_risk, scanner_readiness) =
+        match scan_project_dir {
+            Some(project_dir) => {
+                let report = supply_chain::project_scanner::scan_project_with_registry_at(
+                    project_dir,
+                    &scanner_registry,
+                    chrono::Utc::now().to_rfc3339(),
+                )
+                .map_err(|err| anyhow::anyhow!("project scanner failed: {err}"))?;
+                (
+                    "project_path",
+                    report.summary.total_apis_detected,
+                    report.summary.risk_distribution,
+                    report.summary.migration_readiness,
+                )
+            }
+            None => {
+                let usages = supply_chain::project_scanner::scan_text(
+                    "archetype-probe.js",
+                    "const fs = require('fs'); const path = require('path'); const http = require('http'); const cfg = path.join(process.env.APP_DIR || '.', 'config.json'); fs.readFileSync(cfg, 'utf8'); http.createServer(() => {});",
+                    &scanner_registry,
+                );
+                let mut risk = supply_chain::project_scanner::RiskDistribution::default();
+                for usage in &usages {
+                    risk.increment(usage.risk_level);
+                }
+                let readiness = supply_chain::project_scanner::compute_readiness(&risk);
+                (
+                    "archetype_probe",
+                    u64::try_from(usages.len()).unwrap_or(u64::MAX),
+                    risk,
+                    readiness,
+                )
+            }
+        };
 
     let mut payload = serde_json::json!({
         "schema_version": "franken-node/migrate-kit-plan-cli/v1",
@@ -45258,7 +45343,9 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         },
         "tree_transaction_audit": tree_tx_audit,
         "project_scanner": {
-            "apis_detected": scanner_usages.len(),
+            "source": scanner_source,
+            "registry_entries": scanner_registry.len(),
+            "apis_detected": scanner_apis_detected,
             "readiness": scanner_readiness,
             "risk_distribution": scanner_risk,
         },
@@ -46252,6 +46339,55 @@ fn handle_trust_calibrate_conformal(args: &cli::TrustCalibrateConformalArgs) -> 
         );
         let transfer_report = generate_corpus_exchangeability_transfer_report()
             .map_err(|err| anyhow::anyhow!("BPET exchangeability transfer report failed: {err}"))?;
+        let mut bpet_econ =
+            frankenengine_node::security::bpet::economic_integration::BpetEconomicEngine::new(
+                frankenengine_node::security::bpet::economic_integration::default_motif_library(),
+            );
+        let primary_signal = bpet_artifact.signals.first();
+        let empirical_coverage_bp =
+            primary_signal.map_or(9_000, |signal| signal.metrics.coverage_at_target_alpha_bp);
+        let brier_score_bp = primary_signal.map_or(1_000, |signal| signal.metrics.brier_score_bp);
+        let activity_score = (f64::from(empirical_coverage_bp) / 10_000.0).clamp(0.05, 1.0);
+        let bpet_trajectory =
+            frankenengine_node::security::bpet::economic_integration::PhenotypeTrajectory {
+                package_name: "bpet-calibration-corpus".to_string(),
+                observations: vec![
+                    frankenengine_node::security::bpet::economic_integration::PhenotypeObservation {
+                        timestamp: bpet_artifact.generated_at.clone(),
+                        maintainer_activity_score: activity_score,
+                        commit_velocity: 10.0,
+                        issue_response_time_hours: 12.0,
+                        dependency_churn_rate: (f64::from(brier_score_bp) / 10_000.0)
+                            .clamp(0.01, 0.95),
+                        security_patch_latency_hours: 24.0,
+                        contributor_diversity_index: 0.75,
+                    },
+                ],
+            };
+        let bpet_guidance = bpet_econ
+            .generate_guidance(&bpet_trajectory, 50_000.0, 0.85, "trace-bpet-calibrate")
+            .map_err(|err| anyhow::anyhow!("BPET economic guidance failed: {err}"))?;
+        let calibration_risk_set = frankenengine_node::security::conformal::ConformalRiskSet {
+            event_code: "CONFORMAL_RISK_SET_EMITTED".to_string(),
+            sample_id: format!(
+                "bpet-cal-{}",
+                &bpet_artifact.corpus_hash[..bpet_artifact.corpus_hash.len().min(12)]
+            ),
+            risk_class: "bpet_calibration".to_string(),
+            score_bp: brier_score_bp,
+            quantile_bp: receipt.target_alpha_bp,
+            included_labels: vec![
+                frankenengine_node::security::conformal::LABEL_BENIGN.to_string(),
+            ],
+        };
+        let bpet_trust_surface = frankenengine_node::security::bpet::trust_surface_integration::assess_guidance_for_calibrated_trust_surface(
+            &bpet_guidance,
+            8_500,
+            None,
+            &calibration_risk_set,
+            empirical_coverage_bp,
+        )
+        .map_err(|err| anyhow::anyhow!("BPET trust-surface assessment failed: {err}"))?;
         let mut combined = serde_json::to_value(&receipt)?;
         if let Some(obj) = combined.as_object_mut() {
             obj.insert(
@@ -46261,6 +46397,10 @@ fn handle_trust_calibrate_conformal(args: &cli::TrustCalibrateConformalArgs) -> 
             obj.insert(
                 "bpet_exchangeability_transfer".to_string(),
                 serde_json::to_value(&transfer_report)?,
+            );
+            obj.insert(
+                "bpet_trust_surface_assessment".to_string(),
+                serde_json::to_value(&bpet_trust_surface)?,
             );
         }
         serde_json::to_string_pretty(&combined)?

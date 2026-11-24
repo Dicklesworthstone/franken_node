@@ -580,6 +580,9 @@ fn trust_ecosystem_telemetry_and_governance_audit_enforce_contracts() {
     );
     assert_eq!(gov_ok["audience_token"]["verified"], true);
     assert_eq!(gov_ok["audience_token"]["replay_denied"], true);
+    assert_eq!(gov_ok["trust_complexity"]["gate_pass"], true);
+    assert_eq!(gov_ok["trust_complexity"]["replay_deterministic"], true);
+    assert_eq!(gov_ok["trust_complexity"]["budget_exceeded_denied"], true);
 
     // Mismatched proof hash must fail closed.
     let gov_bad_proof = json_err(
@@ -819,11 +822,46 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
     assert_eq!(kit["ok"], true);
     assert_eq!(kit["kit"]["archetype"], "fastify");
     assert_eq!(kit["kit"]["step_count"], 5);
+    assert_eq!(kit["project_scanner"]["source"], "archetype_probe");
     assert!(
         kit["project_scanner"]["apis_detected"]
             .as_u64()
             .unwrap_or(0)
-            >= 2
+            >= 4
+    );
+
+    let scan_proj = dir.path().join("sample_scan_project");
+    std::fs::create_dir_all(&scan_proj).expect("create sample_scan_project");
+    std::fs::write(
+        scan_proj.join("index.js"),
+        "const fs = require('fs'); const path = require('path'); fs.readFileSync(path.join('.', 'a')); eval('1+1');\n",
+    )
+    .expect("write index.js");
+    let kit_with_proj = json_ok(
+        dir.path(),
+        &[
+            "migrate",
+            "kit-plan",
+            "--archetype",
+            "fastify",
+            "--project-path",
+            scan_proj.to_str().expect("scan_proj str"),
+            "--json",
+        ],
+    );
+    assert_eq!(kit_with_proj["project_scanner"]["source"], "project_path");
+    assert!(
+        kit_with_proj["project_scanner"]["apis_detected"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 3
+    );
+    assert_eq!(kit_with_proj["project_scanner"]["readiness"], "not-ready");
+    assert!(
+        kit_with_proj["project_scanner"]["risk_distribution"]["critical"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
     );
     assert_eq!(kit["activation_preview"]["live_execution"], false);
     assert_eq!(
@@ -869,6 +907,10 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
     assert_eq!(
         bpet_cal["bpet_exchangeability_transfer"]["schema_version"],
         "bpet.corpus_exchangeability_transfer.v1"
+    );
+    assert_eq!(
+        bpet_cal["bpet_trust_surface_assessment"]["schema_version"],
+        "bpet-trust-surface-integration-v1"
     );
 
     let doc_el = json_ok(dir.path(), &["doctor", "expected-loss-actions", "--json"]);

@@ -2782,6 +2782,7 @@ mod signed_process_capture {
                             fs::read(&executable).expect("read exact marker executable bytes"),
                         )),
                         path: executable,
+                        trusted_system: false,
                     },
                 )]),
                 jailed_cwd_root: workspace.to_path_buf(),

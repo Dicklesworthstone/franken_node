@@ -887,8 +887,7 @@ fn modern_inspect_promise_and_json_esm_semantics_match_node_or_fail_closed() {
         }
     }
 
-    // Typed local JSON ESM import: must either match Node exactly (`json:v1:3`)
-    // or fail closed (nonzero exit), never silently miscompile at exit 0.
+    // Typed local JSON ESM import: must match Node v26 exactly (`json:v1:3`).
     let dir = tempfile::TempDir::new().expect("tempdir");
     let init = Command::new(franken_node_bin())
         .args(["init", "--profile", "balanced", "--out-dir", "."])
@@ -921,21 +920,25 @@ fn modern_inspect_promise_and_json_esm_semantics_match_node_or_fail_closed() {
         .current_dir(dir.path())
         .output()
         .expect("run app.mjs");
-    if output.status.success() {
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "json:v1:3\n",
-            "SILENT MISCOMPILE on JSON ESM import"
-        );
-    }
+    assert!(
+        output.status.success(),
+        "JSON ESM import failed: status={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "json:v1:3\n",
+        "SILENT MISCOMPILE on JSON ESM import"
+    );
 }
 
-/// bd-reality-20260923-26n9r.6 / bd-sul35: regression probes for native
+/// bd-reality-20260923-26n9r.6 / bd-sul35: strict regression probes for native
 /// `node:net`/`node:tls` ESM + CJS providers (`franken_engine@ed33d8b56`),
 /// `util.inspect` getters & `formatWithOptions` (`73a8272fa`), `Function.bind`
 /// null-prototype preservation (`0d5030526`/`373e9498d`), `Uint8Array.from`
 /// mappers (`373e9498d`), and adjacent `await` operands (`cdd908114`).
-/// Enforces exact Node v26 reference parity on exit 0 (never silent miscompile).
+/// Enforces exit 0 and exact Node v26 reference stdout parity on every probe.
 #[test]
 fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
     for (source, expected) in &[
@@ -944,8 +947,8 @@ fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
             "net: 4 true true\n",
         ),
         (
-            "const tls = require('tls'); console.log('tls:', Array.isArray(tls.rootCertificates), typeof tls.TLSSocket);",
-            "tls: true function\n",
+            "const tls = require('tls'); console.log('tls:', Array.isArray(tls.rootCertificates), typeof tls.Server, typeof tls.createSecureContext);",
+            "tls: true function function\n",
         ),
         (
             "const util = require('util'); const g = { get x() { return 42; } }; console.log('inspect-getters:', util.inspect(g, { getters: true }));",
@@ -956,7 +959,7 @@ fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
             "formatWithOptions: { a: { b: 1 } }\n",
         ),
         (
-            "function f() { return 7; } Object.setPrototypeOf(f, null); const bf = Function.prototype.bind.call(f, null); console.log('bind-null-proto:', Object.getPrototypeOf(bf) === null, bf());",
+            "function f() { return 7; } Object.setPrototypeOf(f, null); const bf = (() => {}).bind.call(f, null); console.log('bind-null-proto:', Object.getPrototypeOf(bf) === null, bf());",
             "bind-null-proto: true 7\n",
         ),
         (
@@ -969,12 +972,15 @@ fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
         ),
     ] {
         let (exit, stdout) = run_snippet(source);
-        if exit == Some(0) {
-            assert_eq!(
-                stdout, *expected,
-                "SILENT MISCOMPILE: franken exited 0 with output differing from Node for {source:?} (expected {expected:?}, got {stdout:?})"
-            );
-        }
+        assert_eq!(
+            exit,
+            Some(0),
+            "regression probe exited non-zero for {source:?}: exit={exit:?} stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, *expected,
+            "SILENT MISCOMPILE: franken exited 0 with output differing from Node for {source:?} (expected {expected:?}, got {stdout:?})"
+        );
     }
 
     // Native `node:net` and `node:tls` via ESM `--frozen-modules`.
@@ -1010,11 +1016,15 @@ fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
         .current_dir(dir.path())
         .output()
         .expect("run net_tls.mjs");
-    if esm_out.status.success() {
-        assert_eq!(
-            String::from_utf8_lossy(&esm_out.stdout),
-            "esm: 4 true\n",
-            "SILENT MISCOMPILE on ESM node:net / node:tls import"
-        );
-    }
+    assert!(
+        esm_out.status.success(),
+        "ESM node:net / node:tls failed: status={:?} stderr={}",
+        esm_out.status.code(),
+        String::from_utf8_lossy(&esm_out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&esm_out.stdout),
+        "esm: 4 true\n",
+        "SILENT MISCOMPILE on ESM node:net / node:tls import"
+    );
 }

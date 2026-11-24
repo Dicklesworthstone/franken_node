@@ -320,6 +320,11 @@ struct NativeSessionRequest {
     /// nested runtime configuration may otherwise ignore an unknown field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     module_conditions: Vec<String>,
+    /// Supervisor-retained frozen source-graph pin carried outside `config` so
+    /// pinning the admitted source graph never mutates an operator-signed
+    /// `[security.child_process_spawn]` policy subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admitted_source_graph_hash: Option<String>,
 }
 
 #[cfg(feature = "engine")]
@@ -341,6 +346,27 @@ impl NativeSessionRequest {
         }
         if self.module_conditions != self.config.runtime.module_conditions {
             anyhow::bail!("native-session package conditions do not match their configuration");
+        }
+        if let Some(pin) = self.admitted_source_graph_hash.as_deref() {
+            anyhow::ensure!(
+                self.config.runtime.frozen_modules == Some(true),
+                "native-session admitted source graph pin requires frozen modules"
+            );
+            anyhow::ensure!(
+                pin.strip_prefix("sha256:").is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                }),
+                "native-session admitted source graph pin must be canonical sha256:<64 hex>"
+            );
+            if let Some(configured) = self.config.runtime.frozen_module_graph_hash.as_deref() {
+                anyhow::ensure!(
+                    crate::security::constant_time::ct_eq(configured, pin),
+                    "native-session admitted source graph pin disagrees with configured operator pin"
+                );
+            }
         }
         validate_native_frozen_modules(&self.config)?;
         Ok(())
@@ -3093,6 +3119,7 @@ struct NativeEngineRunContext {
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
     capture_replay: bool,
+    admitted_source_graph_hash: Option<String>,
 }
 
 #[cfg(feature = "engine")]
@@ -11063,6 +11090,7 @@ impl EngineDispatcher {
         let policy_mode = request.policy_mode;
         let app_args = request.app_args;
         let capture_replay = request.capture_replay;
+        let admitted_source_graph_hash = request.admitted_source_graph_hash;
         let ifc_trust_key_hex = request.ifc_trust_key_hex;
         let nonce = request.nonce;
         let effect_wal =
@@ -11088,6 +11116,7 @@ impl EngineDispatcher {
                     fleet_policy,
                     app_args,
                     capture_replay,
+                    admitted_source_graph_hash,
                 },
             )
         });
@@ -11787,13 +11816,12 @@ impl EngineDispatcher {
         let fleet_policy_sha256 = fleet_policy
             .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
             .transpose()?;
-        let worker_config = config.clone();
-        #[cfg(unix)]
-        let mut worker_config = worker_config;
         // Retain the admitted source owner before the worker can enter guest
         // code. The worker rechecks its own authority and must recapture the
         // same graph; a changed live project cannot silently replace this
-        // supervisor-authenticated forensic snapshot.
+        // supervisor-authenticated forensic snapshot. Keep `config` unmutated
+        // so signed `[security.child_process_spawn]` policy subjects stay valid
+        // inside the worker, and carry the supervisor pin out-of-band.
         #[cfg(unix)]
         let admitted_source_graph = if config.runtime.frozen_modules == Some(true) {
             use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
@@ -11846,12 +11874,16 @@ impl EngineDispatcher {
                     .is_none_or(|expected| expected == graph.report().input_hash),
                 "frozen source graph disagrees with the operator pin before native-session admission"
             );
-            worker_config.runtime.frozen_module_graph_hash =
-                Some(graph.report().input_hash.clone());
             Some(graph)
         } else {
             None
         };
+        #[cfg(unix)]
+        let admitted_source_graph_hash = admitted_source_graph
+            .as_ref()
+            .map(|graph| graph.report().input_hash.clone());
+        #[cfg(not(unix))]
+        let admitted_source_graph_hash: Option<String> = None;
         let prepared_evidence_directories =
             prepare_runtime_evidence_directories(project_paths.project_root())
                 .context("prepare protected native-session evidence before source retention")?;
@@ -11949,7 +11981,7 @@ impl EngineDispatcher {
             trust_requirements: trust_requirements.clone(),
             fleet_policy: fleet_policy.cloned(),
             policy_mode: policy_mode.to_string(),
-            config: worker_config,
+            config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
             ifc_trust_key_hex,
@@ -11958,6 +11990,7 @@ impl EngineDispatcher {
             capture_replay,
             frozen_modules: config.runtime.frozen_modules.filter(|enabled| *enabled),
             module_conditions: config.runtime.module_conditions.clone(),
+            admitted_source_graph_hash,
         };
         let request_frame = Zeroizing::new(
             encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
@@ -13311,6 +13344,7 @@ impl EngineDispatcher {
             })?;
         let source = &configured.execution_policy;
         let mut allowed_executables = std::collections::BTreeMap::new();
+        let mut trusted_system_executables = std::collections::BTreeSet::new();
         let mut executable_aliases = std::collections::BTreeMap::new();
 
         for (alias, executable) in &source.allowed_executables {
@@ -13336,6 +13370,9 @@ impl EngineDispatcher {
                 )
             })?;
             allowed_executables.insert(path.to_string(), digest);
+            if executable.trusted_system {
+                trusted_system_executables.insert(path.to_string());
+            }
             executable_aliases.insert(alias.clone(), path.to_string());
         }
 
@@ -13348,7 +13385,7 @@ impl EngineDispatcher {
 
         Ok(ProcessSpawnPolicy {
             allowed_executables,
-            trusted_system_executables: std::collections::BTreeSet::new(),
+            trusted_system_executables,
             executable_aliases,
             allow_shell: source.allow_shell,
             shell_executable_alias: source.shell_executable_alias.clone(),
@@ -13810,6 +13847,7 @@ impl EngineDispatcher {
                 fleet_policy: None,
                 app_args: Vec::new(),
                 capture_replay: false,
+                admitted_source_graph_hash: None,
             },
         )
     }
@@ -13839,6 +13877,7 @@ impl EngineDispatcher {
             fleet_policy,
             app_args,
             capture_replay,
+            admitted_source_graph_hash,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
         let mut execution_config = config.clone();
@@ -14074,6 +14113,9 @@ impl EngineDispatcher {
             process_shape_read_allowed: ambient_authority_grant
                 == AmbientAuthorityGrant::TrustedProcessShape,
         };
+        let expected_frozen_graph_hash = admitted_source_graph_hash
+            .as_deref()
+            .or(config.runtime.frozen_module_graph_hash.as_deref());
         let frozen_modules = if config.runtime.frozen_modules == Some(true) {
             Some(
                 prepare_native_frozen_modules(
@@ -14082,7 +14124,7 @@ impl EngineDispatcher {
                     &capabilities,
                     config.runtime.frozen_module_symlinks == Some(true),
                     capture_replay,
-                    config.runtime.frozen_module_graph_hash.as_deref(),
+                    expected_frozen_graph_hash,
                     trust_requirements.registry_artifact_approval.as_ref(),
                     &trust_requirements,
                 )
@@ -28235,6 +28277,7 @@ exec "$2" pinned-worker-image"#,
             capture_replay: true,
             frozen_modules: None,
             module_conditions: Vec::new(),
+            admitted_source_graph_hash: None,
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -28270,6 +28313,50 @@ exec "$2" pinned-worker-image"#,
             .trust_requirements
             .enforce_deployment_activation()
             .expect("ordinary runs do not acquire an activation restriction");
+
+        // Regression for 2b51b4b53: carrying the supervisor-retained source
+        // graph pin out-of-band validates without mutating `config`.
+        let pin = format!("sha256:{}", "ab".repeat(32));
+        let mut frozen_req: NativeSessionRequest =
+            decode_native_session_frame(&frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                .expect("decode frozen request frame");
+        frozen_req.config.runtime.frozen_modules = Some(true);
+        frozen_req.frozen_modules = Some(true);
+        frozen_req.admitted_source_graph_hash = Some(pin.clone());
+        let subject_before = frozen_req
+            .config
+            .child_process_spawn_policy_subject()
+            .expect("policy subject before validation");
+        frozen_req
+            .validate_module_requirements()
+            .expect("admitted source graph pin validates when frozen_modules is true");
+        assert_eq!(
+            frozen_req
+                .config
+                .child_process_spawn_policy_subject()
+                .expect("policy subject after validation"),
+            subject_before
+        );
+
+        frozen_req.config.runtime.frozen_module_graph_hash =
+            Some(format!("sha256:{}", "cd".repeat(32)));
+        assert!(
+            frozen_req.validate_module_requirements().is_err(),
+            "disagreeing admitted_source_graph_hash must fail closed"
+        );
+        frozen_req.config.runtime.frozen_module_graph_hash = None;
+        frozen_req.admitted_source_graph_hash = Some("not-a-sha256".to_string());
+        assert!(
+            frozen_req.validate_module_requirements().is_err(),
+            "malformed admitted_source_graph_hash must fail closed"
+        );
+        frozen_req.config.runtime.frozen_modules = Some(false);
+        frozen_req.frozen_modules = None;
+        frozen_req.admitted_source_graph_hash = Some(pin);
+        assert!(
+            frozen_req.validate_module_requirements().is_err(),
+            "admitted_source_graph_hash without frozen_modules must fail closed"
+        );
         decoded
             .trust_requirements
             .enforce_operator_safe_mode()

@@ -1487,11 +1487,31 @@ fn corpus_process_authority(
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
+fn is_multicall_uutils_binary(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|text| text.contains("/cargo/bin/coreutils/") || text.contains("/uutils"))
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
 fn resolve_corpus_process_executable(alias: &str) -> Result<ChildProcessExecutablePolicy> {
-    let executable = resolve_fixed_path_executable(alias)?;
+    let resolved = resolve_fixed_path_executable(alias)?;
+    // Sealed immutable memfd snapshots (trusted_system = false) are strictly
+    // stronger than named host-inode execution and work inside unprivileged
+    // `bwrap --unshare-user` workers (where host root files map to overflowuid
+    // 65534). On Ubuntu 26.04, default coreutils symlinks point to multicall
+    // uutils binaries that require `/proc/self/exe` basename matching; prefer
+    // the companion standalone root-owned `gnu<alias>` binary when installed
+    // in the same fixed system PATH.
+    let executable = if is_multicall_uutils_binary(&resolved.path) {
+        let gnu_alias = format!("gnu{alias}");
+        resolve_fixed_path_executable(&gnu_alias).unwrap_or(resolved)
+    } else {
+        resolved
+    };
     Ok(ChildProcessExecutablePolicy {
         path: executable.path,
         sha256: executable.sha256,
+        trusted_system: false,
     })
 }
 
@@ -3659,6 +3679,10 @@ mod snapshot_staging_tests {
         );
         for executable in opt_in.execution_policy.allowed_executables.values() {
             assert!(executable.path.is_absolute());
+            assert!(
+                !executable.trusted_system,
+                "corpus executables use immutable sealed memfd snapshots by default"
+            );
             assert_eq!(
                 sha256_file(&executable.path).expect("rehash authorized executable"),
                 executable.sha256
