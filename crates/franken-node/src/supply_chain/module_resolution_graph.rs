@@ -28,13 +28,25 @@ pub mod package_targets;
 #[path = "module_dependency_topology.rs"]
 pub mod dependency_topology;
 
+/// Workspace negation has different documented semantics in npm and Bun.
+/// The selected lock authority chooses the dialect; selectors never do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSelectionMode {
+    Npm,
+    Bun,
+}
+
 /// Shared npm/Bun workspace selection for trust topology and checked migration.
 /// Callers retain their own manifest admission, count limits and missing-match
 /// policy. One descriptor-relative walk carries all selector states, so overlap
 /// never reopens a manifest or multiplies directory enumeration.
 #[cfg(unix)]
 pub(crate) mod workspace_selection {
-    use super::{ModuleResolutionGraphError, ModuleResolutionGraphResult, enforce_len};
+    use super::{
+        ModuleResolutionGraphError, ModuleResolutionGraphResult, WorkspaceSelectionMode,
+        enforce_len,
+    };
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, statat};
     use std::collections::BTreeMap;
     use std::fs::{File, Metadata};
@@ -54,6 +66,7 @@ pub(crate) mod workspace_selection {
     ];
 
     pub(crate) struct Limits {
+        pub mode: WorkspaceSelectionMode,
         pub patterns: usize,
         /// Includes the already captured root manifest.
         pub manifests: usize,
@@ -97,13 +110,18 @@ pub(crate) mod workspace_selection {
 
     struct Pattern {
         parts: Vec<String>,
+        negative: bool,
+        literal: bool,
+        trailing_slash: bool,
     }
 
     impl Pattern {
         fn parse(raw: &str) -> ModuleResolutionGraphResult<Self> {
-            let normalized = raw.strip_prefix("./").unwrap_or(raw);
+            let body = raw.strip_prefix('!').unwrap_or(raw);
+            let normalized = body.strip_prefix("./").unwrap_or(body);
             let normalized = normalized.strip_suffix('/').unwrap_or(normalized);
             if raw.trim() != raw
+                || body.trim() != body
                 || raw.len() > MAX_PATH_BYTES
                 || !relative(normalized)
                 || normalized.contains(['!', '?', '[', ']', '{', '}', '(', ')', '|'])
@@ -117,7 +135,40 @@ pub(crate) mod workspace_selection {
             }
             Ok(Self {
                 parts: normalized.split('/').map(str::to_owned).collect(),
+                negative: raw.starts_with('!'),
+                literal: !body.contains('*'),
+                trailing_slash: body.ends_with('/'),
             })
+        }
+
+        /// npm applies surviving exclusions to authored selector strings,
+        /// and a later positive selector can cancel an earlier exclusion.
+        /// Match those strings as text, without expanding the candidate's
+        /// glob syntax. Directory matching below uses the same automaton.
+        fn matches_selector(&self, selector: &str) -> bool {
+            let selector = selector.strip_prefix("./").unwrap_or(selector);
+            let trailing_slash = selector.ends_with('/');
+            if self.trailing_slash && !trailing_slash {
+                return false;
+            }
+            let selector = selector.strip_suffix('/').unwrap_or(selector);
+            let mut state = self.start();
+            let trailing_globstar = self.parts.last().is_some_and(|part| part == "**");
+            let mut consumed_trailing_globstar = false;
+            for component in selector.split('/') {
+                consumed_trailing_globstar =
+                    trailing_globstar && state[self.parts.len() - 1] && !component.starts_with('.');
+                state = self.step(&state, component);
+            }
+            // minimatch requires a path component after the slash in `a/**`.
+            // An authored `a/` supplies an empty final component; plain `a`
+            // does not. Filesystem directory matching already has that slash.
+            state.last() == Some(&true)
+                && (!trailing_globstar || trailing_slash || consumed_trailing_globstar)
+        }
+
+        fn covers_descendants(&self, state: &[bool]) -> bool {
+            self.parts.last().is_some_and(|part| part == "**") && state[self.parts.len() - 1]
         }
 
         fn closure(&self, state: &mut [bool]) {
@@ -136,16 +187,20 @@ pub(crate) mod workspace_selection {
         }
 
         fn step(&self, state: &[bool], component: &str) -> Vec<bool> {
+            self.step_with_dot(state, component, false)
+        }
+
+        fn step_with_dot(&self, state: &[bool], component: &str, dot: bool) -> Vec<bool> {
             let mut next = vec![false; state.len()];
             for (index, part) in self.parts.iter().enumerate() {
                 if !state[index] {
                     continue;
                 }
                 if part == "**" {
-                    if !component.starts_with('.') {
+                    if dot || !component.starts_with('.') {
                         next[index] = true;
                     }
-                } else if component_matches(part, component) {
+                } else if component_matches_with_dot(part, component, dot) {
                     next[index + 1] = true;
                 }
             }
@@ -177,7 +232,14 @@ pub(crate) mod workspace_selection {
                 check_deadline(deadline)?;
                 let Some(start) = pattern.find('{') else {
                     enforce_len("expanded workspace patterns", compiled.len() + 1, limit)?;
-                    compiled.push((selector, Pattern::parse(&pattern)?));
+                    let mut parsed = Pattern::parse(&pattern)?;
+                    if parsed.negative != raw.starts_with('!') {
+                        return Err(invalid_pattern());
+                    }
+                    // A brace-expanded literal is still a glob in Bun. Only
+                    // an authored ordinary directory can override negation.
+                    parsed.literal &= !raw.contains('{');
+                    compiled.push((selector, parsed));
                     continue;
                 };
                 if pattern[..start].contains('}') {
@@ -235,10 +297,126 @@ pub(crate) mod workspace_selection {
         Ok(compiled)
     }
 
+    fn apply_mode(
+        patterns: &mut Vec<(usize, Pattern)>,
+        selectors: &[String],
+        mode: WorkspaceSelectionMode,
+    ) {
+        if mode != WorkspaceSelectionMode::Npm {
+            return;
+        }
+        let mut negatives = Vec::new();
+        for (current, selector) in selectors.iter().enumerate() {
+            if selector.starts_with('!') {
+                negatives.push(current);
+            } else {
+                let mut index = 0;
+                while index < negatives.len() {
+                    if patterns.iter().any(|(owner, pattern)| {
+                        *owner == negatives[index] && pattern.matches_selector(selector)
+                    }) {
+                        negatives.remove(index);
+                    }
+                    // npm's indexed splice loop advances even after removal.
+                    // Preserve its handling of adjacent matching exclusions.
+                    index += 1;
+                }
+            }
+        }
+        // Filter positives only after all cancellations. A later positive can
+        // restore an earlier broad selector by cancelling its exclusion.
+        let active = selectors
+            .iter()
+            .enumerate()
+            .map(|(index, selector)| {
+                if selector.starts_with('!') {
+                    negatives.contains(&index)
+                } else {
+                    !patterns.iter().any(|(owner, pattern)| {
+                        negatives.contains(owner) && pattern.matches_selector(selector)
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        // Validate and charge every expansion before discarding any selector.
+        // Negation cannot hide malformed syntax or evade an expansion bound.
+        patterns.retain(|(selector, _)| active[*selector]);
+    }
+
+    fn selected(
+        patterns: &[(usize, Pattern)],
+        states: &[Vec<bool>],
+        mode: WorkspaceSelectionMode,
+    ) -> bool {
+        let mut included = false;
+        let mut excluded = false;
+        let mut literal = false;
+        for ((_, pattern), state) in patterns.iter().zip(states) {
+            if state.last() != Some(&true) {
+                continue;
+            }
+            if pattern.negative {
+                excluded = true;
+            } else {
+                included = true;
+                literal |= pattern.literal;
+            }
+        }
+        included && (!excluded || (mode == WorkspaceSelectionMode::Bun && literal))
+    }
+
+    fn descend(patterns: &[(usize, Pattern)], states: &[Vec<bool>]) -> bool {
+        patterns.iter().zip(states).any(|((_, pattern), state)| {
+            !pattern.negative && state[..state.len() - 1].iter().any(|active| *active)
+        })
+    }
+
+    fn excluded_subtree(
+        patterns: &[(usize, Pattern)],
+        states: &[Vec<bool>],
+        mode: WorkspaceSelectionMode,
+    ) -> bool {
+        let excluded = patterns
+            .iter()
+            .zip(states)
+            .any(|((_, pattern), state)| pattern.negative && pattern.covers_descendants(state));
+        excluded
+            && !(mode == WorkspaceSelectionMode::Bun
+                && patterns.iter().zip(states).any(|((_, pattern), state)| {
+                    !pattern.negative && pattern.literal && state.iter().any(|active| *active)
+                }))
+    }
+
+    fn mark_excluded(
+        patterns: &[(usize, Pattern)],
+        states: &[Vec<bool>],
+        matched: &mut [bool],
+        subtree: bool,
+    ) {
+        for ((selector, pattern), state) in patterns.iter().zip(states) {
+            if !pattern.negative
+                && if subtree {
+                    state.iter().any(|active| *active)
+                } else {
+                    state.last() == Some(&true)
+                }
+            {
+                // Explicitly excluded directories require no manifest read.
+                // Only surviving positive selectors demand an actual match.
+                matched[*selector] = true;
+            }
+        }
+    }
+
     // Wildcards match bytes only between UTF-8 literals. No recursive glob
     // backtracking tree is allocated; components, patterns and visits are bounded.
+    #[cfg(test)]
     fn component_matches(pattern: &str, text: &str) -> bool {
-        if text.starts_with('.') && !pattern.starts_with('.') {
+        component_matches_with_dot(pattern, text, false)
+    }
+
+    fn component_matches_with_dot(pattern: &str, text: &str, dot: bool) -> bool {
+        if !dot && text.starts_with('.') && !pattern.starts_with('.') {
             return false;
         }
         let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
@@ -343,13 +521,19 @@ pub(crate) mod workspace_selection {
         mut visit_manifest: impl FnMut(&str, &File) -> Result<bool, E>,
     ) -> Result<(), E> {
         check_deadline(deadline)?;
-        let patterns = compile_patterns(selectors, limits.patterns, deadline)?;
+        let mut patterns = compile_patterns(selectors, limits.patterns, deadline)?;
+        apply_mode(&mut patterns, selectors, limits.mode);
         if patterns.is_empty() {
             return Ok(());
         }
         enforce_len("package manifests", 1, limits.manifests)?;
         enforce_len("workspace directories", 1, limits.directories)?;
-        let mut matched = vec![false; selectors.len()];
+        let mut matched = vec![true; selectors.len()];
+        for (selector, pattern) in &patterns {
+            if !pattern.negative {
+                matched[*selector] = false;
+            }
+        }
         let initial: Vec<_> = patterns
             .iter()
             .map(|(_, pattern)| pattern.start())
@@ -358,20 +542,25 @@ pub(crate) mod workspace_selection {
         let (mut entries, mut directories, mut manifests) = (0_usize, 1_usize, 1_usize);
         while let Some((path, states, depth)) = pending.pop() {
             check_deadline(deadline)?;
+            if excluded_subtree(&patterns, &states, limits.mode) {
+                mark_excluded(&patterns, &states, &mut matched, true);
+                continue;
+            }
             let fd = open_directory(root, &path)?;
             let before = fd.metadata().map_err(|error| io_error(&path, error))?;
-            let selected = states.iter().any(|state| state.last() == Some(&true));
-            if !path.is_empty() && selected && visit_manifest(&path, &fd)? {
+            let include = selected(&patterns, &states, limits.mode);
+            if !path.is_empty() && include && visit_manifest(&path, &fd)? {
                 manifests = manifests.saturating_add(1);
                 enforce_len("package manifests", manifests, limits.manifests)?;
-                for ((selector, _), state) in patterns.iter().zip(&states) {
-                    matched[*selector] |= state.last() == Some(&true);
+                for ((selector, pattern), state) in patterns.iter().zip(&states) {
+                    if !pattern.negative {
+                        matched[*selector] |= state.last() == Some(&true);
+                    }
                 }
+            } else if !include {
+                mark_excluded(&patterns, &states, &mut matched, false);
             }
-            let descend = states
-                .iter()
-                .any(|state| state[..state.len() - 1].iter().any(|active| *active));
-            if !descend {
+            if !descend(&patterns, &states) {
                 let after = fd.metadata().map_err(|error| io_error(&path, error))?;
                 if identity(&before) != identity(&after) {
                     return Err(invalid("workspace directory changed during enumeration").into());
@@ -398,9 +587,25 @@ pub(crate) mod workspace_selection {
                 let next: Vec<_> = patterns
                     .iter()
                     .zip(&states)
-                    .map(|((_, pattern), state)| pattern.step(state, component))
+                    .map(|((_, pattern), state)| {
+                        // npm glob ignores include dot directories, even
+                        // though its authored-selector minimatch does not.
+                        pattern.step_with_dot(
+                            state,
+                            component,
+                            limits.mode == WorkspaceSelectionMode::Npm && pattern.negative,
+                        )
+                    })
                     .collect();
-                if !next.iter().any(|state| state.iter().any(|active| *active)) {
+                if !patterns.iter().zip(&next).any(|((_, pattern), state)| {
+                    !pattern.negative && state.iter().any(|active| *active)
+                }) {
+                    continue;
+                }
+                let prune = excluded_subtree(&patterns, &next, limits.mode);
+                if prune || (!selected(&patterns, &next, limits.mode) && !descend(&patterns, &next))
+                {
+                    mark_excluded(&patterns, &next, &mut matched, prune);
                     continue;
                 }
                 let stat = statat(&fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
@@ -463,6 +668,7 @@ pub(crate) mod workspace_selection {
 
         fn limits() -> Limits {
             Limits {
+                mode: WorkspaceSelectionMode::Npm,
                 patterns: 8,
                 manifests: 8,
                 directories: 32,
@@ -484,6 +690,224 @@ pub(crate) mod workspace_selection {
             let s = pattern.step(&s, "a");
             assert_eq!(s.last(), Some(&true));
             assert!(!pattern.step(&s, "b").iter().any(|active| *active));
+        }
+
+        #[test]
+        fn npm_exclusions_follow_reference_order_and_never_invent_an_included_universe() {
+            // Expected sets observed with npm 11.19.1's map-workspaces API.
+            // The candidate walker never executes npm or any package code.
+            let root = tempfile::tempdir().unwrap();
+            for path in [
+                "packages/keep",
+                "packages/legacy",
+                "packages/legacy/sub",
+                "packages/.hidden",
+                "packages/.hidden/sub",
+                "apps/web",
+            ] {
+                std::fs::create_dir_all(root.path().join(path)).unwrap();
+                std::fs::write(root.path().join(path).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            for (selectors, expected) in [
+                (
+                    vec!["packages/*", "!packages/legacy"],
+                    vec!["packages/keep"],
+                ),
+                (
+                    vec!["!packages/legacy", "packages/*"],
+                    vec!["packages/keep"],
+                ),
+                (vec!["packages/legacy", "!packages/legacy"], vec![]),
+                (
+                    vec!["!packages/legacy", "packages/legacy"],
+                    vec!["packages/legacy"],
+                ),
+                (
+                    vec!["packages/**", "!packages/legacy/**"],
+                    vec!["packages/keep"],
+                ),
+                (
+                    vec!["packages/**", "!packages/legacy"],
+                    vec!["packages/keep", "packages/legacy/sub"],
+                ),
+                (
+                    vec!["!packages/**", "packages/*"],
+                    vec!["packages/keep", "packages/legacy"],
+                ),
+                (vec!["packages/*", "!packages/**"], vec![]),
+                (
+                    vec!["packages/*", "!packages/*", "packages/*"],
+                    vec!["packages/keep", "packages/legacy"],
+                ),
+                (
+                    vec!["packages/*", "!packages/**", "packages/keep"],
+                    vec!["packages/keep", "packages/legacy"],
+                ),
+                (vec!["!packages/**", "!packages/*", "packages/keep"], vec![]),
+                (
+                    vec![
+                        "packages/*",
+                        "!packages/keep",
+                        "!packages/keep",
+                        "packages/keep",
+                    ],
+                    vec!["packages/legacy"],
+                ),
+                (
+                    vec![
+                        "packages/**",
+                        "!packages/**",
+                        "!packages/keep",
+                        "packages/keep",
+                    ],
+                    vec!["packages/legacy", "packages/legacy/sub"],
+                ),
+                (
+                    vec!["!packages/**", "!apps/**", "!packages/*", "packages/keep"],
+                    vec!["packages/keep"],
+                ),
+                (vec!["!packages/legacy/**", "packages/legacy"], vec![]),
+                (
+                    vec!["!packages/legacy/**", "packages/legacy/"],
+                    vec!["packages/legacy"],
+                ),
+                (
+                    vec!["packages/**", "!packages/legacy/**", "packages/legacy/sub"],
+                    vec!["packages/keep", "packages/legacy", "packages/legacy/sub"],
+                ),
+                (vec!["!packages/legacy/", "packages/legacy"], vec![]),
+                (vec!["!packages/legacy"], vec![]),
+                (
+                    vec!["{apps,packages}/*", "!packages/legacy"],
+                    vec!["apps/web", "packages/keep"],
+                ),
+                (
+                    vec!["packages/*", "!missing/*"],
+                    vec!["packages/keep", "packages/legacy"],
+                ),
+                (vec!["packages/.hidden", "!packages/*"], vec![]),
+                (vec!["packages/.hidden/sub", "!packages/**/sub"], vec![]),
+                (
+                    vec!["packages/.hidden", "!packages/*", "packages/.hidden"],
+                    vec![],
+                ),
+            ] {
+                let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                let mut found = Vec::new();
+                walk::<ModuleResolutionGraphError>(&held, &selectors, limits(), None, |path, _| {
+                    let exists = root.path().join(path).join("package.json").is_file();
+                    if exists {
+                        found.push(path.to_owned());
+                    }
+                    Ok(exists)
+                })
+                .unwrap_or_else(|error| panic!("{selectors:?}: {error}"));
+                assert_eq!(found, expected, "{selectors:?}");
+            }
+        }
+
+        #[test]
+        fn bun_negation_preserves_authored_literal_directories_but_not_brace_alternatives() {
+            // Bun's documented workspace contract keeps ordinary path entries
+            // regardless of exclusion order; brace alternatives remain globs.
+            let root = tempfile::tempdir().unwrap();
+            for path in ["packages/keep", "packages/legacy", "packages/legacy/sub"] {
+                std::fs::create_dir_all(root.path().join(path)).unwrap();
+                std::fs::write(root.path().join(path).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            for (selectors, expected) in [
+                (
+                    vec!["packages/*", "!packages/legacy"],
+                    vec!["packages/keep"],
+                ),
+                (
+                    vec!["packages/legacy", "!packages/legacy"],
+                    vec!["packages/legacy"],
+                ),
+                (
+                    vec!["!packages/legacy", "packages/legacy"],
+                    vec!["packages/legacy"],
+                ),
+                (
+                    vec!["packages/**", "!packages/legacy/**", "packages/legacy/sub"],
+                    vec!["packages/keep", "packages/legacy/sub"],
+                ),
+                (
+                    vec!["packages/{keep,legacy}", "!packages/legacy"],
+                    vec!["packages/keep"],
+                ),
+                (vec!["!packages/**", "packages/*"], vec![]),
+            ] {
+                let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                let mut found = Vec::new();
+                let policy = Limits {
+                    mode: WorkspaceSelectionMode::Bun,
+                    ..limits()
+                };
+                walk::<ModuleResolutionGraphError>(&held, &selectors, policy, None, |path, _| {
+                    let exists = root.path().join(path).join("package.json").is_file();
+                    if exists {
+                        found.push(path.to_owned());
+                    }
+                    Ok(exists)
+                })
+                .unwrap_or_else(|error| panic!("{selectors:?}: {error}"));
+                assert_eq!(found, expected, "{selectors:?}");
+            }
+        }
+
+        #[test]
+        fn excluded_subtrees_are_not_opened_and_do_not_hide_surviving_validation_failures() {
+            use std::os::unix::fs::symlink;
+            let root = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("packages/keep")).unwrap();
+            std::fs::write(root.path().join("packages/keep/package.json"), "{}").unwrap();
+            symlink(outside.path(), root.path().join("packages/excluded")).unwrap();
+            let held = open_root(root.path()).unwrap();
+            let selectors = ["packages/**".into(), "!packages/excluded/**".into()];
+            let mut found = Vec::new();
+            walk::<ModuleResolutionGraphError>(
+                &held,
+                &selectors,
+                Limits {
+                    directories: 3,
+                    ..limits()
+                },
+                None,
+                |path, _| {
+                    assert!(!path.contains("excluded"));
+                    let exists = root.path().join(path).join("package.json").is_file();
+                    if exists {
+                        found.push(path.to_owned());
+                    }
+                    Ok(exists)
+                },
+            )
+            .unwrap();
+            assert_eq!(found, ["packages/keep"]);
+            for selectors in [
+                vec!["packages/**", "!packages/excluded"],
+                vec!["missing/*", "!packages/excluded/**"],
+                vec!["packages/*", "!packages/{keep,../outside}"],
+                vec!["packages/*", "!!packages/excluded"],
+                vec!["{packages/keep,!packages/excluded}"],
+            ] {
+                let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                assert!(
+                    walk::<ModuleResolutionGraphError>(
+                        &held,
+                        &selectors,
+                        limits(),
+                        None,
+                        |_, _| Ok(true)
+                    )
+                    .is_err(),
+                    "{selectors:?}"
+                );
+            }
         }
 
         #[test]
@@ -884,6 +1308,10 @@ pub struct ModuleResolutionGraph {
     pub schema_version: String,
     pub project_root: String,
     pub root_package_id: String,
+    /// Present when exclusion semantics affect workspace authority. Keeping
+    /// the mode in the canonical payload prevents cross-manager hash reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_selection_mode: Option<WorkspaceSelectionMode>,
     pub packages: Vec<PackageNode>,
     pub dependency_edges: Vec<DependencyEdge>,
     pub lockfile_pins: Vec<LockfilePin>,
@@ -955,6 +1383,8 @@ struct ModuleResolutionGraphPayload {
     schema_version: String,
     project_root: String,
     root_package_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_selection_mode: Option<WorkspaceSelectionMode>,
     packages: Vec<PackageNode>,
     dependency_edges: Vec<DependencyEdge>,
     lockfile_pins: Vec<LockfilePin>,
@@ -1156,8 +1586,22 @@ fn build_graph_parts(
             "root override trust admission requires the native Linux metadata parser",
         );
     }
-    let workspace_manifest_paths =
-        collect_workspace_manifest_paths(project_root, &root_manifest.package.workspace_patterns)?;
+    let selection_mode = if bun {
+        WorkspaceSelectionMode::Bun
+    } else {
+        WorkspaceSelectionMode::Npm
+    };
+    let workspace_selection_mode = root_manifest
+        .package
+        .workspace_patterns
+        .iter()
+        .any(|pattern| pattern.starts_with('!'))
+        .then_some(selection_mode);
+    let workspace_manifest_paths = collect_workspace_manifest_paths(
+        project_root,
+        &root_manifest.package.workspace_patterns,
+        selection_mode,
+    )?;
 
     let mut manifests = Vec::new();
     manifests.push(root_manifest);
@@ -1281,6 +1725,7 @@ fn build_graph_parts(
         schema_version: MODULE_RESOLUTION_GRAPH_SCHEMA.to_string(),
         project_root: ".".to_string(),
         root_package_id,
+        workspace_selection_mode,
         packages,
         dependency_edges,
         lockfile_pins,
@@ -1293,6 +1738,7 @@ fn build_graph_parts(
             schema_version: payload.schema_version,
             project_root: payload.project_root,
             root_package_id: payload.root_package_id,
+            workspace_selection_mode: payload.workspace_selection_mode,
             packages: payload.packages,
             dependency_edges: payload.dependency_edges,
             lockfile_pins: payload.lockfile_pins,
@@ -1309,6 +1755,7 @@ pub fn canonical_module_resolution_graph_bytes(
         schema_version: graph.schema_version.clone(),
         project_root: graph.project_root.clone(),
         root_package_id: graph.root_package_id.clone(),
+        workspace_selection_mode: graph.workspace_selection_mode,
         packages: graph.packages.clone(),
         dependency_edges: graph.dependency_edges.clone(),
         lockfile_pins: graph.lockfile_pins.clone(),
@@ -1332,6 +1779,10 @@ fn parse_manifest(
             detail: "package manifest escaped its project root".into(),
         }
     })?;
+    refuse_unsupported_dependency_authorities(
+        project_root,
+        relative_path.parent().unwrap_or(Path::new("")),
+    )?;
     let raw = read_project_metadata(project_root, relative_path, MAX_PACKAGE_JSON_BYTES)?;
     if let Some(captured) = captured.as_mut() {
         captured.bytes = captured.bytes.saturating_add(raw.len());
@@ -1542,8 +1993,13 @@ fn workspace_patterns(manifest: &Value) -> ModuleResolutionGraphResult<Vec<Strin
             })?;
         patterns.push(pattern.to_owned());
     }
-    patterns.sort();
-    patterns.dedup();
+    // npm negation can remove earlier positives or be cancelled by later
+    // positives. Preserve that authored order, including repeated selectors.
+    // Ordinary selector sets retain their existing canonical representation.
+    if !patterns.iter().any(|pattern| pattern.starts_with('!')) {
+        patterns.sort();
+        patterns.dedup();
+    }
     enforce_len("workspace patterns", patterns.len(), MAX_WORKSPACE_PATTERNS)?;
     Ok(patterns)
 }
@@ -1552,6 +2008,7 @@ fn workspace_patterns(manifest: &Value) -> ModuleResolutionGraphResult<Vec<Strin
 fn collect_workspace_manifest_paths(
     project_root: &Path,
     patterns: &[String],
+    mode: WorkspaceSelectionMode,
 ) -> ModuleResolutionGraphResult<Vec<PathBuf>> {
     use rustix::fs::{AtFlags, FileType, statat};
 
@@ -1564,6 +2021,7 @@ fn collect_workspace_manifest_paths(
         &root,
         patterns,
         workspace_selection::Limits {
+            mode,
             patterns: MAX_WORKSPACE_PATTERNS,
             manifests: MAX_PACKAGE_MANIFESTS,
             directories: 4096,
@@ -1604,6 +2062,7 @@ fn collect_workspace_manifest_paths(
 fn collect_workspace_manifest_paths(
     project_root: &Path,
     patterns: &[String],
+    _mode: WorkspaceSelectionMode,
 ) -> ModuleResolutionGraphResult<Vec<PathBuf>> {
     let mut manifests = BTreeSet::new();
     for pattern in patterns {
@@ -1624,7 +2083,11 @@ fn expand_workspace_pattern(
     project_root: &Path,
     pattern: &str,
 ) -> ModuleResolutionGraphResult<Vec<PathBuf>> {
-    if pattern.trim().is_empty() || pattern.contains("..") || pattern.starts_with('/') {
+    if pattern.trim().is_empty()
+        || pattern.contains("..")
+        || pattern.starts_with('/')
+        || pattern.starts_with('!')
+    {
         return Err(ModuleResolutionGraphError::InvalidWorkspacePattern {
             pattern: pattern.to_string(),
         });
@@ -1878,6 +2341,43 @@ fn optional_string(package: &Value, field: &str) -> ModuleResolutionGraphResult<
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => invalid_metadata(format!("lockfile {field} must be a string")),
     }
+}
+
+/// Unsupported lock/workspace and loader authorities cannot disappear into an
+/// otherwise clean npm/Bun dependency inventory. Keep migration and runtime
+/// topology on the same explicitly refused set.
+pub(crate) const UNSUPPORTED_DEPENDENCY_AUTHORITY_FILES: &[&str] = &[
+    "bun.lockb",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "yarn.lock",
+    ".pnp.cjs",
+    ".pnp.js",
+    ".pnp.data.json",
+    ".pnp.loader.mjs",
+];
+
+fn refuse_unsupported_dependency_authorities(
+    project_root: &Path,
+    directory: &Path,
+) -> ModuleResolutionGraphResult<()> {
+    for name in UNSUPPORTED_DEPENDENCY_AUTHORITY_FILES {
+        let path = directory.join(name);
+        // A zero-byte probe rejects every present entry without decoding an
+        // unsupported format. The shared reader also refuses links, devices,
+        // directories and FIFOs before reading; only absence may proceed.
+        match read_project_metadata(project_root, &path, 0) {
+            Err(ModuleResolutionGraphError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return invalid_metadata(format!(
+                    "unsupported dependency authority {}; select a reviewed npm or Bun text-lock project before trust admission",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn capture_package_lock(
@@ -2349,6 +2849,13 @@ mod tests {
         let graph = build_canonical_module_resolution_graph(root).expect("graph");
 
         assert_eq!(graph.schema_version, MODULE_RESOLUTION_GRAPH_SCHEMA);
+        assert_eq!(graph.workspace_selection_mode, None);
+        let serialized = serde_json::to_value(&graph).expect("serialize graph");
+        assert!(serialized.get("workspace_selection_mode").is_none());
+        assert_eq!(
+            serde_json::from_value::<ModuleResolutionGraph>(serialized).expect("legacy graph"),
+            graph
+        );
         assert_eq!(graph.packages.len(), 3);
         assert_eq!(graph.lockfile_pins.len(), 3);
         assert!(graph.dependency_edges.iter().any(|edge| {
@@ -2384,6 +2891,12 @@ mod tests {
         assert!(export_targets.contains(&("require", "./cjs/index.cjs")));
 
         let bytes = canonical_module_resolution_graph_bytes(&graph).expect("canonical bytes");
+        assert!(
+            serde_json::from_slice::<Value>(&bytes)
+                .expect("canonical payload")
+                .get("workspace_selection_mode")
+                .is_none()
+        );
         let hash = recompute_module_resolution_graph_hash(&graph).expect("hash");
         assert_eq!(graph.canonical_hash, hash);
         assert!(

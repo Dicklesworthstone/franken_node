@@ -54,6 +54,17 @@ Explicit `workspace:` requests can record workspace intent even without an
 installed link; a null `lockfile_package_path` makes that distinction visible.
 Duplicate workspace names and links to uncaptured workspaces fail closed.
 
+On Unix, workspace selection supports bounded literal paths, `*`, `**`, brace
+alternatives and single-leading-`!` exclusions through the same descriptor-relative
+walker as checked migration. npm exclusions retain authored selector order;
+Bun exclusions preserve explicitly listed literal directories. The selected
+lockfile chooses that dialect. An exclusion never grants access to unselected
+paths, and an excluded subtree is not opened just to discover its manifests.
+Graphs containing exclusions include `workspace_selection_mode` and the authored
+selector order in their canonical hash. Existing graphs without exclusions keep
+their prior serialization. Unsupported glob dialects, unsafe paths and exhausted
+budgets fail explicitly; there is no package-manager execution during capture.
+
 ## What the evidence does not establish
 
 This is **lockfile-metadata inspection**, not a semver solver, installer, trust

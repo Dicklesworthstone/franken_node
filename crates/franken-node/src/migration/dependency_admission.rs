@@ -328,6 +328,25 @@ impl Capture {
         bail!("empty dependency metadata path")
     }
 
+    fn refuse_unsupported_dependency_authorities(&mut self, directory: &str) -> Result<()> {
+        use crate::supply_chain::module_resolution_graph::UNSUPPORTED_DEPENDENCY_AUTHORITY_FILES;
+        for name in UNSUPPORTED_DEPENDENCY_AUTHORITY_FILES {
+            let path = if directory.is_empty() {
+                (*name).to_owned()
+            } else {
+                format!("{directory}/{name}")
+            };
+            // Match the binary-lock guard: absence alone is admissible, and
+            // unsupported bytes are never allocated or decoded.
+            let absent = self
+                .read(&path, 0)
+                .with_context(|| format!("unsupported dependency authority: {path}"))?
+                .is_none();
+            ensure!(absent, "unsupported dependency authority: {path}");
+        }
+        Ok(())
+    }
+
     fn refuse_binary_bun_lock(&mut self, path: &str) -> Result<()> {
         // Reuse the descriptor-relative, no-follow capture with a zero-byte
         // budget. Any present input (even empty, linked or nonregular) fails;
@@ -1045,6 +1064,7 @@ fn inspect_with_installation(
         .read("package.json", MAX_MANIFEST_BYTES)?
         .context("dependency admission requires package.json")?;
     capture.refuse_binary_bun_lock("bun.lockb")?;
+    capture.refuse_unsupported_dependency_authorities("")?;
     // Match the documented npm <=11 authority contract used by the runtime
     // topology: shrinkwrap wins, and the ignored package-lock is not parsed,
     // inventoried or merged. Only absence permits fallback; malformed,
@@ -1077,8 +1097,15 @@ fn inspect_with_installation(
     };
     let mut manifests = match &catalogs {
         Some(catalogs) => catalogs.capture_workspaces(&mut capture, manifest)?,
-        None => workspaces::capture(&mut capture, manifest)?,
+        None => workspaces::capture(
+            &mut capture,
+            manifest,
+            crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode::Npm,
+        )?,
     };
+    for directory in manifests.keys().filter(|directory| !directory.is_empty()) {
+        capture.refuse_unsupported_dependency_authorities(directory)?;
+    }
     let mut report = DependencyAdmission {
         schema_version: "franken-node/native-dependency-admission/v1".into(),
         scope: SCOPE.into(),
@@ -1898,6 +1925,110 @@ mod tests {
             fs::write(root.path().join("packages/dep/bun.lockb"), contents).unwrap();
             assert!(inspect_for_execution(root.path(), deadline()).is_err());
         }
+    }
+
+    #[test]
+    fn unsupported_package_manager_authority_never_becomes_a_clean_inventory() {
+        use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
+
+        for authority in [
+            "bun.lockb",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "yarn.lock",
+            ".pnp.cjs",
+            ".pnp.js",
+            ".pnp.data.json",
+            ".pnp.loader.mjs",
+        ] {
+            for contents in [b"unparsed authority\0\xff".as_slice(), b""] {
+                for npm_lock in [None, Some(json!({"lockfileVersion":3,"packages":{}}))] {
+                    let root = fixture(json!({}), npm_lock);
+                    fs::write(root.path().join(authority), contents).unwrap();
+                    assert!(
+                        inspect(root.path(), deadline()).is_err(),
+                        "metadata admission ignored {authority}"
+                    );
+                    assert!(
+                        inspect_for_execution(root.path(), deadline()).is_err(),
+                        "execution admission ignored {authority}"
+                    );
+                    assert!(
+                        build_canonical_module_resolution_graph(root.path()).is_err(),
+                        "runtime topology ignored {authority}"
+                    );
+                }
+                let root = bun_workspace_fixture("workspace:*", "1.2.3");
+                fs::write(root.path().join("packages/dep").join(authority), contents).unwrap();
+                assert!(
+                    inspect_for_execution(root.path(), deadline()).is_err(),
+                    "selected workspace admission ignored {authority}"
+                );
+                assert!(
+                    build_canonical_module_resolution_graph(root.path()).is_err(),
+                    "selected workspace topology ignored {authority}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_authority_links_and_nonregular_entries_fail_without_following() {
+        use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
+        use std::os::unix::fs::symlink;
+
+        for directory in ["", "packages/dep"] {
+            for kind in ["file_link", "dangling_link", "directory", "fifo"] {
+                let root = bun_workspace_fixture("workspace:*", "1.2.3");
+                let authority = root.path().join(directory).join("pnpm-lock.yaml");
+                match kind {
+                    "file_link" => {
+                        fs::write(root.path().join("unrelated.txt"), b"untouched").unwrap();
+                        symlink(root.path().join("unrelated.txt"), &authority).unwrap();
+                    }
+                    "dangling_link" => symlink("missing-authority", &authority).unwrap(),
+                    "fifo" => {
+                        rustix::fs::mkfifoat(rustix::fs::CWD, &authority, Mode::RUSR | Mode::WUSR)
+                            .unwrap()
+                    }
+                    _ => fs::create_dir(&authority).unwrap(),
+                }
+                assert!(inspect_for_execution(root.path(), deadline()).is_err());
+                assert!(build_canonical_module_resolution_graph(root.path()).is_err());
+                assert!(fs::symlink_metadata(&authority).is_ok());
+                if kind == "file_link" {
+                    assert_eq!(
+                        fs::read(root.path().join("unrelated.txt")).unwrap(),
+                        b"untouched"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_authority_checks_stay_with_selected_project_manifests() {
+        use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
+
+        let root = fixture(json!({}), Some(json!({"lockfileVersion":3,"packages":{}})));
+        fs::create_dir_all(root.path().join("examples/separate-project")).unwrap();
+        fs::write(
+            root.path().join("examples/separate-project/pnpm-lock.yaml"),
+            b"unselected nested project",
+        )
+        .unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review());
+        assert!(report.installation_checked);
+        assert!(build_canonical_module_resolution_graph(root.path()).is_ok());
+
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        assert!(
+            !inspect_for_execution(root.path(), deadline())
+                .unwrap()
+                .requires_review()
+        );
+        assert!(build_canonical_module_resolution_graph(root.path()).is_ok());
     }
 
     #[test]

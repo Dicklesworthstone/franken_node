@@ -214,7 +214,11 @@ impl Catalogs {
                 .context("Bun workspace selectors missing")?;
             object.insert("workspaces".into(), selectors);
         }
-        workspaces::capture(capture, root)
+        workspaces::capture(
+            capture,
+            root,
+            crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode::Bun,
+        )
     }
 
     fn resolve<'a>(&'a self, package: &str, request: &str) -> Result<Option<&'a str>> {

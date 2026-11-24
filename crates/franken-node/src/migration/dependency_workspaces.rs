@@ -1,7 +1,8 @@
 //! Bounded selection of npm workspace manifests from the private capture.
 //!
 //! Selectors support literal components, `*` within a component, standalone
-//! `**` and bounded nested brace alternatives. Unsupported glob dialects fail
+//! `**`, bounded nested brace alternatives, and lock-authority-specific
+//! exclusions. Unsupported glob dialects fail
 //! explicitly. No installed-package or
 //! state-directory traversal, symlink following, package-manager execution or
 //! fallback to trusting the lockfile's workspace projection.
@@ -10,6 +11,7 @@ use super::{
     Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_LOCK_BYTES,
     MAX_MANIFEST_BYTES, SECTIONS, bounded_text, flag, name, time_remaining,
 };
+use crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode;
 use crate::supply_chain::module_resolution_graph::workspace_selection::{
     self, open_directory as directory,
 };
@@ -34,7 +36,11 @@ pub(super) fn manifest_path(directory: &str) -> String {
 /// The root and all selected manifests are read exactly once, even when
 /// selectors overlap. Directory handles are reopened relative to the held root
 /// instead of retaining one descriptor per queued directory.
-pub(super) fn capture(capture: &mut Capture, root: Value) -> Result<BTreeMap<String, Value>> {
+pub(super) fn capture(
+    capture: &mut Capture,
+    root: Value,
+    mode: WorkspaceSelectionMode,
+) -> Result<BTreeMap<String, Value>> {
     let raw = match root.get("workspaces") {
         None => &[][..],
         Some(value) => value
@@ -63,6 +69,7 @@ pub(super) fn capture(capture: &mut Capture, root: Value) -> Result<BTreeMap<Str
         &held_root,
         &patterns,
         workspace_selection::Limits {
+            mode,
             patterns: MAX_PATTERNS,
             manifests: MAX_MANIFESTS,
             directories: MAX_DIRECTORIES,
@@ -357,6 +364,110 @@ mod tests {
     }
 
     #[test]
+    fn excluded_npm_and_bun_workspaces_preserve_installed_link_and_lifecycle_authority() {
+        use super::super::inspect_for_execution;
+        use crate::supply_chain::module_resolution_graph::{
+            build_canonical_module_resolution_graph, recompute_module_resolution_graph_hash,
+        };
+        use std::os::unix::fs::symlink;
+
+        let member = json!({"name":"keep", "version":"1.0.0"});
+        for bun in [false, true] {
+            let manifest = json!({"name":"root", "workspaces":[
+                "packages/**", "!packages/excluded/**", "!packages/missing/**"
+            ], "dependencies":{"keep":"^1"}});
+            let root = fixture(manifest.clone(), None);
+            write(root.path(), "packages/keep", member.clone());
+            fs::create_dir_all(root.path().join("packages/excluded/child")).unwrap();
+            fs::write(
+                root.path().join("packages/excluded/package.json"),
+                "not JSON",
+            )
+            .unwrap();
+            let (filename, lock) = if bun {
+                (
+                    "bun.lock",
+                    json!({"lockfileVersion":2, "workspaces":{
+                    "":{"name":"root","dependencies":{"keep":"^1"}},
+                    "packages/keep":member
+                },"packages":{"keep":["keep@workspace:packages/keep"]}}),
+                )
+            } else {
+                (
+                    "package-lock.json",
+                    modern_fixture(json!({
+                        "":manifest,"packages/keep":member,
+                        "node_modules/keep":{"link":true,"resolved":"packages/keep"}
+                    })),
+                )
+            };
+            fs::write(
+                root.path().join(filename),
+                serde_json::to_vec(&lock).unwrap(),
+            )
+            .unwrap();
+            fs::create_dir(root.path().join("node_modules")).unwrap();
+            symlink("../packages/keep", root.path().join("node_modules/keep")).unwrap();
+
+            let admitted = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(
+                admitted.installation_checked && !admitted.requires_review(),
+                "{filename}: {admitted:#?}"
+            );
+            assert_eq!(admitted.manifests_scanned, 2);
+            assert!(
+                !admitted
+                    .inputs
+                    .iter()
+                    .any(|input| input.path.contains("excluded"))
+            );
+            let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
+            assert_eq!(graph.packages.len(), 2);
+            assert_eq!(
+                graph.workspace_selection_mode,
+                Some(if bun {
+                    WorkspaceSelectionMode::Bun
+                } else {
+                    WorkspaceSelectionMode::Npm
+                })
+            );
+            assert_eq!(
+                recompute_module_resolution_graph_hash(&graph).unwrap(),
+                graph.canonical_hash
+            );
+            let mut relabelled = graph.clone();
+            relabelled.workspace_selection_mode = Some(if bun {
+                WorkspaceSelectionMode::Npm
+            } else {
+                WorkspaceSelectionMode::Bun
+            });
+            assert_ne!(
+                recompute_module_resolution_graph_hash(&relabelled).unwrap(),
+                graph.canonical_hash
+            );
+
+            // Exclusion does not exempt a surviving workspace from installed
+            // source checks or hide a lifecycle script behind a clean lock.
+            write(
+                root.path(),
+                "packages/keep",
+                json!({
+                    "name":"keep","version":"1.0.0","scripts":{"prepare":"node build.js"}
+                }),
+            );
+            let changed = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(changed.requires_review());
+            assert!(
+                changed
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "install_script")
+            );
+            assert!(!root.path().join("build.js").exists());
+        }
+    }
+
+    #[test]
     fn brace_selected_npm_and_bun_workspaces_bind_the_actual_installation() {
         use super::super::inspect_for_execution;
         use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
@@ -557,7 +668,8 @@ mod tests {
             "/outside",
             "packages/{1..3}",
             "packages/[ab]",
-            "!packages/a",
+            "!../outside",
+            "!!packages/a",
             "packages/a?",
             "node_modules/*",
             ".git/*",

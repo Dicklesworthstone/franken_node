@@ -16,6 +16,15 @@ metadata is not followed. A root or selected workspace `bun.lockb` is explicitly
 refused, including empty, linked and nonregular inputs; it is never silently
 ignored as though the project had no dependency authority.
 
+Root and selected-workspace `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `yarn.lock`
+and Yarn Plug'n'Play `.pnp.cjs`, `.pnp.js`, `.pnp.data.json`, or `.pnp.loader.mjs`
+are unsupported authorities and also fail explicitly, even when a supported npm
+or Bun lock is present. Empty, linked and nonregular entries cannot turn into
+an empty successful graph. Runtime dependency topology uses the same refused
+set, including selected-workspace `bun.lockb`. An unrelated nested project
+outside the selected workspaces does not supply this project's dependency
+authority. This guard does not add pnpm or Yarn resolution support.
+
 ## npm root override admission
 
 Captured root scalar `overrides` can select registry versions or explicit
@@ -186,15 +195,30 @@ that the runtime executes its packages correctly.
 
 For npm and supported Bun projects, a root `workspaces` array selects captured
 manifests with literal path components, component `*` wildcards and standalone
-`**`. Supported Bun workspace objects use their `packages` array identically.
+`**`, bounded brace alternatives and single-leading-`!` exclusions. Supported
+Bun workspace objects use their `packages` array. The selected lockfile chooses
+the exclusion dialect: npm preserves authored order, allowing a later positive
+selector to cancel a matching earlier exclusion; Bun applies exclusions to
+glob matches while preserving explicitly authored literal directory entries.
+An exclusion alone never selects every other directory. Excluded subtrees are
+pruned without reading their manifests, but surviving workspaces retain all
+installed-link, lifecycle and dependency checks. Malformed exclusions and
+over-budget expansions are rejected before any selector takes effect.
 One leading `./` and one trailing slash are accepted. Wildcards do not implicitly
 enter dot folders. Overlapping selectors read each manifest once. Unsupported
-pattern dialects, selectors matching no manifests, duplicate workspace/root
+pattern dialects, surviving positive selectors matching no manifests, duplicate workspace/root
 names, nested workspace configurations and selected symlinks fail explicitly.
 Installed packages and reserved runtime/backup/state directories are excluded.
 Traversal is bounded by 64 selectors, depth 64, 4,096 directories, 50,000 entries
 and 1,024 manifests including the root. Metadata and declaration budgets are
 shared across the entire inspection.
+
+The npm selection expectations were checked against npm 11.19.1's
+[`@npmcli/map-workspaces`](https://github.com/npm/map-workspaces) API; Bun follows
+its [workspace exclusion contract](https://bun.sh/docs/pm/workspaces).
+Repeated leading negation, extglobs, bracket classes and numeric brace ranges
+remain unsupported. An intentionally excluded match does not require opening a
+manifest to establish that it was excluded.
 
 Every selected workspace must have a canonical root `node_modules/<name>` link
 in a modern npm lockfile or supported Bun projection. The recorded target,
