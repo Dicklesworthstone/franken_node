@@ -3090,16 +3090,15 @@ impl FleetTransport for AsupersyncFleetTransport {
         {
             let mut state = self.network.write_state()?;
             self.ensure_initialized(&state)?;
-            let mut nodes = state.nodes.as_ref().clone();
-            if let Some(existing) = nodes
-                .iter_mut()
-                .find(|existing| existing.node_id == status.node_id)
-            {
+            let nodes = Arc::make_mut(&mut state.nodes);
+            if let Some(existing) = nodes.iter_mut().find(|existing| {
+                existing.node_id == status.node_id && existing.zone_id == status.zone_id
+            }) {
                 *existing = status.clone();
             } else {
-                push_bounded(&mut nodes, status.clone(), MAX_NODES_CAP);
+                ensure_fleet_node_capacity(nodes.len())?;
+                nodes.push(status.clone());
             }
-            state.nodes = Arc::new(nodes);
         }
         self.record_event("upsert_node_status")?;
         Ok(())
@@ -3542,13 +3541,52 @@ impl FileFleetTransport {
         Ok(actions)
     }
 
+    /// The original file stays with the first enrolled (zone, node) pair.
+    /// Other zones sharing its node ID get a separate bounded filename. Check
+    /// both locations so an existing qualified record stays there on restart.
+    fn node_status_write_path(&self, status: &NodeStatus) -> Result<PathBuf, FleetTransportError> {
+        let original_path = self.layout.node_status_path(&status.node_id)?;
+        let original = read_existing_node_status(&original_path)?;
+        let same_node =
+            |entry: &NodeStatus| entry.node_id == status.node_id && entry.zone_id == status.zone_id;
+        if original.as_ref().is_some_and(same_node) {
+            return Ok(original_path);
+        }
+
+        let mut hash = Sha256::new();
+        hash.update(status.zone_id.as_bytes());
+        hash.update([0]);
+        hash.update(status.node_id.as_bytes());
+        let qualified_path = self
+            .layout
+            .nodes_dir()
+            .join(format!("scoped-{}.json", hex::encode(hash.finalize())));
+        if let Some(entry) = read_existing_node_status(&qualified_path)? {
+            if !same_node(&entry) {
+                return Err(FleetTransportError::serialization(
+                    "zone-qualified fleet status contains a different node identity",
+                ));
+            }
+            return Ok(qualified_path);
+        }
+
+        // The caller holds the exclusive snapshot lock. Heartbeats for
+        // existing nodes never have to scan the directory, even at capacity.
+        ensure_fleet_node_capacity(self.node_status_paths()?.len())?;
+        Ok(if original.is_some() {
+            qualified_path
+        } else {
+            original_path
+        })
+    }
+
     fn write_node_status_unlocked(&self, status: &NodeStatus) -> Result<(), FleetTransportError> {
-        let path = self.layout.node_status_path(&status.node_id)?;
         let lock_path = self.node_lock_path(&status.node_id)?;
         let lock_file = self.lock_file(&lock_path)?;
         lock_file_with_backoff(&lock_file, &lock_path, false)?;
 
         let write_result = (|| {
+            let path = self.node_status_write_path(status)?;
             let temp_path = path.with_extension(format!("json.tmp-{}", Uuid::now_v7()));
             let mut temp_guard = TempFileGuard::new(temp_path.clone());
             let payload = serde_json::to_vec(status).map_err(|err| {
@@ -3598,8 +3636,8 @@ impl FileFleetTransport {
         Ok(())
     }
 
-    fn list_node_statuses_unlocked(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
-        let mut nodes = Vec::new();
+    fn node_status_paths(&self) -> Result<Vec<PathBuf>, FleetTransportError> {
+        let mut paths = Vec::new();
         for entry in fs::read_dir(self.layout.nodes_dir()).map_err(|err| {
             FleetTransportError::io(format!(
                 "failed reading fleet nodes directory {}: {err}",
@@ -3626,28 +3664,60 @@ impl FileFleetTransport {
                 continue;
             }
 
-            let file = File::open(&path).map_err(|err| {
-                FleetTransportError::io(format!(
-                    "failed opening node status {}: {err}",
-                    path.display()
-                ))
-            })?;
-            let status: NodeStatus = serde_json::from_reader(file).map_err(|err| {
-                FleetTransportError::serialization(format!(
-                    "failed parsing node status {}: {err}",
-                    path.display()
-                ))
-            })?;
-            validate_node_status(&status)?;
-            if nodes.len() >= MAX_NODES_CAP {
-                return Err(FleetTransportError::serialization(format!(
-                    "fleet node status count exceeds {MAX_NODES_CAP} entries"
-                )));
-            }
-            nodes.push(status);
+            ensure_fleet_node_capacity(paths.len())?;
+            paths.push(path);
         }
+        Ok(paths)
+    }
 
-        Ok(nodes)
+    fn list_node_statuses_unlocked(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
+        self.node_status_paths()?
+            .iter()
+            .map(|path| read_node_status(path))
+            .collect()
+    }
+}
+
+fn ensure_fleet_node_capacity(count: usize) -> Result<(), FleetTransportError> {
+    if count >= MAX_NODES_CAP {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet node status count exceeds {MAX_NODES_CAP} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn read_node_status(path: &Path) -> Result<NodeStatus, FleetTransportError> {
+    let file = File::open(path).map_err(|err| {
+        FleetTransportError::io(format!(
+            "failed opening node status {}: {err}",
+            path.display()
+        ))
+    })?;
+    let status = serde_json::from_reader(file).map_err(|err| {
+        FleetTransportError::serialization(format!(
+            "failed parsing node status {}: {err}",
+            path.display()
+        ))
+    })?;
+    validate_node_status(&status)?;
+    Ok(status)
+}
+
+// Do not follow a link or silently overwrite a corrupt legacy heartbeat
+// while selecting the owner of an existing unqualified filename.
+fn read_existing_node_status(path: &Path) -> Result<Option<NodeStatus>, FleetTransportError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => read_node_status(path).map(Some),
+        Ok(_) => Err(FleetTransportError::serialization(format!(
+            "fleet node status {} is not a regular file",
+            path.display()
+        ))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(FleetTransportError::io(format!(
+            "failed inspecting node status {}: {err}",
+            path.display()
+        ))),
     }
 }
 
@@ -6605,6 +6675,117 @@ mod tests {
         )
         .expect("parse node file");
         assert_eq!(persisted, state.nodes[0]);
+    }
+
+    #[test]
+    fn file_transport_retains_legacy_and_zone_qualified_heartbeats_after_restart() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+
+        let original = node_status(
+            "east",
+            "worker-1",
+            "2026-04-06T02:00:01Z",
+            1,
+            NodeHealth::Healthy,
+        );
+        let legacy = transport.layout().node_status_path("worker-1").unwrap();
+        fs::write(&legacy, serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut west = original.clone();
+        west.zone_id = "west".into();
+        transport.upsert_node_status(&west).unwrap();
+        assert_eq!(super::read_node_status(&legacy).unwrap(), original);
+
+        let mut reopened = FileFleetTransport::new(directory.path());
+        let mut east = original.clone();
+        east.quarantine_version = 2;
+        east.health = NodeHealth::Quarantined;
+        west.quarantine_version = 3;
+        reopened.upsert_node_status(&west).unwrap();
+        reopened.upsert_node_status(&east).unwrap();
+        assert_eq!(
+            reopened.read_shared_state().unwrap().nodes,
+            vec![east.clone(), west]
+        );
+        assert_eq!(super::read_node_status(&legacy).unwrap(), east);
+    }
+
+    #[test]
+    fn file_transport_refuses_new_identity_at_capacity_and_keeps_heartbeats_live() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let mut status = node_status(
+            "east",
+            "worker",
+            "2026-04-06T02:00:01Z",
+            1,
+            NodeHealth::Healthy,
+        );
+        // Seed the supported boundary directly, without a quadratic sequence
+        // of new-identity admissions just to prepare this fixture.
+        for index in 0..MAX_NODES_CAP {
+            status.node_id = format!("worker-{index}");
+            let path = transport
+                .layout()
+                .node_status_path(&status.node_id)
+                .unwrap();
+            fs::write(path, serde_json::to_vec(&status).unwrap()).unwrap();
+        }
+        status.zone_id = "west".into();
+        assert!(transport.upsert_node_status(&status).is_err());
+        status.zone_id = "east".into();
+        status.health = NodeHealth::Quarantined;
+        transport.upsert_node_status(&status).unwrap();
+        let state = transport.read_shared_state().unwrap();
+        assert_eq!(state.nodes.len(), MAX_NODES_CAP);
+        assert!(state.nodes.contains(&status));
+        assert!(state.nodes.iter().all(|node| node.zone_id == "east"));
+    }
+
+    #[cfg(feature = "asupersync-transport")]
+    #[test]
+    fn asupersync_fleet_retains_each_zone_and_refuses_overflow_without_eviction() {
+        use asupersync::{Budget, runtime::RuntimeBuilder};
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let network = super::AsupersyncFleetNetwork::new();
+        let mut transport = super::AsupersyncFleetTransport::with_cx(
+            runtime.request_cx_with_budget(Budget::INFINITE),
+            "observer",
+            network.clone(),
+        );
+        transport.initialize().unwrap();
+        let mut status = node_status(
+            "east",
+            "worker",
+            "2026-04-06T02:00:01Z",
+            1,
+            NodeHealth::Healthy,
+        );
+        transport.upsert_node_status(&status).unwrap();
+        status.zone_id = "west".into();
+        transport.upsert_node_status(&status).unwrap();
+        assert_eq!(transport.read_shared_state().unwrap().nodes.len(), 2);
+        {
+            let mut state = network.write_state().unwrap();
+            let nodes = Arc::make_mut(&mut state.nodes);
+            for index in nodes.len()..MAX_NODES_CAP {
+                let mut extra = status.clone();
+                extra.node_id = format!("extra-{index}");
+                nodes.push(extra);
+            }
+        }
+        let retained = transport.read_shared_state().unwrap();
+        status.zone_id = "north".into();
+        assert!(transport.upsert_node_status(&status).is_err());
+        assert_eq!(transport.read_shared_state().unwrap(), retained);
+        status.zone_id = "east".into();
+        status.health = NodeHealth::Quarantined;
+        transport.upsert_node_status(&status).unwrap();
+        let updated = transport.read_shared_state().unwrap();
+        assert_eq!(updated.nodes.len(), MAX_NODES_CAP);
+        assert!(updated.nodes.contains(&status));
     }
 
     #[test]
