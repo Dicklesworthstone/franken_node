@@ -20062,6 +20062,7 @@ mod trust_scan_tests {
     #[test]
     fn parse_trust_scan_npm_metadata_prefers_requested_version() {
         let payload = serde_json::json!({
+            "name": "example",
             "dist-tags": {"latest": "2.0.0"},
             "maintainers": [{"name": "maintainer", "email": "maintainer@example.com"}],
             "time": {
@@ -20078,7 +20079,8 @@ mod trust_scan_tests {
             }
         });
 
-        let metadata = parse_trust_scan_npm_metadata(&payload, "example", Some("1.5.0"));
+        let metadata = parse_trust_scan_npm_metadata(&payload, "example", Some("1.5.0"))
+            .expect("matching captured release");
         assert_eq!(metadata.resolved_version.as_deref(), Some("1.5.0"));
         assert_eq!(
             metadata.published_at.as_deref(),
@@ -20103,12 +20105,132 @@ mod trust_scan_tests {
             if let Some(malformed) = malformed {
                 versions.insert("1.5.0".to_owned(), malformed);
             }
-            let metadata =
-                parse_trust_scan_npm_metadata(&missing_preferred, "example", Some("1.5.0"));
-            assert!(metadata.resolved_version.is_none());
-            assert!(metadata.registry_integrity_hashes.is_empty());
-            assert!(metadata.published_at.is_none());
+            assert!(
+                parse_trust_scan_npm_metadata(&missing_preferred, "example", Some("1.5.0"))
+                    .is_err(),
+                "a missing or malformed pinned release must not borrow latest provenance"
+            );
         }
+    }
+
+    #[test]
+    fn parse_trust_scan_npm_metadata_binds_scoped_package_and_version_identity() {
+        let package = "@acme/runtime";
+        let payload = serde_json::json!({
+            "name": package,
+            "dist-tags": {"latest": "1.5.0"},
+            "versions": {
+                "1.5.0": {"name": package, "version": "1.5.0"}
+            }
+        });
+        assert!(parse_trust_scan_npm_metadata(&payload, package, Some("1.5.0")).is_ok());
+        for wrong_name in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(123)),
+            Some(serde_json::json!("@other/runtime")),
+        ] {
+            let mut mismatched = payload.clone();
+            mismatched.as_object_mut().unwrap().remove("name");
+            if let Some(wrong_name) = wrong_name {
+                mismatched["name"] = wrong_name;
+            }
+            assert!(parse_trust_scan_npm_metadata(&mismatched, package, Some("1.5.0")).is_err());
+        }
+        for (field, wrong_value) in [
+            ("name", serde_json::Value::Null),
+            ("name", serde_json::json!(123)),
+            ("name", serde_json::json!("@other/runtime")),
+            ("version", serde_json::Value::Null),
+            ("version", serde_json::json!(123)),
+            ("version", serde_json::json!("2.0.0")),
+        ] {
+            let mut mismatched = payload.clone();
+            mismatched["versions"]["1.5.0"][field] = wrong_value;
+            assert!(
+                parse_trust_scan_npm_metadata(&mismatched, package, Some("1.5.0")).is_err(),
+                "contradictory selected-release {field} must not provide provenance"
+            );
+        }
+        // npm packuments and the existing offline fixtures may omit repeated
+        // identity fields from a version object; the map key remains binding.
+        let mut without_repeated_identity = payload;
+        without_repeated_identity["versions"]["1.5.0"] = serde_json::json!({});
+        assert!(
+            parse_trust_scan_npm_metadata(&without_repeated_identity, package, Some("1.5.0"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn parse_trust_scan_npm_metadata_requires_an_available_selected_release() {
+        let payload = serde_json::json!({
+            "name": "@acme/runtime",
+            "dist-tags": {"latest": "1.5.0"},
+            "versions": {"1.5.0": {}}
+        });
+        let latest = parse_trust_scan_npm_metadata(&payload, "@acme/runtime", None)
+            .expect("latest resolves to a real version object");
+        assert_eq!(latest.resolved_version.as_deref(), Some("1.5.0"));
+        for malformed in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut missing_latest = payload.clone();
+            missing_latest["versions"]
+                .as_object_mut()
+                .unwrap()
+                .remove("1.5.0");
+            if let Some(malformed) = malformed {
+                missing_latest["versions"]["1.5.0"] = malformed;
+            }
+            assert!(parse_trust_scan_npm_metadata(&missing_latest, "@acme/runtime", None).is_err());
+        }
+        for invalid_version in ["^1.5.0", "1.5.0/../../other", ""] {
+            let mut invalid = payload.clone();
+            invalid["dist-tags"]["latest"] = serde_json::json!(invalid_version);
+            invalid["versions"][invalid_version] = serde_json::json!({});
+            assert!(parse_trust_scan_npm_metadata(&invalid, "@acme/runtime", None).is_err());
+            assert!(
+                parse_trust_scan_npm_metadata(&invalid, "@acme/runtime", Some(invalid_version))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn offline_trust_scan_metadata_binds_colliding_scoped_filenames() {
+        let directory = tempfile::tempdir().expect("offline packument directory");
+        let offline_dir = directory.path().canonicalize().unwrap();
+        let package = "@a__b/c";
+        let colliding_package = "@a/b__c";
+        assert_eq!(
+            package.replacen('/', "__", 1),
+            colliding_package.replacen('/', "__", 1)
+        );
+        std::fs::write(
+            offline_dir.join("@a__b__c.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": package,
+                "maintainers": [{"name": "correct-publisher"}],
+                "_hermetic_dependent_count": 42,
+                "versions": {"1.0.0": {"name": package, "version": "1.0.0"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let metadata = load_offline_trust_scan_npm_metadata(&offline_dir, package, Some("1.0.0"))
+            .expect("metadata belongs to the requested package");
+        assert_eq!(
+            metadata.publisher_id.as_deref(),
+            Some("npm-maintainer:correct-publisher")
+        );
+        assert_eq!(metadata.dependent_count, Some(42));
+        let rejected =
+            load_offline_trust_scan_npm_metadata(&offline_dir, colliding_package, Some("1.0.0"))
+                .expect_err("the same filename must not confer another scope's metadata");
+        assert!(rejected.to_string().contains("package name does not match"));
     }
 
     #[test]
@@ -24094,12 +24216,6 @@ fn trust_scan_user_agent() -> String {
 /// Validate that a package name is safe for URL construction.
 /// npm package names have strict format requirements that we can enforce.
 fn validate_package_name(name: &str) -> anyhow::Result<()> {
-    // npm package name validation rules:
-    // - length between 1 and 214 characters
-    // - lowercase only
-    // - can contain hyphens, dots, underscores
-    // - cannot start with . or _
-    // - no URL-unsafe characters
     if name.is_empty() || name.len() > 214 {
         anyhow::bail!(
             "Package name length must be 1-214 characters, got {}",
@@ -24107,21 +24223,33 @@ fn validate_package_name(name: &str) -> anyhow::Result<()> {
         );
     }
 
-    if name.starts_with('.') || name.starts_with('_') {
-        anyhow::bail!("Package name cannot start with '.' or '_'");
+    // A scope introduces exactly one separator. Validate both components
+    // under the same conservative policy as an unscoped package; callers
+    // still percent-encode the whole name into a single URL path component.
+    let scoped = name.starts_with('@');
+    let components: Vec<_> = name.strip_prefix('@').unwrap_or(name).split('/').collect();
+    if components.len() != if scoped { 2 } else { 1 } {
+        anyhow::bail!("Package name must be unscoped or have the form '@scope/name'");
     }
-
-    // Only allow lowercase alphanumeric, hyphens, dots, and underscores
-    // This is stricter than npm spec but safer for URL construction
-    for ch in name.chars() {
-        if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '-' && ch != '.' && ch != '_' {
-            anyhow::bail!("Package name contains invalid character: '{}'", ch);
+    for component in components {
+        if component.is_empty() || component.starts_with('.') || component.starts_with('_') {
+            anyhow::bail!(
+                "Package name components must be nonempty and cannot start with '.' or '_'"
+            );
         }
-    }
-
-    // Additional safety: reject names that could cause path traversal
-    if name.contains("..") || name.contains("//") {
-        anyhow::bail!("Package name cannot contain '..' or '//'");
+        for ch in component.chars() {
+            if !ch.is_ascii_lowercase()
+                && !ch.is_ascii_digit()
+                && ch != '-'
+                && ch != '.'
+                && ch != '_'
+            {
+                anyhow::bail!("Package name contains invalid character: '{}'", ch);
+            }
+        }
+        if component.contains("..") {
+            anyhow::bail!("Package name cannot contain '..'");
+        }
     }
 
     Ok(())
@@ -24311,25 +24439,50 @@ fn parse_trust_scan_npm_metadata(
     payload: &serde_json::Value,
     dependency_name: &str,
     preferred_version: Option<&str>,
-) -> TrustScanDeepMetadata {
+) -> Result<TrustScanDeepMetadata> {
+    anyhow::ensure!(
+        payload.is_object(),
+        "npm registry metadata for {dependency_name} must be an object"
+    );
+    anyhow::ensure!(
+        payload.get("name").and_then(serde_json::Value::as_str) == Some(dependency_name),
+        "npm registry metadata package name does not match requested package {dependency_name}"
+    );
     let versions = payload
         .get("versions")
         .and_then(serde_json::Value::as_object);
-    let resolved_version = match preferred_version {
-        Some(version) => versions
-            .and_then(|versions| versions.get(version))
-            .filter(|version_payload| version_payload.is_object())
-            .map(|_| version.to_owned()),
+    let selected_version = match preferred_version {
+        Some(version) => Some(version),
         None => payload
             .get("dist-tags")
             .and_then(serde_json::Value::as_object)
             .and_then(|tags| tags.get("latest"))
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string),
-    };
-    let version_payload = resolved_version
-        .as_deref()
-        .and_then(|version| versions.and_then(|versions| versions.get(version)));
+            .and_then(serde_json::Value::as_str),
+    }
+    .ok_or_else(|| {
+        anyhow::anyhow!("npm registry metadata for {dependency_name} has no selected version")
+    })?;
+    validate_version_string(selected_version).with_context(|| {
+        format!("invalid selected npm registry version for {dependency_name}: {selected_version}")
+    })?;
+    let selected_payload = versions
+        .and_then(|versions| versions.get(selected_version))
+        .filter(|version_payload| version_payload.is_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "npm registry metadata for {dependency_name} does not contain selected version {selected_version}; refusing to use another version's provenance"
+            )
+        })?;
+    for (field, expected) in [("name", dependency_name), ("version", selected_version)] {
+        if let Some(value) = selected_payload.get(field) {
+            anyhow::ensure!(
+                value.as_str() == Some(expected),
+                "npm registry metadata for {dependency_name}@{selected_version} has a contradictory {field} field"
+            );
+        }
+    }
+    let resolved_version = Some(selected_version.to_owned());
+    let version_payload = Some(selected_payload);
 
     let maintainer = version_payload
         .and_then(|version| {
@@ -24408,7 +24561,7 @@ fn parse_trust_scan_npm_metadata(
         .as_deref()
         .map(|version| supply_chain::release_history::release_window(payload, version))
         .unwrap_or_default();
-    TrustScanDeepMetadata {
+    Ok(TrustScanDeepMetadata {
         publisher_id: Some(publisher_id),
         publisher_display_name: Some(publisher_display_name),
         published_at,
@@ -24417,7 +24570,7 @@ fn parse_trust_scan_npm_metadata(
         registry_integrity_hashes,
         registry_signals: supply_chain::npm_registry_signals::parse_registry_signals(payload),
         release_window,
-    }
+    })
 }
 
 /// Score the releases leading up to the resolved version and, when a finding
@@ -24631,14 +24784,7 @@ fn fetch_trust_scan_npm_metadata(
     )?;
     let payload = serde_json::from_str::<serde_json::Value>(&body)
         .with_context(|| format!("invalid npm registry JSON for {dependency_name}"))?;
-    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
-    if let Some(expected_version) = preferred_version
-        && metadata.resolved_version.as_deref() != Some(expected_version)
-    {
-        anyhow::bail!(
-            "npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
-        );
-    }
+    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version)?;
     if let Some(resolved_version) = metadata.resolved_version.clone() {
         metadata.dependent_count = Some(fetch_trust_scan_dependent_count(
             dependency_name,
@@ -25379,14 +25525,7 @@ fn load_offline_trust_scan_npm_metadata(
             canonical_file.display()
         )
     })?;
-    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
-    if let Some(expected_version) = preferred_version
-        && metadata.resolved_version.as_deref() != Some(expected_version)
-    {
-        anyhow::bail!(
-            "offline npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
-        );
-    }
+    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version)?;
     metadata.dependent_count = payload
         .get("_hermetic_dependent_count")
         .and_then(serde_json::Value::as_u64);
@@ -52975,6 +53114,25 @@ mod run_trust_gate_tests {
             // Invalid: special characters
             assert!(validate_package_name("package@evil").is_err());
             assert!(validate_package_name("package$evil").is_err());
+            for name in [
+                "@scope",
+                "@/package",
+                "@scope/",
+                "@scope/package/extra",
+                "@scope//package",
+                "@@scope/package",
+                "@.scope/package",
+                "@scope/_package",
+                "@Scope/package",
+                "@scope/Package",
+                "@scope/package..name",
+                "@scope/package%2Fextra",
+                "@scope/package?redirect=evil",
+                "@scope/package#fragment",
+                "@scope\\package",
+            ] {
+                assert!(validate_package_name(name).is_err(), "{name}");
+            }
         }
 
         #[test]
@@ -52986,6 +53144,23 @@ mod run_trust_gate_tests {
             assert!(validate_package_name("package.name").is_ok());
             assert!(validate_package_name("package_name").is_ok());
             assert!(validate_package_name("package123").is_ok());
+            assert!(validate_package_name("@scope/package").is_ok());
+            assert!(validate_package_name("@acme-tools/shared_runtime").is_ok());
+            assert!(validate_package_name("@scope.name/package.v2").is_ok());
+        }
+
+        #[test]
+        fn scoped_package_names_are_encoded_as_one_registry_url_component() {
+            let encoded = percent_encode_path_component("@acme-tools/shared_runtime");
+            assert_eq!(encoded, "%40acme-tools%2Fshared_runtime");
+            for url in [
+                format!("{TRUST_SCAN_NPM_REGISTRY_BASE_URL}/{encoded}"),
+                format!(
+                    "{TRUST_SCAN_DEPS_DEV_BASE_URL}/systems/npm/packages/{encoded}/versions/1.2.3:dependents"
+                ),
+            ] {
+                assert!(validate_trust_scan_url(&url).is_ok(), "{url}");
+            }
         }
 
         #[test]

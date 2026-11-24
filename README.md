@@ -3636,6 +3636,12 @@ quarantine, revocation, and independent behavioral findings retain their authori
 (`registry.npmjs.org`) and dependent counts from `api.deps.dev`; those
 two hosts, over HTTPS, are the only ones the scan will contact, so
 private registries and npm registry mirrors are not supported.
+Scoped names such as `@scope/package` are supported and encoded as one URL
+component. Offline packuments use `@scope__package.json`; their top-level
+`name` must match the actual package identity, so colliding fixture filenames
+cannot supply another package's publisher or integrity metadata. A selected
+release's own `name` and `version`, when supplied, must also match. A missing or
+malformed pinned release is refused without falling back to `dist-tags.latest`.
 `--audit` and `trust sync` query OSV (`api.osv.dev`, or
 `FRANKEN_NODE_OSV_QUERY_URL`; during `trust sync` a clean answer from a
 non-default endpoint is refused as a reason to lower a card's risk). The
