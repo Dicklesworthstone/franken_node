@@ -165,6 +165,10 @@ use frankenengine_node::control_plane::fleet_transport::{
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
 use frankenengine_node::ops::engine_dispatcher::{EngineDispatcher, RunProjectPaths};
+use frankenengine_node::supply_chain::vulnerability_audit::{
+    AuditPackageInput, AuditPlan, PackageAuditPlan, PackageAuditReport, VersionAuditResult,
+    VersionAuditStatus,
+};
 #[cfg(test)]
 pub use frankenengine_node::testing;
 #[cfg(test)]
@@ -335,6 +339,8 @@ const MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES: u64 = 64 << 20;
 const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_OSV_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+const TRUST_SCAN_OSV_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+const TRUST_SCAN_OSV_MAX_REPORT_BYTES: usize = 64 * 1024 * 1024;
 const TRUST_SCAN_OSV_MAX_PAGES: usize = 16;
 const TRUST_SCAN_OSV_MAX_VULNERABILITIES: usize = 10_000;
 const TRUST_SCAN_OSV_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -655,6 +661,8 @@ struct TrustScanItem {
     integrity_hash_count: usize,
     vulnerability_count: usize,
     dependent_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audit_coverage: Option<PackageAuditReport>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -24706,6 +24714,20 @@ fn fetch_trust_scan_audit_metadata_with_remote_cap(
     resolved_version: Option<&str>,
     remote_cap: &mut TrustScanRemoteCapContext,
 ) -> Result<TrustScanAuditMetadata> {
+    fetch_trust_scan_audit_metadata_before_deadline(
+        dependency_name,
+        resolved_version,
+        remote_cap,
+        Instant::now() + TRUST_SCAN_OSV_QUERY_TIMEOUT,
+    )
+}
+
+fn fetch_trust_scan_audit_metadata_before_deadline(
+    dependency_name: &str,
+    resolved_version: Option<&str>,
+    remote_cap: &mut TrustScanRemoteCapContext,
+    scan_deadline: Instant,
+) -> Result<TrustScanAuditMetadata> {
     let mut body = serde_json::json!({
         "package": {
             "name": dependency_name,
@@ -24717,7 +24739,7 @@ fn fetch_trust_scan_audit_metadata_with_remote_cap(
     }
 
     let query_config = trust_scan_osv_query_config();
-    let deadline = Instant::now() + TRUST_SCAN_OSV_QUERY_TIMEOUT;
+    let deadline = scan_deadline.min(Instant::now() + TRUST_SCAN_OSV_QUERY_TIMEOUT);
     let mut vulnerability_ids = BTreeSet::new();
     let mut continuation_tokens = BTreeSet::new();
     let mut response_bytes = 0_usize;
@@ -24766,6 +24788,82 @@ fn fetch_trust_scan_audit_metadata_with_remote_cap(
         }
     }
     anyhow::bail!("OSV pagination exceeds the complete-query page limit")
+}
+
+fn audit_trust_scan_package(
+    plan: &PackageAuditPlan,
+    remote_cap: &mut TrustScanRemoteCapContext,
+    deadline: Instant,
+    warnings: &mut Vec<String>,
+) -> Result<PackageAuditReport> {
+    let mut results = Vec::new();
+    for version in &plan.versions {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match fetch_trust_scan_audit_metadata_before_deadline(
+            &plan.package_name,
+            Some(version),
+            remote_cap,
+            deadline,
+        ) {
+            Ok(metadata) => results.push(VersionAuditResult::Completed {
+                version: version.clone(),
+                vulnerability_ids: metadata.vulnerability_ids,
+                risk_lowering_authenticated: metadata.risk_lowering_authenticated,
+            }),
+            Err(err) if is_remote_cap_denial(&err) => {
+                return Err(err.context(format!(
+                    "RemoteCap denied trust scan audit metadata for {}@{version}",
+                    plan.package_name
+                )));
+            }
+            Err(err) => {
+                // Transport diagnostics can contain arbitrary server text.
+                // Keep report storage bounded without dropping other versions'
+                // successfully completed vulnerability inventories.
+                let error = err.to_string().chars().take(1_024).collect::<String>();
+                warnings.push(format!(
+                    "OSV audit unavailable for {}@{version}: {error}",
+                    plan.package_name
+                ));
+                results.push(VersionAuditResult::Failed {
+                    version: version.clone(),
+                    error,
+                });
+            }
+        }
+    }
+    let report = plan.summarize(results)?;
+    if !report.coverage_complete {
+        let completed = report
+            .versions
+            .iter()
+            .filter(|version| {
+                matches!(
+                    version.status,
+                    VersionAuditStatus::Clean | VersionAuditStatus::Vulnerable
+                )
+            })
+            .count();
+        warnings.push(format!(
+            "{}: partial OSV coverage ({completed}/{} exact versions checked, unresolved={}); known findings retained and vulnerability clearance unavailable",
+            plan.package_name,
+            plan.versions.len(),
+            report.has_unresolved_version
+        ));
+        if report
+            .versions
+            .iter()
+            .any(|version| version.status == VersionAuditStatus::NotQueried)
+        {
+            warnings.push(format!(
+                "{}: remaining exact versions were not queried because the scan audit deadline was exhausted",
+                plan.package_name
+            ));
+        }
+    }
+    Ok(report)
 }
 
 fn fetch_trust_scan_audit_metadata(
@@ -25144,6 +25242,7 @@ fn build_trust_scan_item(
     status: TrustScanItemStatus,
     vulnerability_count: usize,
     dependent_count: Option<u64>,
+    audit_coverage: Option<PackageAuditReport>,
 ) -> TrustScanItem {
     TrustScanItem {
         dependency_name: dependency.dependency_name.clone(),
@@ -25156,6 +25255,7 @@ fn build_trust_scan_item(
         integrity_hash_count: card.provenance_summary.artifact_hashes.len(),
         vulnerability_count,
         dependent_count,
+        audit_coverage,
     }
 }
 
@@ -25191,6 +25291,47 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
                 .map_or_else(|| "<unknown>".to_string(), |count| count.to_string()),
             item.integrity_hash_count
         ));
+        if let Some(coverage) = &item.audit_coverage {
+            let completed = coverage
+                .versions
+                .iter()
+                .filter(|version| {
+                    matches!(
+                        version.status,
+                        VersionAuditStatus::Clean | VersionAuditStatus::Vulnerable
+                    )
+                })
+                .count();
+            lines.push(format!(
+                "    audit_coverage={} checked={completed}/{} unresolved={} authenticated_clean={}",
+                if coverage.coverage_complete {
+                    "complete"
+                } else {
+                    "partial"
+                },
+                coverage.versions.len(),
+                coverage.has_unresolved_version,
+                coverage.complete_clean_authenticated
+            ));
+            for version in &coverage.versions {
+                lines.push(format!(
+                    "      {}@{}: {}{}",
+                    item.dependency_name,
+                    version.version,
+                    match version.status {
+                        VersionAuditStatus::Clean => "clean",
+                        VersionAuditStatus::Vulnerable => "vulnerable",
+                        VersionAuditStatus::Failed => "failed",
+                        VersionAuditStatus::NotQueried => "not queried",
+                    },
+                    if version.vulnerability_ids.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", version.vulnerability_ids.join(", "))
+                    }
+                ));
+            }
+        }
     }
     for warning in &report.warnings {
         lines.push(format!("  warning: {warning}"));
@@ -25292,6 +25433,18 @@ fn run_trust_scan_with_offline_registry(
         )
     })?;
     let (dependencies, captured_metadata) = collect_trust_scan_dependencies(&project_root)?;
+    // Plan against the captured installations before issuing any request.
+    // Manifest ranges and a registry-selected latest release cannot stand in
+    // for unresolved local placements, including when --deep is also enabled.
+    let audit_plan = audit
+        .then(|| {
+            AuditPlan::build(dependencies.iter().map(|dependency| AuditPackageInput {
+                package_name: dependency.dependency_name.clone(),
+                resolved_versions: dependency.lockfile_metadata.resolved_versions.clone(),
+                has_unresolved_version: dependency.lockfile_metadata.has_unresolved_version,
+            }))
+        })
+        .transpose()?;
     let now_secs = now_unix_secs();
     let config = trust_registry_config_for_project(&project_root)?;
     let mut state = trust_scan_registry_state(&project_root, &config.trust, now_secs)?;
@@ -25305,13 +25458,30 @@ fn run_trust_scan_with_offline_registry(
     } else {
         None
     };
+    let mut audit_reports = BTreeMap::new();
+    if let Some(plan) = &audit_plan {
+        let deadline = Instant::now() + TRUST_SCAN_OSV_TOTAL_TIMEOUT;
+        let mut report_bytes = 0_usize;
+        let remote_cap = remote_cap_context
+            .as_mut()
+            .expect("trust scan RemoteCap context initialized for audit scan");
+        for package in plan.packages.values() {
+            let report = audit_trust_scan_package(package, remote_cap, deadline, &mut warnings)?;
+            report_bytes = report_bytes.saturating_add(serde_json::to_vec(&report)?.len());
+            anyhow::ensure!(
+                report_bytes <= TRUST_SCAN_OSV_MAX_REPORT_BYTES,
+                "OSV scan reports exceed the bounded output limit; no card updates were committed"
+            );
+            audit_reports.insert(package.package_name.clone(), report);
+        }
+    }
 
     for dependency in &dependencies {
         let lockfile_entry = Some(&dependency.lockfile_metadata);
         let ambiguous_versions = dependency.lockfile_metadata.ambiguous_versions();
         if ambiguous_versions {
             warnings.push(format!(
-                "{}: multiple or unresolved captured versions; card covers package identity, and single-version deep/audit refresh is unavailable",
+                "{}: multiple or unresolved captured versions; card covers package identity, single-version deep metadata is unavailable, and OSV audit checks each captured exact version",
                 dependency.extension_id
             ));
         }
@@ -25332,13 +25502,13 @@ fn run_trust_scan_with_offline_registry(
                 TrustScanItemStatus::SkippedExisting,
                 0,
                 None,
+                None,
             ));
             continue;
         }
 
         let mut deep_metadata = TrustScanDeepMetadata::default();
         let mut deep_fetched = false;
-        let mut audit_fetched = false;
         if deep && !ambiguous_versions {
             if let Some(offline_dir) = canonical_offline_dir.as_deref() {
                 match load_offline_trust_scan_npm_metadata(
@@ -25382,54 +25552,53 @@ fn run_trust_scan_with_offline_registry(
             }
         }
 
-        let mut audit_metadata = TrustScanAuditMetadata::default();
-        if audit && !ambiguous_versions {
-            let resolved_version = lockfile_entry
-                .and_then(TrustScanLockfileMetadata::resolved_version)
-                .or(deep_metadata.resolved_version.as_deref());
-            let remote_cap = remote_cap_context
-                .as_mut()
-                .expect("trust scan RemoteCap context initialized for audit scan");
-            match fetch_trust_scan_audit_metadata_with_remote_cap(
-                &dependency.dependency_name,
-                resolved_version,
-                remote_cap,
-            ) {
-                Ok(metadata) => {
-                    audit_metadata = metadata;
-                    audit_fetched = true;
-                }
-                Err(err) if is_remote_cap_denial(&err) => {
-                    return Err(err.context(format!(
-                        "RemoteCap denied trust scan audit metadata for {}",
-                        dependency.dependency_name
-                    )));
-                }
-                Err(err) => warnings.push(format!(
-                    "OSV audit unavailable for {}: {err}",
-                    dependency.dependency_name
-                )),
-            }
-        }
+        let audit_coverage = audit_reports.remove(&dependency.dependency_name);
+        let audit_fetched = audit_coverage.as_ref().is_some_and(|report| {
+            report.versions.iter().any(|version| {
+                matches!(
+                    version.status,
+                    VersionAuditStatus::Clean | VersionAuditStatus::Vulnerable
+                )
+            })
+        });
+        let audit_metadata =
+            audit_coverage
+                .as_ref()
+                .map_or_else(TrustScanAuditMetadata::default, |report| {
+                    TrustScanAuditMetadata {
+                        vulnerability_ids: report.vulnerability_ids.clone(),
+                        risk_lowering_authenticated: report.complete_clean_authenticated,
+                    }
+                });
+        let audit_scope =
+            audit_coverage
+                .as_ref()
+                .map(|report| supply_chain::trust_card::OsvRiskEvidenceScope {
+                    versions: report
+                        .versions
+                        .iter()
+                        .map(|version| version.version.clone())
+                        .collect(),
+                    unresolved: report.has_unresolved_version,
+                    vulnerability_ids: report.vulnerability_ids.iter().cloned().collect(),
+                });
 
         let typosquat_warning =
             supply_chain::typosquat::detect_typosquat(&dependency.dependency_name)
                 .map(|finding| format!("{}: {}", dependency.extension_id, finding.describe()));
-        // A new card records independent scan risk before applying its OSV
-        // overlay, so later vulnerability clearance cannot erase that baseline.
+        // Always record independent scan risk before applying a scoped OSV
+        // overlay. A generic combined assessment cannot safely attribute or
+        // later clear findings from several installed versions.
         let empty_audit = TrustScanAuditMetadata::default();
-        let input_audit = if existing.is_some() {
-            &audit_metadata
-        } else {
-            &empty_audit
-        };
         let mut input = build_trust_scan_card_input(
             dependency,
             lockfile_entry,
             &deep_metadata,
-            input_audit,
+            &empty_audit,
             now_secs,
         );
+        let mut findings_applied = false;
+        let mut apply_deep_history = deep_fetched;
         let (card, status) = if let Some(mut existing) = existing {
             let independent = build_trust_scan_card_input(
                 dependency,
@@ -25457,30 +25626,34 @@ fn run_trust_scan_with_offline_registry(
                 && audit_fetched
                 && same_artifact
                 && independent.user_facing_risk_assessment.level <= retained_risk;
-            let retain_overlay_with_fresh_findings = !refresh
-                && audit_fetched
-                && same_artifact
-                && existing.osv_risk_baseline.is_some()
-                && !audit_metadata.vulnerability_ids.is_empty();
-            if audit_only_same_artifact || retain_overlay_with_fresh_findings {
-                if !audit_only_same_artifact {
+            let apply_fresh_findings = !refresh && !audit_metadata.vulnerability_ids.is_empty();
+            if audit_only_same_artifact || apply_fresh_findings {
+                // A package-level finding can raise an older card's risk, but
+                // release-history observations belong to the captured artifact.
+                // Retaining the old identity must not attach the new version's
+                // behavioral evidence to it.
+                apply_deep_history &= same_artifact;
+                if apply_fresh_findings && (deep || !same_artifact) {
                     warnings.push(format!(
-                        "{}: fresh OSV findings applied; combined metadata reassessment deferred until source-specific clearance or explicit artifact refresh",
+                        "{}: OSV findings applied for the captured version set; existing artifact identity and independent assessment retained (use --refresh for explicit artifact repair)",
                         dependency.extension_id
                     ));
                 }
                 let outcome = state
                     .registry
-                    .refresh_osv_risk(
+                    .refresh_osv_risk_with_scope(
                         &dependency.extension_id,
-                        &audit_metadata.vulnerability_ids,
-                        audit_metadata.risk_lowering_authenticated,
+                        audit_scope
+                            .as_ref()
+                            .expect("fetched audit has captured version scope"),
+                        authenticated_osv_clearance,
                         now_secs,
                         "trace-cli-trust-scan-osv",
                     )
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 match outcome {
                     supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => {
+                        findings_applied = apply_fresh_findings;
                         refreshed_cards = refreshed_cards.saturating_add(1);
                         (*card, TrustScanItemStatus::Refreshed)
                     }
@@ -25494,8 +25667,9 @@ fn run_trust_scan_with_offline_registry(
                             dependency,
                             &existing,
                             TrustScanItemStatus::SkippedExisting,
-                            0,
-                            None,
+                            audit_metadata.vulnerability_ids.len(),
+                            deep_metadata.dependent_count,
+                            audit_coverage,
                         ));
                         continue;
                     }
@@ -25515,8 +25689,9 @@ fn run_trust_scan_with_offline_registry(
                         dependency,
                         &existing,
                         TrustScanItemStatus::SkippedExisting,
-                        0,
-                        None,
+                        audit_metadata.vulnerability_ids.len(),
+                        deep_metadata.dependent_count,
+                        audit_coverage,
                     ));
                     continue;
                 }
@@ -25524,9 +25699,11 @@ fn run_trust_scan_with_offline_registry(
                 if cleared_osv_overlay {
                     existing = match state
                         .registry
-                        .refresh_osv_risk(
+                        .refresh_osv_risk_with_scope(
                             &dependency.extension_id,
-                            &[],
+                            audit_scope
+                                .as_ref()
+                                .expect("authenticated audit has captured version scope"),
                             true,
                             now_secs,
                             "trace-cli-trust-scan-osv",
@@ -25535,7 +25712,20 @@ fn run_trust_scan_with_offline_registry(
                     {
                         supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => *card,
                         supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
-                            anyhow::bail!("authenticated same-artifact OSV clearance was refused")
+                            warnings.push(format!(
+                                "{}: existing OSV findings cover a wider or unresolved version set; single-artifact clearance refused",
+                                dependency.extension_id
+                            ));
+                            skipped_existing = skipped_existing.saturating_add(1);
+                            items.push(build_trust_scan_item(
+                                dependency,
+                                &existing,
+                                TrustScanItemStatus::SkippedExisting,
+                                audit_metadata.vulnerability_ids.len(),
+                                deep_metadata.dependent_count,
+                                audit_coverage,
+                            ));
+                            continue;
                         }
                     };
                     // Source-specific clearance restores independent risk.
@@ -25547,9 +25737,7 @@ fn run_trust_scan_with_offline_registry(
                     &existing,
                     &input,
                     deep_fetched || audit_fetched,
-                    audit_fetched
-                        && audit_metadata.risk_lowering_authenticated
-                        && !ambiguous_versions,
+                    authenticated_osv_clearance,
                     refresh,
                 ) {
                     if cleared_osv_overlay {
@@ -25566,8 +25754,9 @@ fn run_trust_scan_with_offline_registry(
                         dependency,
                         &existing,
                         TrustScanItemStatus::SkippedExisting,
-                        0,
-                        None,
+                        audit_metadata.vulnerability_ids.len(),
+                        deep_metadata.dependent_count,
+                        audit_coverage,
                     ));
                     continue;
                 }
@@ -25579,32 +25768,36 @@ fn run_trust_scan_with_offline_registry(
                 (card, TrustScanItemStatus::Refreshed)
             }
         } else {
-            let mut card = state
+            let card = state
                 .registry
                 .create(input, now_secs, "trace-cli-trust-scan")
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-            if audit_fetched && !audit_metadata.vulnerability_ids.is_empty() {
-                let outcome = state
-                    .registry
-                    .refresh_osv_risk(
-                        &dependency.extension_id,
-                        &audit_metadata.vulnerability_ids,
-                        audit_metadata.risk_lowering_authenticated && !ambiguous_versions,
-                        now_secs,
-                        "trace-cli-trust-scan-osv",
-                    )
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                card = match outcome {
-                    supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => *card,
-                    supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
-                        anyhow::bail!("nonempty OSV findings unexpectedly requested clearance")
-                    }
-                };
-            }
             created_cards = created_cards.saturating_add(1);
             (card, TrustScanItemStatus::Created)
         };
-        let card = if deep_fetched {
+        let card = if !findings_applied && !audit_metadata.vulnerability_ids.is_empty() {
+            match state
+                .registry
+                .refresh_osv_risk_with_scope(
+                    &dependency.extension_id,
+                    audit_scope
+                        .as_ref()
+                        .expect("nonempty audit has captured version scope"),
+                    false,
+                    now_secs,
+                    "trace-cli-trust-scan-osv",
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?
+            {
+                supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => *card,
+                supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
+                    anyhow::bail!("nonempty OSV findings unexpectedly requested clearance")
+                }
+            }
+        } else {
+            card
+        };
+        let card = if apply_deep_history {
             apply_release_history_camouflage(
                 &mut state.registry,
                 &dependency.extension_id,
@@ -25625,13 +25818,16 @@ fn run_trust_scan_with_offline_registry(
             status,
             audit_metadata.vulnerability_ids.len(),
             deep_metadata.dependent_count,
+            audit_coverage,
         ));
     }
 
-    if created_cards > 0 || refreshed_cards > 0 || !state.path.is_file() {
+    if audit || created_cards > 0 || refreshed_cards > 0 || !state.path.is_file() {
         captured_metadata.verify_project(&project_root).context(
-            "project dependency metadata changed while scanning; no card updates were committed",
+            "project dependency metadata changed while scanning; captured coverage is stale and no card updates were committed",
         )?;
+    }
+    if created_cards > 0 || refreshed_cards > 0 || !state.path.is_file() {
         persist_trust_card_cli_registry(&state)?;
     }
 
@@ -51773,6 +51969,7 @@ mod run_trust_gate_tests {
                         integrity_hash_count: i % 20,
                         vulnerability_count: i % 5,
                         dependent_count: Some(i as u64),
+                        audit_coverage: None,
                     })
                     .collect(),
             };
@@ -52003,6 +52200,7 @@ mod run_trust_gate_tests {
                     integrity_hash_count: 0,
                     vulnerability_count: 0,
                     dependent_count: None,
+                    audit_coverage: None,
                 },
                 TrustScanItem {
                     dependency_name: "test2".to_string(),
@@ -52015,6 +52213,7 @@ mod run_trust_gate_tests {
                     integrity_hash_count: usize::MAX,
                     vulnerability_count: usize::MAX,
                     dependent_count: Some(u64::MAX),
+                    audit_coverage: None,
                 },
             ];
 

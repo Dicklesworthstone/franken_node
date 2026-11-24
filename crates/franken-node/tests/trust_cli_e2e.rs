@@ -5002,6 +5002,686 @@ fn export_osv_scan_card(workspace: &Path, extension: &str) -> TrustCard {
     serde_json::from_value(parse_json_stdout(&output, "export attributed OSV card")).unwrap()
 }
 
+fn multi_version_osv_workspace(second_version: Option<&str>) -> tempfile::TempDir {
+    let workspace = config_only_workspace();
+    write_multi_version_osv_capture(workspace.path(), second_version);
+    workspace
+}
+
+fn write_multi_version_osv_capture(workspace: &Path, second_version: Option<&str>) {
+    write_run_package_manifest(
+        workspace,
+        &[
+            ("parent-one", "^1.0.0"),
+            ("parent-two", "^1.0.0"),
+            ("runtime-copy", "npm:@acme/shared-runtime@^1.0.0"),
+        ],
+    );
+    let first_integrity = format!("sha256-{}", BASE64_STANDARD.encode([0x11_u8; 32]));
+    let second_integrity = format!("sha256-{}", BASE64_STANDARD.encode([0x22_u8; 32]));
+    let mut second_install = serde_json::json!({"integrity": second_integrity});
+    if let Some(version) = second_version {
+        second_install["version"] = serde_json::json!(version);
+    }
+    fs::write(
+        workspace.join("package-lock.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/parent-one": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/shared-runtime": "^1.0.0"}
+                },
+                "node_modules/parent-two": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/shared-runtime": "^2.0.0"}
+                },
+                "node_modules/parent-one/node_modules/@acme/shared-runtime": {
+                    "version": "1.2.3", "integrity": first_integrity
+                },
+                "node_modules/parent-two/node_modules/@acme/shared-runtime": second_install,
+                "node_modules/runtime-copy": {
+                    "name": "@acme/shared-runtime", "version": "1.2.3",
+                    "integrity": first_integrity
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn shared_runtime_audit_item(report: &Value) -> &Value {
+    report["items"]
+        .as_array()
+        .expect("scan items")
+        .iter()
+        .find(|item| item["extension_id"] == "npm:@acme/shared-runtime")
+        .expect("actual shared package identity")
+}
+
+fn osv_request_identities(requests: &Arc<Mutex<Vec<String>>>) -> Vec<(String, String)> {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| {
+            let query: Value = serde_json::from_str(body).expect("OSV request JSON");
+            assert_eq!(query["package"]["ecosystem"], "npm");
+            (
+                query["package"]["name"]
+                    .as_str()
+                    .expect("actual package name")
+                    .to_owned(),
+                query["version"]
+                    .as_str()
+                    .expect("every OSV query must name an exact captured version")
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn trust_scan_audit_queries_every_installed_version_and_updates_signed_package_risk() {
+    use frankenengine_node::supply_chain::trust_card::{RiskLevel, verify_card_signature};
+
+    let workspace = multi_version_osv_workspace(Some("2.4.6"));
+    let initial = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial_report = parse_json_stdout(&initial, "mixed-version baseline");
+    assert!(
+        shared_runtime_audit_item(&initial_report)
+            .get("audit_coverage")
+            .is_none()
+    );
+    let baseline = export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime");
+
+    let (url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-multi-shared"},{"id":"OSV-multi-v1"}]}"#.into(),
+        ),
+        (
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-multi-shared"},{"id":"OSV-multi-v2"}]}"#.into(),
+        ),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        osv_request_identities(&requests),
+        vec![
+            ("@acme/shared-runtime".into(), "1.2.3".into()),
+            ("@acme/shared-runtime".into(), "2.4.6".into()),
+            ("parent-one".into(), "1.0.0".into()),
+            ("parent-two".into(), "1.0.0".into()),
+        ],
+        "duplicate placements and aliases must not duplicate or rename OSV queries"
+    );
+    let report = parse_json_stdout(&output, "complete per-version audit");
+    let item = shared_runtime_audit_item(&report);
+    assert_eq!(item["status"], "refreshed");
+    assert_eq!(item["extension_version"], "multiple-or-unresolved");
+    assert_eq!(
+        item["vulnerability_count"], 3,
+        "shared finding is counted once"
+    );
+    let coverage = &item["audit_coverage"];
+    assert_eq!(coverage["package_name"], "@acme/shared-runtime");
+    assert_eq!(coverage["coverage_complete"], true);
+    assert_eq!(coverage["has_unresolved_version"], false);
+    assert_eq!(coverage["complete_clean_authenticated"], false);
+    assert_eq!(
+        coverage["vulnerability_ids"],
+        serde_json::json!(["OSV-multi-shared", "OSV-multi-v1", "OSV-multi-v2"])
+    );
+    assert_eq!(coverage["versions"].as_array().unwrap().len(), 2);
+    for (index, version) in ["1.2.3", "2.4.6"].into_iter().enumerate() {
+        assert_eq!(coverage["versions"][index]["version"], version);
+        assert_eq!(coverage["versions"][index]["status"], "vulnerable");
+        assert_eq!(
+            coverage["versions"][index]["risk_lowering_authenticated"],
+            false
+        );
+        assert!(coverage["versions"][index].get("error").is_none());
+    }
+    assert_eq!(
+        coverage["versions"][0]["vulnerability_ids"],
+        serde_json::json!(["OSV-multi-shared", "OSV-multi-v1"])
+    );
+    assert_eq!(
+        coverage["versions"][1]["vulnerability_ids"],
+        serde_json::json!(["OSV-multi-shared", "OSV-multi-v2"])
+    );
+    let card = export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime");
+    verify_card_signature(&card, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(card.user_facing_risk_assessment.level, RiskLevel::Critical);
+    assert!(card.reputation_score_basis_points < baseline.reputation_score_basis_points);
+    assert!(card.trust_card_version > baseline.trust_card_version);
+    assert_eq!(card.extension.version, "multiple-or-unresolved");
+    for id in ["OSV-multi-shared", "OSV-multi-v1", "OSV-multi-v2"] {
+        assert!(
+            card.user_facing_risk_assessment.summary.contains(id),
+            "{card:?}"
+        );
+    }
+    assert!(
+        card.osv_risk_baseline.is_some(),
+        "findings retain their signed source attribution"
+    );
+
+    let (clean_url, clean_requests, clean_server) =
+        spawn_osv_static_response_server(4, 200, "OK", r#"{"vulns":[]}"#);
+    let clean = trust_scan_audit(workspace.path(), &clean_url);
+    clean_server.join().unwrap();
+    assert!(clean.status.success());
+    assert_eq!(osv_request_identities(&clean_requests).len(), 4);
+    let clean_report = parse_json_stdout(&clean, "clean fixture has no clearance authority");
+    let clean_item = shared_runtime_audit_item(&clean_report);
+    assert_eq!(clean_item["audit_coverage"]["coverage_complete"], true);
+    assert_eq!(
+        clean_item["audit_coverage"]["complete_clean_authenticated"],
+        false
+    );
+    assert_eq!(clean_item["status"], "skipped_existing");
+    assert_eq!(
+        export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime").card_hash,
+        card.card_hash
+    );
+}
+
+#[test]
+fn trust_scan_audit_keeps_successful_version_findings_when_another_version_fails() {
+    use frankenengine_node::supply_chain::trust_card::{RiskLevel, verify_card_signature};
+
+    let workspace = multi_version_osv_workspace(Some("2.4.6"));
+    let (url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (503, "Service Unavailable", "temporarily unavailable".into()),
+        (200, "OK", r#"{"vulns":[{"id":"OSV-partial-v2"}]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(osv_request_identities(&requests).len(), 4);
+    let report = parse_json_stdout(&output, "partially available version audit");
+    let item = shared_runtime_audit_item(&report);
+    let coverage = &item["audit_coverage"];
+    assert_eq!(coverage["coverage_complete"], false);
+    assert_eq!(coverage["complete_clean_authenticated"], false);
+    assert_eq!(coverage["versions"][0]["version"], "1.2.3");
+    assert_eq!(coverage["versions"][0]["status"], "failed");
+    assert!(
+        !coverage["versions"][0]["error"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(coverage["versions"][1]["version"], "2.4.6");
+    assert_eq!(coverage["versions"][1]["status"], "vulnerable");
+    assert_eq!(
+        coverage["vulnerability_ids"],
+        serde_json::json!(["OSV-partial-v2"])
+    );
+    assert_eq!(item["vulnerability_count"], 1);
+    let card = export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime");
+    verify_card_signature(&card, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(card.user_facing_risk_assessment.level, RiskLevel::High);
+    assert!(
+        card.user_facing_risk_assessment
+            .summary
+            .contains("OSV-partial-v2")
+    );
+    assert!(card.osv_risk_baseline.is_some());
+
+    let (url, _, server) = spawn_osv_response_sequence_server(vec![
+        (503, "Service Unavailable", "still unavailable".into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let partial_clean = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(partial_clean.status.success());
+    let report = parse_json_stdout(&partial_clean, "incomplete clean response retains old risk");
+    let item = shared_runtime_audit_item(&report);
+    assert_eq!(item["audit_coverage"]["coverage_complete"], false);
+    assert_eq!(
+        item["audit_coverage"]["complete_clean_authenticated"],
+        false
+    );
+    assert_eq!(item["status"], "skipped_existing");
+    assert_eq!(
+        export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime").card_hash,
+        card.card_hash
+    );
+}
+
+#[test]
+fn trust_scan_audit_attaches_new_version_findings_without_retagging_an_existing_card() {
+    use frankenengine_node::supply_chain::trust_card::{RiskLevel, verify_card_signature};
+
+    let extension = "npm:@acme/shared-runtime";
+    let workspace = attributed_osv_scan_workspace("@acme/shared-runtime", Some(0x11));
+    write_osv_scan_artifact(
+        workspace.path(),
+        "@acme/shared-runtime",
+        "1.2.3",
+        Some(0x11),
+    );
+    let output = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = export_osv_scan_card(workspace.path(), extension);
+    assert_eq!(original.extension.version, "1.2.3");
+    assert!(original.osv_risk_baseline.is_none());
+
+    // The project gains another installed version without changing the
+    // registry card. A positive query is package risk evidence, not authority
+    // to relabel the older card or bind its provenance to the new installation.
+    write_multi_version_osv_capture(workspace.path(), Some("2.4.6"));
+    let (url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-existing-card-v2"}]}"#.into(),
+        ),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(osv_request_identities(&requests).len(), 4);
+    let report = parse_json_stdout(&output, "new installation risk on retained card");
+    let item = shared_runtime_audit_item(&report);
+    assert_eq!(item["status"], "refreshed");
+    assert_eq!(item["extension_version"], "1.2.3");
+    assert_eq!(item["vulnerability_count"], 1);
+    let first = export_osv_scan_card(workspace.path(), extension);
+    verify_card_signature(&first, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(first.extension, original.extension);
+    assert_eq!(first.publisher, original.publisher);
+    assert_eq!(first.provenance_summary, original.provenance_summary);
+    assert_eq!(first.behavioral_profile, original.behavioral_profile);
+    assert_eq!(first.user_facing_risk_assessment.level, RiskLevel::High);
+    assert!(first.reputation_score_basis_points < original.reputation_score_basis_points);
+    let first_json = serde_json::to_value(&first).unwrap();
+    let scope = &first_json["osv_risk_baseline"]["evidence_scope"];
+    assert_eq!(scope["versions"], serde_json::json!(["1.2.3", "2.4.6"]));
+    assert_eq!(scope["unresolved"], false);
+    assert_eq!(
+        scope["vulnerability_ids"],
+        serde_json::json!(["OSV-existing-card-v2"])
+    );
+
+    // A later partial query adds one finding while the other version is
+    // unavailable. Its signed scope must retain both positive observations.
+    let (url, _, server) = spawn_osv_response_sequence_server(vec![
+        (
+            503,
+            "Service Unavailable",
+            "first version unavailable".into(),
+        ),
+        (
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-partial-new-v2"}]}"#.into(),
+        ),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json_stdout(
+        &output,
+        "partial query adds risk without deleting older findings",
+    );
+    let item = shared_runtime_audit_item(&report);
+    assert_eq!(item["status"], "refreshed");
+    assert_eq!(item["audit_coverage"]["coverage_complete"], false);
+    assert_eq!(
+        item["audit_coverage"]["vulnerability_ids"],
+        serde_json::json!(["OSV-partial-new-v2"])
+    );
+    let retained = export_osv_scan_card(workspace.path(), extension);
+    verify_card_signature(&retained, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(retained.extension, original.extension);
+    assert_eq!(retained.provenance_summary, original.provenance_summary);
+    assert!(retained.reputation_score_basis_points <= first.reputation_score_basis_points);
+    let retained_json = serde_json::to_value(&retained).unwrap();
+    let scope = &retained_json["osv_risk_baseline"]["evidence_scope"];
+    assert_eq!(scope["versions"], serde_json::json!(["1.2.3", "2.4.6"]));
+    assert_eq!(
+        scope["vulnerability_ids"],
+        serde_json::json!(["OSV-existing-card-v2", "OSV-partial-new-v2"])
+    );
+    assert_eq!(
+        retained.previous_version_hash.as_deref(),
+        Some(first.card_hash.as_str())
+    );
+}
+
+#[test]
+fn trust_scan_audit_queries_resolved_members_of_an_incomplete_package_set() {
+    let workspace = multi_version_osv_workspace(None);
+    let (url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-known-placement"}]}"#.into(),
+        ),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        osv_request_identities(&requests),
+        vec![
+            ("@acme/shared-runtime".into(), "1.2.3".into()),
+            ("parent-one".into(), "1.0.0".into()),
+            ("parent-two".into(), "1.0.0".into()),
+        ]
+    );
+    let report = parse_json_stdout(&output, "known member of partially unresolved set");
+    let item = shared_runtime_audit_item(&report);
+    let coverage = &item["audit_coverage"];
+    assert_eq!(item["extension_version"], "multiple-or-unresolved");
+    assert_eq!(item["risk_level"], "high");
+    assert_eq!(coverage["has_unresolved_version"], true);
+    assert_eq!(coverage["coverage_complete"], false);
+    assert_eq!(coverage["complete_clean_authenticated"], false);
+    assert_eq!(coverage["versions"].as_array().unwrap().len(), 1);
+    assert_eq!(coverage["versions"][0]["version"], "1.2.3");
+    assert_eq!(coverage["versions"][0]["status"], "vulnerable");
+    assert_eq!(
+        coverage["vulnerability_ids"],
+        serde_json::json!(["OSV-known-placement"])
+    );
+    assert!(
+        export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime")
+            .user_facing_risk_assessment
+            .summary
+            .contains("OSV-known-placement")
+    );
+}
+
+#[test]
+fn trust_scan_audit_uses_bun_alias_targets_and_deduplicates_exact_versions() {
+    let workspace = config_only_workspace();
+    let dependencies = serde_json::json!({
+        "first": "npm:@acme/shared-runtime@^1.0.0",
+        "second": "npm:@acme/shared-runtime@^2.0.0",
+        "copy": "npm:@acme/shared-runtime@^1.0.0"
+    });
+    fs::write(
+        workspace.path().join("package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "name": "bun-audit-fixture", "version": "1.0.0", "dependencies": dependencies
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let first_integrity = format!("sha256-{}", BASE64_STANDARD.encode([0x11_u8; 32]));
+    let second_integrity = format!("sha256-{}", BASE64_STANDARD.encode([0x22_u8; 32]));
+    fs::write(
+        workspace.path().join("bun.lock"),
+        serde_json::to_vec(&serde_json::json!({
+            "lockfileVersion": 1,
+            "workspaces": {"": {"dependencies": dependencies}},
+            "packages": {
+                "first": ["@acme/shared-runtime@1.2.3", "", {}, first_integrity],
+                "second": ["@acme/shared-runtime@2.4.6", "", {}, second_integrity],
+                "copy": ["@acme/shared-runtime@1.2.3", "", {}, first_integrity]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (200, "OK", r#"{"vulns":[]}"#.into()),
+        (200, "OK", r#"{"vulns":[{"id":"OSV-bun-alias-v2"}]}"#.into()),
+    ]);
+    let output = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        osv_request_identities(&requests),
+        vec![
+            ("@acme/shared-runtime".into(), "1.2.3".into()),
+            ("@acme/shared-runtime".into(), "2.4.6".into()),
+        ]
+    );
+    let report = parse_json_stdout(&output, "Bun alias version audit");
+    assert_eq!(report["scanned_dependencies"], 1);
+    let item = shared_runtime_audit_item(&report);
+    assert_eq!(item["risk_level"], "high");
+    assert_eq!(item["audit_coverage"]["coverage_complete"], true);
+    assert_eq!(item["audit_coverage"]["versions"][0]["status"], "clean");
+    assert_eq!(
+        item["audit_coverage"]["versions"][1]["status"],
+        "vulnerable"
+    );
+    let card = export_osv_scan_card(workspace.path(), "npm:@acme/shared-runtime");
+    assert_eq!(card.extension.version, "multiple-or-unresolved");
+    assert!(
+        card.user_facing_risk_assessment
+            .summary
+            .contains("OSV-bun-alias-v2")
+    );
+}
+
+#[test]
+fn trust_scan_audit_does_not_query_an_unresolved_manifest_range_without_a_version() {
+    let workspace = config_only_workspace();
+    write_run_package_manifest(workspace.path(), &[("@acme/shared-runtime", "^1.0.0")]);
+    // Keep the listener alive until the CLI exits. A short-lived observer
+    // could miss an erroneous query after a slow registry initialization.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/query", listener.local_addr().unwrap());
+    let token = issue_osv_fixture_remotecap(workspace.path(), &url);
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "scan", ".", "--audit", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", &url),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                token.to_str().unwrap(),
+            ),
+            ("FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS", "50"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "an inventory range cannot authorize a versionless OSV query"
+    );
+    let report = parse_json_stdout(&output, "manifest-only audit coverage");
+    let item = shared_runtime_audit_item(&report);
+    let coverage = &item["audit_coverage"];
+    assert_eq!(coverage["coverage_complete"], false);
+    assert_eq!(coverage["complete_clean_authenticated"], false);
+    assert_eq!(coverage["has_unresolved_version"], true);
+    assert!(coverage["versions"].as_array().unwrap().is_empty());
+    assert_ne!(item["risk_level"], "low");
+}
+
+#[test]
+fn trust_scan_deep_audit_does_not_attribute_new_release_history_to_a_retained_old_card() {
+    use frankenengine_node::supply_chain::trust_card::{RiskLevel, verify_card_signature};
+
+    let package = "telemetry-drift";
+    let extension = "npm:telemetry-drift";
+    let workspace = attributed_osv_scan_workspace(package, Some(0x11));
+    write_osv_scan_artifact(workspace.path(), package, "0.0.0", Some(0x11));
+    let initial = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let original = export_osv_scan_card(workspace.path(), extension);
+    assert_eq!(original.extension.version, "0.0.0");
+    assert!(original.camouflage_hints.is_empty());
+
+    write_osv_scan_artifact(workspace.path(), package, "0.0.5", Some(0x22));
+    let offline_dir = workspace.path().join("offline-registry");
+    fs::create_dir_all(&offline_dir).unwrap();
+    let integrity = format!("sha256-{}", BASE64_STANDARD.encode([0x22_u8; 32]));
+    fs::write(
+        offline_dir.join("telemetry-drift.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "_fixture": "Six releases introduce install-hook and executable drift.",
+            "_hermetic_dependent_count": 42,
+            "name": package,
+            "maintainers": [{"name": "driftmaint", "email": "drift@example.test"}],
+            "time": {
+                "created": (chrono::Utc::now() - chrono::Duration::days(730)).to_rfc3339(),
+                "0.0.0": "2024-01-01T00:00:00.000Z",
+                "0.0.1": "2024-02-01T00:00:00.000Z",
+                "0.0.2": "2024-03-01T00:00:00.000Z",
+                "0.0.3": "2024-04-01T00:00:00.000Z",
+                "0.0.4": "2024-05-01T00:00:00.000Z",
+                "0.0.5": "2024-06-01T00:00:00.000Z"
+            },
+            "versions": {
+                "0.0.0": {},
+                "0.0.1": {"dependencies": {"helper-a": "1.0.0"}},
+                "0.0.2": {"dependencies": {"helper-a": "1.0.1"}},
+                "0.0.3": {"scripts": {"postinstall": "node install.js"}},
+                "0.0.4": {
+                    "scripts": {"postinstall": "node install.js"},
+                    "bin": {"td": "bin/td.js"}
+                },
+                "0.0.5": {
+                    "scripts": {"postinstall": "node install.js"},
+                    "bin": {"td": "bin/td.js"},
+                    "dist": {"integrity": integrity}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (url, requests, server) =
+        spawn_osv_static_response_server(1, 200, "OK", r#"{"vulns":[{"id":"OSV-new-release"}]}"#);
+    let audited = trust_scan_audit_with_options(
+        workspace.path(),
+        &url,
+        &["--deep", "--offline-registry-dir", "offline-registry"],
+    );
+    server.join().unwrap();
+    assert!(
+        audited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+    assert_eq!(
+        osv_request_identities(&requests),
+        vec![(package.into(), "0.0.5".into())]
+    );
+    let retained = export_osv_scan_card(workspace.path(), extension);
+    verify_card_signature(&retained, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(retained.extension, original.extension);
+    assert_eq!(retained.publisher, original.publisher);
+    assert_eq!(retained.provenance_summary, original.provenance_summary);
+    assert_eq!(retained.behavioral_profile, original.behavioral_profile);
+    assert_eq!(
+        retained.camouflage_hints, original.camouflage_hints,
+        "the new artifact's release window must not be attached to the retained old artifact"
+    );
+    assert_eq!(retained.user_facing_risk_assessment.level, RiskLevel::High);
+    let retained_json = serde_json::to_value(&retained).unwrap();
+    assert_eq!(
+        retained_json["osv_risk_baseline"]["evidence_scope"],
+        serde_json::json!({
+            "versions": ["0.0.5"],
+            "unresolved": false,
+            "vulnerability_ids": ["OSV-new-release"]
+        })
+    );
+
+    // Refreshing the artifact explicitly must still consume the real release
+    // window. This proves the fixture exercises camouflage detection.
+    let refreshed = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "scan",
+            ".",
+            "--refresh",
+            "--deep",
+            "--offline-registry-dir",
+            "offline-registry",
+            "--json",
+        ],
+    );
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let current = export_osv_scan_card(workspace.path(), extension);
+    verify_card_signature(&current, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(current.extension.version, "0.0.5");
+    assert_ne!(current.provenance_summary, original.provenance_summary);
+    assert!(
+        !current.camouflage_hints.is_empty(),
+        "an explicit artifact refresh must retain matching release-history evidence"
+    );
+}
+
 #[test]
 fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance() {
     use frankenengine_node::supply_chain::trust_card::{
@@ -5282,8 +5962,17 @@ fn trust_scan_audit_refreshes_existing_cards_without_unauthenticated_lowering() 
         card["user_facing_risk_assessment"]["summary"]
             .as_str()
             .expect("risk summary")
-            .contains("osv_vulns=GHSA-scan-refresh-0001"),
+            .contains("GHSA-scan-refresh-0001"),
         "{card}"
+    );
+    assert_eq!(card["osv_risk_baseline"]["risk_assessment"]["level"], "low");
+    assert_eq!(
+        card["osv_risk_baseline"]["evidence_scope"],
+        serde_json::json!({
+            "versions": ["19.2.4"],
+            "unresolved": false,
+            "vulnerability_ids": ["GHSA-scan-refresh-0001"]
+        })
     );
     assert_eq!(
         card["provenance_summary"]["artifact_hashes"][0],
@@ -5291,7 +5980,11 @@ fn trust_scan_audit_refreshes_existing_cards_without_unauthenticated_lowering() 
     );
     let history = card["audit_history"].as_array().expect("audit history");
     assert_eq!(history.len(), 2, "creation record is kept: {card}");
-    assert_eq!(history[1]["detail"], "trust card refreshed from scan");
+    assert_eq!(
+        history[1]["detail"],
+        "OSV vulnerability overlay applied with retained version scope and source baseline"
+    );
+    let card_before_clean = card;
 
     let (clean_url, clean_requests, clean_server) =
         spawn_osv_static_response_server(3, 200, "OK", "{}");
@@ -5308,13 +6001,23 @@ fn trust_scan_audit_refreshes_existing_cards_without_unauthenticated_lowering() 
     assert_eq!(report["skipped_existing"], 3);
     let warnings = report["warnings"].as_array().expect("scan warnings");
     assert!(
-        warnings.iter().any(|warning| warning.as_str()
-            == Some("npm:react: existing card not refreshed: the new evidence would lower risk from High to Low, which needs an --audit answer from the default OSV endpoint")),
+        warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .any(
+                |warning| warning.starts_with("npm:react: existing card not refreshed:")
+                    && warning.contains("active OSV evidence")
+                    && warning.contains("authenticated")
+            ),
         "{report}"
     );
     let card = export("trust-card export after refused lowering");
     assert_eq!(card["trust_card_version"], 2);
     assert_eq!(card["user_facing_risk_assessment"]["level"], "high");
+    assert_eq!(
+        card, card_before_clean,
+        "refused clearance cannot change signed state"
+    );
 }
 
 #[test]

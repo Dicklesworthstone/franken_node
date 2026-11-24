@@ -1135,7 +1135,7 @@ remain in force.
 |---|---|
 | `franken-node trust card <id>` | Show trust profile for one extension. The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
-| `franken-node trust scan [path]` | Populate baseline trust cards from package.json. A plain rescan skips existing cards; with `--deep`/`--audit` it refreshes them from the fetched evidence (same version only; lowering risk needs an OSV answer from the default endpoint) and keeps certification, revocation, quarantine and camouflage marks. Flags: `--deep`, `--audit`, `--json`. |
+| `franken-node trust scan [path]` | Populate trust cards from captured npm/Bun dependencies. A plain rescan skips existing cards. `--audit` checks every captured exact version, reports per-version coverage, and retains findings across partial results; clearing risk requires complete authenticated evidence for the same artifact and retained version scope. `--deep` enriches single-version metadata. `--refresh` explicitly records changed artifacts while retaining prior risk and containment. Flags: `--deep`, `--audit`, `--refresh`, `--json`. |
 | `franken-node trust observe <observation.json> --collector-key <public-key-file>` | Verify collector-attested measurements for an exact package artifact, append a durable observation stream, and apply BPET camouflage findings to its signed trust card. Repeated observations are idempotent. `--json` emits `franken-node/behavioral-ingestion/v1`. See [the measurement and signing contract](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md). |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
 | `franken-node trust revoke [<id>]` | Revoke one extension card, or choose `--publisher-public-key <file>` / `--artifact-sha256 <full-digest>` to deny authenticated native artifacts in this project's signed registry, including running sessions. Exactly one target is required. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked card or `franken-node/trust-execution-revocation-cli/v1`; failures use `franken-node/trust-error-cli/v1`. |
@@ -3609,8 +3609,28 @@ dynamic code to a package identity.
 Trust cards are keyed by package identity. When reachable installations contain
 multiple versions, or mix a pinned version with an unresolved requirement, a new
 card reports `multiple-or-unresolved`, has at least Medium risk, and carries a
-warning. Single-version `--deep`/`--audit` refresh is unavailable for that card;
-the scanner does not use one selected version to clear all the others.
+warning. Single-version `--deep` metadata is unavailable for that card.
+`--audit` checks each distinct captured exact version under the actual package
+name, including nested npm installations and Bun aliases. Repeated placements
+of the same version produce one query. Known versions are still checked when
+another placement is unresolved; ranges and registry-selected latest releases
+never stand in for the missing version.
+
+With `--audit --json`, each item's `audit_coverage` contains per-version status
+(`clean`, `vulnerable`, `failed`, or `not_queried`), findings, unresolved metadata,
+and `coverage_complete`. A failed request does not discard findings from other
+versions. The plan allows up to 4,096 distinct queries and 128 captured versions
+per package; exceeding a plan bound fails before network access. Auditing has
+a shared five-minute deadline, after which remaining versions are reported as
+unqueried. Partial coverage never authorizes clearing known vulnerability risk.
+
+Positive findings update signed risk without silently changing an existing
+card's version or provenance. Their signed evidence scope retains the union of
+observed versions and known vulnerability IDs. A subsequent clean `trust sync`
+for just one card version cannot clear findings that cover other versions or
+unresolved placements. Even a complete clean audit still needs authenticated
+default-endpoint evidence and the existing exact-artifact checks to lower risk;
+quarantine, revocation, and independent behavioral findings retain their authority.
 
 `--deep` fetches package metadata from the public npm registry
 (`registry.npmjs.org`) and dependent counts from `api.deps.dev`; those

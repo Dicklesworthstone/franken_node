@@ -2891,7 +2891,9 @@ pub struct TrustScanArgs {
     #[arg(long)]
     pub deep: bool,
 
-    /// Query OSV for known npm vulnerabilities during the scan.
+    /// Query OSV once for every distinct captured exact npm version, including
+    /// nested installations and aliases. Reports partial coverage explicitly;
+    /// unresolved versions are never replaced by versionless or latest queries.
     #[arg(long)]
     pub audit: bool,
 
