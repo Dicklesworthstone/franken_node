@@ -1339,6 +1339,11 @@ pub enum RemoteCapError {
     Revoked {
         token_id: String,
     },
+    /// The selected project's durable revocation authority could not be read.
+    /// This is an authorization failure, never a transport/offline fallback.
+    AuthorityStateUnavailable,
+    /// Redirect destinations require a new capability decision before egress.
+    RedirectNotAuthorized,
     ReplayDetected {
         token_id: String,
     },
@@ -1379,6 +1384,8 @@ impl RemoteCapError {
             Self::ScopeDenied { .. } => "REMOTECAP_SCOPE_DENIED",
             Self::InvalidScope { .. } => "REMOTECAP_SCOPE_INVALID",
             Self::Revoked { .. } => "REMOTECAP_REVOKED",
+            Self::AuthorityStateUnavailable => "REMOTECAP_AUTHORITY_STATE_UNAVAILABLE",
+            Self::RedirectNotAuthorized => "REMOTECAP_REDIRECT_NOT_AUTHORIZED",
             Self::ReplayDetected { .. } => "REMOTECAP_REPLAY",
             Self::ConnectivityModeDenied { .. } => "REMOTECAP_CONNECTIVITY_MODE_DENIED",
             Self::CryptoEngineUnavailable { .. } => "REMOTECAP_CRYPTO_UNAVAILABLE",
@@ -1447,6 +1454,16 @@ impl fmt::Display for RemoteCapError {
             ),
             Self::InvalidScope { detail } => write!(f, "{}: {detail}", self.code()),
             Self::Revoked { .. } => write!(f, "{}: token revoked", self.code()),
+            Self::AuthorityStateUnavailable => write!(
+                f,
+                "{}: project revocation authority is unavailable",
+                self.code()
+            ),
+            Self::RedirectNotAuthorized => write!(
+                f,
+                "{}: redirect requires separate capability authorization",
+                self.code()
+            ),
             Self::ReplayDetected { .. } => write!(f, "{}: token replay detected", self.code()),
             Self::ConnectivityModeDenied {
                 mode,

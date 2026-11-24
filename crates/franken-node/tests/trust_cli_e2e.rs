@@ -5246,6 +5246,175 @@ fn trust_scan_audit_with_options(workspace: &Path, osv_url: &str, options: &[&st
     )
 }
 
+#[test]
+fn trust_scan_audit_obeys_project_revocation_from_another_working_directory() {
+    let project = attributed_osv_scan_workspace("@acme/shared-runtime", Some(0x31));
+    let caller = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/query", listener.local_addr().unwrap());
+    let token = issue_osv_fixture_remotecap(project.path(), &url);
+    let revoked = run_cli_in_workspace_with_env(
+        project.path(),
+        &[
+            "remotecap", "revoke", "--token-file", token.to_str().unwrap(), "--json",
+        ],
+        &[("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY)],
+    );
+    assert!(revoked.status.success(), "{revoked:?}");
+    let output = run_cli_in_workspace_with_env(
+        caller.path(),
+        &[
+            "trust", "scan", project.path().to_str().unwrap(), "--audit", "--json",
+        ],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", &url),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token.to_str().unwrap()),
+            ("FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS", "100"),
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("REMOTECAP_REVOKED"), "{diagnostic}");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "the caller's empty revocation directory must not authorize another project's revoked token"
+    );
+}
+
+#[test]
+fn trust_scan_audit_rechecks_revocation_before_the_next_osv_page() {
+    let project = attributed_osv_scan_workspace("@acme/shared-runtime", Some(0x32));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/query", listener.local_addr().unwrap());
+    let token = issue_osv_fixture_remotecap(project.path(), &url);
+    let server_project = project.path().to_path_buf();
+    let server_token = token.clone();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream = accept_osv_fixture_connection(&listener, "live revocation first page");
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let first_request = read_http_request(&mut stream);
+        assert!(!first_request.contains("page_token"), "{first_request}");
+
+        // The real scan has already authorized and sent its first request.
+        // Commit a revocation through a separate CLI process before returning
+        // the continuation, so its existing context must refresh authority.
+        let revoked = run_cli_in_workspace_with_env(
+            &server_project,
+            &[
+                "remotecap", "revoke", "--token-file", server_token.to_str().unwrap(), "--json",
+            ],
+            &[("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY)],
+        );
+        assert!(revoked.status.success(), "{revoked:?}");
+        write_osv_response(
+            &mut stream, 200, "OK", r#"{"next_page_token":"after-revocation"}"#,
+        );
+
+        let mut request_count = 1;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while stopped.try_recv().is_err() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let _ = read_http_request(&mut stream);
+                    request_count += 1;
+                    // Service an erroneous continuation so a regression fails
+                    // by observed extra egress rather than hanging the test.
+                    write_osv_response(&mut stream, 200, "OK", r#"{"vulns":[]}"#);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("live revocation observer failed: {error}"),
+            }
+        }
+        request_count
+    });
+    let output = run_cli_in_workspace_with_env(
+        project.path(),
+        &["trust", "scan", ".", "--audit", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", &url),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token.to_str().unwrap()),
+        ],
+    );
+    let _ = stop.send(());
+    let request_count = server.join().expect("join live revocation server");
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("REMOTECAP_REVOKED"), "{diagnostic}");
+    assert_eq!(
+        request_count, 1, "a revoked capability must not send a continuation request",
+    );
+}
+
+#[test]
+fn trust_scan_audit_refuses_redirects_without_contacting_the_destination() {
+    for status in [301, 302, 303, 307, 308] {
+        let project = attributed_osv_scan_workspace("@acme/shared-runtime", Some(0x33));
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        source.set_nonblocking(true).unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/query", source.local_addr().unwrap());
+        let location = format!("http://{}/outside-authority", destination.local_addr().unwrap());
+        let token = issue_osv_fixture_remotecap(project.path(), &url);
+        let server = thread::spawn(move || {
+            let mut stream = accept_osv_fixture_connection(&source, "OSV redirect fixture");
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let request = read_http_request(&mut stream);
+            assert!(request.starts_with("POST /query "), "{request}");
+            // A valid-looking payload must not turn a refused redirect into
+            // evidence that this package has no reported vulnerabilities.
+            let body = r#"{"vulns":[]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let output = run_cli_in_workspace_with_env(
+            project.path(),
+            &["trust", "scan", ".", "--audit", "--json"],
+            &[
+                ("FRANKEN_NODE_OSV_QUERY_URL", &url),
+                ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+                ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token.to_str().unwrap()),
+                ("FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS", "1000"),
+            ],
+        );
+        server.join().expect("join OSV redirect fixture");
+        assert!(!output.status.success(), "status {status}: {output:?}");
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostic.contains("REMOTECAP_REDIRECT_NOT_AUTHORIZED"),
+            "status {status}: {diagnostic}"
+        );
+        assert!(
+            matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "HTTP {status} must not contact a destination outside the authorized request"
+        );
+    }
+}
+
 fn write_osv_scan_artifact(workspace: &Path, package: &str, version: &str, byte: Option<u8>) {
     let mut artifact = serde_json::json!({ "name": package, "version": version });
     if let Some(byte) = byte {

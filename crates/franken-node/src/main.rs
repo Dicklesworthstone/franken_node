@@ -9097,8 +9097,16 @@ fn remotecap_cli_replay_store_path() -> PathBuf {
 }
 
 fn remotecap_cli_capability_gate(signing_key: &str, cap: &RemoteCap) -> Result<CapabilityGate> {
+    remotecap_cli_capability_gate_at(signing_key, cap, &remotecap_cli_replay_store_path())
+}
+
+fn remotecap_cli_capability_gate_at(
+    signing_key: &str,
+    cap: &RemoteCap,
+    replay_store_path: &Path,
+) -> Result<CapabilityGate> {
     if cap.is_single_use() {
-        CapabilityGate::with_durable_replay_store(signing_key, remotecap_cli_replay_store_path())
+        CapabilityGate::with_durable_replay_store(signing_key, replay_store_path)
             .map_err(|err| anyhow::anyhow!(err.to_string()))
     } else {
         CapabilityGate::try_new(signing_key).map_err(|err| anyhow::anyhow!(err.to_string()))
@@ -22091,12 +22099,10 @@ mod trust_command_tests {
                 "trace-trust-scan-issue",
             )
             .expect("issue non-egress token");
-        let mut remote_cap = TrustScanRemoteCapContext {
-            cap: Some(cap),
-            gate: CapabilityGate::new(secret).expect("gate"),
-            now_epoch_secs: issued_at.saturating_add(10),
-            trace_id: "trace-trust-scan-denied".to_string(),
-        };
+        let project = tempfile::tempdir().expect("authority project");
+        let mut remote_cap =
+            TrustScanRemoteCapContext::for_project(project.path(), secret, Some(cap))
+                .expect("project capability context");
 
         let err = fetch_trust_scan_npm_metadata("left-pad", None, &mut remote_cap)
             .expect_err("trust scan metadata fetch must fail before network egress");
@@ -22104,6 +22110,221 @@ mod trust_command_tests {
             .downcast_ref::<RemoteCapError>()
             .expect("error should preserve RemoteCap denial");
         assert_eq!(remote_cap_err.code(), "REMOTECAP_SCOPE_DENIED");
+    }
+
+    fn trust_scan_egress_test_cap(single_use: bool) -> RemoteCap {
+        CapabilityProvider::new("trust-scan-live-authority-secret")
+            .expect("provider")
+            .issue(
+                "trust-scan-live-authority",
+                RemoteScope::new(
+                    vec![RemoteOperation::NetworkEgress],
+                    vec!["https://registry.npmjs.org".to_string()],
+                ),
+                1_000,
+                10,
+                true,
+                single_use,
+                "trace-live-authority",
+            )
+            .expect("issue signed capability")
+            .0
+    }
+
+    #[test]
+    fn trust_scan_rechecks_selected_project_revocation_before_each_request() {
+        let project = tempfile::tempdir().unwrap();
+        let unrelated_project = tempfile::tempdir().unwrap();
+        let cap = trust_scan_egress_test_cap(false);
+        let mut context = TrustScanRemoteCapContext::for_project(
+            project.path(),
+            "trust-scan-live-authority-secret",
+            Some(cap.clone()),
+        )
+        .unwrap();
+        let endpoint = "https://registry.npmjs.org/example";
+        context.authorize_egress_at(endpoint, 1_001).unwrap();
+
+        revoke_remotecap_cli_token_at(
+            &unrelated_project.path().join(remotecap_cli_state_path()),
+            cap.token_id(),
+        )
+        .unwrap();
+        context.authorize_egress_at(endpoint, 1_002).unwrap();
+
+        revoke_remotecap_cli_token_at(&context.state_path, cap.token_id()).unwrap();
+        let error = context.authorize_egress_at(endpoint, 1_003).unwrap_err();
+        assert!(is_remote_cap_denial(&error));
+        assert!(matches!(
+            error.downcast_ref::<RemoteCapError>(),
+            Some(RemoteCapError::Revoked { .. })
+        ));
+        assert!(
+            TrustScanRemoteCapContext::for_project(
+                project.path(),
+                "trust-scan-live-authority-secret",
+                Some(cap),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn trust_scan_checks_expiry_at_each_request_time() {
+        let project = tempfile::tempdir().unwrap();
+        let mut context = TrustScanRemoteCapContext::for_project(
+            project.path(),
+            "trust-scan-live-authority-secret",
+            Some(trust_scan_egress_test_cap(false)),
+        )
+        .unwrap();
+        let endpoint = "https://registry.npmjs.org/example";
+        context.authorize_egress_at(endpoint, 1_009).unwrap();
+        let error = context.authorize_egress_at(endpoint, 1_010).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RemoteCapError>(),
+            Some(RemoteCapError::Expired {
+                now_epoch_secs: 1_010,
+                expires_at_epoch_secs: 1_010,
+            })
+        ));
+        // The production entry point obtains the current clock, rather than
+        // retaining the timestamp at which the context was created.
+        let error = context.authorize_egress(endpoint).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RemoteCapError>(),
+            Some(RemoteCapError::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn trust_scan_single_use_replay_is_bound_to_the_selected_project() {
+        let project = tempfile::tempdir().unwrap();
+        let cap = trust_scan_egress_test_cap(true);
+        let endpoint = "https://registry.npmjs.org/example";
+        {
+            let mut context = TrustScanRemoteCapContext::for_project(
+                project.path(),
+                "trust-scan-live-authority-secret",
+                Some(cap.clone()),
+            )
+            .unwrap();
+            context.authorize_egress_at(endpoint, 1_001).unwrap();
+        }
+        assert!(project.path().join(remotecap_cli_replay_store_path()).is_dir());
+        let mut restarted = TrustScanRemoteCapContext::for_project(
+            project.path(),
+            "trust-scan-live-authority-secret",
+            Some(cap),
+        )
+        .unwrap();
+        let error = restarted.authorize_egress_at(endpoint, 1_002).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RemoteCapError>(),
+            Some(RemoteCapError::ReplayDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn trust_scan_authority_read_failure_remains_an_authorization_denial() {
+        let project = tempfile::tempdir().unwrap();
+        let mut context = TrustScanRemoteCapContext::for_project(
+            project.path(),
+            "trust-scan-live-authority-secret",
+            Some(trust_scan_egress_test_cap(false)),
+        )
+        .unwrap();
+        context
+            .authorize_egress_at("https://registry.npmjs.org/example", 1_001)
+            .unwrap();
+        // A directory cannot serve as the configured authority database.
+        // Preserve any initialized file while making the authority unreadable.
+        let database = context.state_path.with_extension("db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        if database.exists() {
+            std::fs::rename(&database, database.with_extension("db.saved")).unwrap();
+        }
+        std::fs::create_dir(&database).unwrap();
+        let mut sampled_clock = false;
+        let error = context
+            .authorize_egress_with_clock("https://registry.npmjs.org/example", || {
+                sampled_clock = true;
+                1_002
+            })
+            .unwrap_err();
+        assert!(!sampled_clock, "sample the request clock only after authority resolves");
+        assert!(is_remote_cap_denial(&error));
+        assert_eq!(
+            error.downcast_ref::<RemoteCapError>(),
+            Some(&RemoteCapError::AuthorityStateUnavailable)
+        );
+        assert!(!error.to_string().contains(&project.path().display().to_string()));
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn trust_scan_http_helpers_refuse_redirects_before_reading_payloads() {
+        use std::io::{Read as _, Write as _};
+
+        for post in [false, true] {
+            let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            source.set_nonblocking(true).unwrap();
+            let destination = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            destination.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/query", source.local_addr().unwrap());
+            let location = format!("http://{}/outside-authority", destination.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match source.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "redirect fixture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("redirect fixture failed: {error}"),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !received.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0, "request ended before its headers");
+                    received.extend_from_slice(&buffer[..count]);
+                    assert!(received.len() <= 8192, "fixture request is too large");
+                }
+                let body = r#"{"vulns":[]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let result = if post {
+                trust_scan_http_post_json_body(
+                    &url,
+                    String::new(),
+                    Instant::now() + Duration::from_secs(3),
+                    "fixture POST failed",
+                    "fixture POST read failed",
+                )
+            } else {
+                trust_scan_http_get_body(&url, "fixture GET failed", "fixture GET read failed")
+            };
+            server.join().unwrap();
+            let error = result.unwrap_err();
+            assert!(is_remote_cap_denial(&error));
+            assert_eq!(
+                error.downcast_ref::<RemoteCapError>(),
+                Some(&RemoteCapError::RedirectNotAuthorized)
+            );
+            assert!(
+                matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "redirected {post:?} request must not leave the authorized destination"
+            );
+        }
     }
 
     #[test]
@@ -25478,18 +25699,80 @@ fn parse_deps_dev_dependent_count(payload: &serde_json::Value) -> Result<u64> {
 struct TrustScanRemoteCapContext {
     cap: Option<RemoteCap>,
     gate: CapabilityGate,
-    now_epoch_secs: u64,
+    state_path: PathBuf,
     trace_id: String,
 }
 
 impl TrustScanRemoteCapContext {
+    fn for_project(
+        project_root: &Path,
+        signing_key: &str,
+        cap: Option<RemoteCap>,
+    ) -> Result<Self> {
+        // Pin every authority path to the project selected by the command.
+        // A scan may run from a different cwd or outlive a cwd change.
+        let project_root = project_root
+            .canonicalize()
+            .context("failed resolving trust scan capability authority project")?;
+        let gate = match cap.as_ref() {
+            Some(cap) => remotecap_cli_capability_gate_at(
+                signing_key,
+                cap,
+                &project_root.join(remotecap_cli_replay_store_path()),
+            )?,
+            None => CapabilityGate::try_new(signing_key)?,
+        };
+        let context = Self {
+            cap,
+            gate,
+            state_path: project_root.join(remotecap_cli_state_path()),
+            trace_id: "trace-cli-trust-scan-remotecap".to_string(),
+        };
+        context.require_current_revocation_authority()?;
+        Ok(context)
+    }
+
+    fn require_current_revocation_authority(&self) -> Result<()> {
+        if let Some(cap) = self.cap.as_ref() {
+            let state = load_remotecap_cli_state_from(&self.state_path)
+                .map_err(|_| RemoteCapError::AuthorityStateUnavailable)?;
+            if state.revoked_token_ids.contains(cap.token_id()) {
+                return Err(RemoteCapError::Revoked {
+                    token_id: cap.token_id().to_string(),
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn authorize_egress(&mut self, endpoint: &str) -> Result<()> {
+        self.authorize_egress_with_clock(endpoint, now_unix_secs)
+    }
+
+    #[cfg(test)]
+    fn authorize_egress_at(&mut self, endpoint: &str, now_epoch_secs: u64) -> Result<()> {
+        self.authorize_egress_with_clock(endpoint, || now_epoch_secs)
+    }
+
+    fn authorize_egress_with_clock(
+        &mut self,
+        endpoint: &str,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<()> {
+        // Each npm, deps.dev, or OSV page request needs current authority.
+        // Neither a successful earlier request nor the scan's start timestamp
+        // permits egress after a concurrent revocation or token expiry.
+        self.require_current_revocation_authority()?;
+        // Loading the durable authority can wait for a concurrent writer.
+        // Sample time afterwards so that wait cannot extend a token's TTL.
+        let now_epoch_secs = clock();
         self.gate
             .authorize_network(
                 self.cap.as_ref(),
                 RemoteOperation::NetworkEgress,
                 endpoint,
-                self.now_epoch_secs,
+                now_epoch_secs,
                 &self.trace_id,
             )
             .map_err(anyhow::Error::new)
@@ -25514,12 +25797,6 @@ fn trust_scan_remote_cap_context(
     let cap = match token_path {
         Some(token_path) => {
             let cap = read_remotecap_token(&token_path)?;
-            let state = load_remotecap_cli_state()?;
-            if state.revoked_token_ids.contains(cap.token_id()) {
-                return Err(anyhow::Error::new(RemoteCapError::Revoked {
-                    token_id: cap.token_id().to_string(),
-                }));
-            }
             if default_token && now_epoch_secs >= cap.expires_at_epoch_secs() {
                 anyhow::bail!(
                     "the default trust-scan RemoteCap token {} expired at epoch {}; re-run `franken-node init` to renew it",
@@ -25532,16 +25809,7 @@ fn trust_scan_remote_cap_context(
         None => None,
     };
     let signing_key = resolve_remotecap_signing_key_for(project_root)?;
-    let gate = match cap.as_ref() {
-        Some(cap) => remotecap_cli_capability_gate(&signing_key, cap)?,
-        None => CapabilityGate::try_new(&signing_key)?,
-    };
-    Ok(TrustScanRemoteCapContext {
-        cap,
-        gate,
-        now_epoch_secs,
-        trace_id: "trace-cli-trust-scan-remotecap".to_string(),
-    })
+    TrustScanRemoteCapContext::for_project(project_root, &signing_key, cap)
 }
 
 fn is_remote_cap_denial(err: &anyhow::Error) -> bool {
@@ -25845,6 +26113,9 @@ fn trust_scan_http_timeout() -> Duration {
 fn trust_scan_http_agent(timeout: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        // Redirects would send another request without checking the new
+        // destination, current revocations, expiry, or single-use authority.
+        .max_redirects(0)
         .build();
     ureq::Agent::new_with_config(config)
 }
@@ -25857,6 +26128,9 @@ fn trust_scan_http_get_body(url: &str, request_error: &str, read_error: &str) ->
         .header("User-Agent", &trust_scan_user_agent())
         .call()
         .map_err(|err| anyhow::anyhow!("{request_error}: {err}"))?;
+    if response.status().is_redirection() {
+        return Err(RemoteCapError::RedirectNotAuthorized.into());
+    }
     response
         .body_mut()
         .read_to_string()
@@ -25887,6 +26161,9 @@ fn trust_scan_http_post_json_body(
         .header("Content-Type", "application/json")
         .send(body)
         .map_err(|err| anyhow::anyhow!("{request_error}: {err}"))?;
+    if response.status().is_redirection() {
+        return Err(RemoteCapError::RedirectNotAuthorized.into());
+    }
     response
         .body_mut()
         .read_to_string()
