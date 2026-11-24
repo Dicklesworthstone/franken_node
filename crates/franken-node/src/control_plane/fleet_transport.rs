@@ -58,6 +58,8 @@ pub const NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA: &str =
 pub const MAX_NATIVE_DRAIN_ATTESTATION_AGE: Duration = MAX_GUARDED_POLICY_STALE_AFTER;
 pub const FLEET_GUARDED_POLICY_RECEIPT_SCHEMA: &str =
     "franken-node/fleet-guarded-policy-publication/v1";
+pub const FLEET_GUARDED_RESUME_RECEIPT_SCHEMA: &str =
+    "franken-node/fleet-guarded-native-session-resume/v1";
 const FLEET_ACTION_COMPACTION_LOCK_FILE: &str = "actions.compaction.lock";
 const FLEET_SHARED_STATE_LOCK_FILE: &str = "shared-state.snapshot.lock";
 const MAX_NODE_ID_LEN: usize = 128;
@@ -2333,6 +2335,143 @@ impl FleetGuardedPolicyReceipt {
     }
 }
 
+/// Release one owner only after its guarded policy and the complete current
+/// action snapshot have been acknowledged under that owner's admission fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardedFleetNativeSessionResume {
+    pub action: FleetActionRecord,
+    pub policy_action: FleetActionRecord,
+    pub guard: FleetPolicyMaintenanceGuard,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl GuardedFleetNativeSessionResume {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        validate_action_record(&self.action)?;
+        GuardedFleetPolicyPublication {
+            action: self.policy_action.clone(),
+            guard: self.guard.clone(),
+        }
+        .validate()?;
+        match &self.action.action {
+            FleetAction::NativeSessionResume {
+                zone_id,
+                hold_action_id,
+                ..
+            } if zone_id == guarded_policy_zone(&self.policy_action)?
+                && hold_action_id == &self.guard.hold_action_id => {}
+            _ => {
+                return Err(FleetTransportError::serialization(
+                    "guarded resume must release only its policy's exact maintenance owner and zone",
+                ));
+            }
+        }
+        if self.action.action_id == self.policy_action.action_id
+            || self.action.action_id == self.guard.hold_action_id
+        {
+            return Err(FleetTransportError::action_conflict(
+                "guarded resume, policy and maintenance owner require distinct identities",
+            ));
+        }
+        validate_guarded_json_bound(self, MAX_GUARDED_POLICY_REQUEST_BYTES)
+    }
+}
+
+/// The original atomic release decision, retained with the immutable action.
+/// It proves readiness at acceptance, not present-day admission or quiescence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetGuardedResumeReceipt {
+    pub schema_version: String,
+    pub request: GuardedFleetNativeSessionResume,
+    pub evidence: FleetNativeSessionHoldEvidence,
+    pub accepted_at: DateTime<Utc>,
+    pub observation_scope: FleetGuardedPolicyObservationScope,
+    pub already_resumed: bool,
+}
+
+impl FleetGuardedResumeReceipt {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        self.request.validate()?;
+        if self.schema_version != FLEET_GUARDED_RESUME_RECEIPT_SCHEMA
+            || self.accepted_at >= self.request.expires_at
+        {
+            return Err(FleetTransportError::serialization(
+                "guarded resume receipt has an invalid schema or expired authorization",
+            ));
+        }
+        // Reuse the complete held-observation validator, including signed
+        // freshness and retained participants. This value is only a validation
+        // adapter; it is never emitted or retained as a policy publication.
+        FleetGuardedPolicyReceipt {
+            schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
+            action: self.request.policy_action.clone(),
+            guard: self.request.guard.clone(),
+            evidence: self.evidence.clone(),
+            accepted_at: self.accepted_at,
+            observation_scope: self.observation_scope,
+            already_published: false,
+            fleet_quiescence_certified: false,
+        }
+        .validate()?;
+        validate_guarded_json_bound(self, MAX_GUARDED_POLICY_RECEIPT_BYTES)
+    }
+}
+
+pub fn validate_guarded_fleet_native_session_resume(
+    request: &GuardedFleetNativeSessionResume,
+    state: &FleetSharedState,
+    now: DateTime<Utc>,
+    max_stale_after: Duration,
+) -> Result<FleetNativeSessionHoldEvidence, FleetTransportError> {
+    request.validate()?;
+    if now >= request.expires_at || max_stale_after.is_zero() {
+        return Err(FleetTransportError::stale_state(
+            "guarded resume authorization expired or lacks a freshness window",
+        ));
+    }
+    if fleet_action_log_checkpoint(&state.actions)? != request.guard.expected_action_log {
+        return Err(FleetTransportError::stale_state(
+            "guarded resume requires the exact acknowledged full action log",
+        ));
+    }
+    let policy_zone = guarded_policy_zone(&request.policy_action)?;
+    let effective = state.actions.iter().rev().find(|record| {
+        matches!(&record.action, FleetAction::PolicyUpdate { zone_id, artifact: Some(_), .. }
+            if zone_id == policy_zone)
+    });
+    if effective != Some(&request.policy_action) {
+        return Err(FleetTransportError::stale_state(
+            "guarded resume requires its exact intended policy to remain effective in the publication zone",
+        ));
+    }
+    if state
+        .actions
+        .iter()
+        .any(|action| action.action_id == request.action.action_id)
+    {
+        return Err(FleetTransportError::action_conflict(
+            "existing resume requires its original durable guarded receipt",
+        ));
+    }
+    validate_fleet_native_session_publication(&request.action, &state.actions)?;
+    let evidence = fleet_native_session_hold_evidence(
+        state,
+        &request.guard.hold_action_id,
+        FleetNativeSessionHoldTarget::Held,
+        &request.guard.required_nodes,
+        now,
+        request.guard.stale_after.min(max_stale_after),
+    )?;
+    if !evidence.complete || evidence.hold_zone_id != policy_zone {
+        return Err(FleetTransportError::stale_state(
+            "guarded resume requires fresh held acknowledgements of the policy snapshot from every retained participant",
+        ));
+    }
+    Ok(evidence)
+}
+
 fn guarded_policy_zone(action: &FleetActionRecord) -> Result<&str, FleetTransportError> {
     match &action.action {
         FleetAction::PolicyUpdate {
@@ -2671,6 +2810,31 @@ impl FleetTransportLayout {
 /// # }
 /// ```
 pub trait FleetTransport {
+    /// Bound every subsequent blocking request by one shared operation
+    /// deadline. Rollouts require transports that explicitly support it.
+    fn set_operation_deadline(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), FleetTransportError> {
+        if deadline.is_some() {
+            return Err(FleetTransportError::not_initialized(
+                "this fleet transport does not support bounded rollout operations",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Atomically check exact post-policy acknowledgements and release only
+    /// the guarded owner. Never emulate this with a separate read and write.
+    fn resume_native_sessions_with_maintenance_guard(
+        &mut self,
+        _request: &GuardedFleetNativeSessionResume,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        Err(FleetTransportError::not_initialized(
+            "this fleet transport does not support atomic guarded resume",
+        ))
+    }
+
     /// Initialize the transport layer and prepare for operations.
     ///
     /// This method sets up any required infrastructure (directories, connections, etc.)

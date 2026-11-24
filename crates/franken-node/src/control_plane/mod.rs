@@ -10,6 +10,7 @@ pub mod epoch_transition_barrier;
 pub mod evidence_replay_gate;
 #[cfg(feature = "fleet-control-plane-server")]
 pub mod fleet_http_server;
+pub mod fleet_policy_rollout;
 pub mod fleet_transport;
 pub mod fleet_transport_durable;
 #[cfg(feature = "http-client")]

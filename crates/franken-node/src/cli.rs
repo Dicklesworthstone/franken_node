@@ -3373,6 +3373,8 @@ pub enum FleetCommand {
 pub enum FleetPolicyCommand {
     /// Publish a validated restrictive policy to an exact zone or `all`.
     Publish(FleetPolicyPublishArgs),
+    /// Hold, publish, await exact policy acknowledgements, and release only this rollout's hold.
+    Rollout(FleetPolicyRolloutArgs),
     /// Show this project's durable policy for new run admission.
     Status(FleetPolicyStatusArgs),
 }
@@ -3393,6 +3395,31 @@ pub struct FleetPolicyPublishArgs {
     #[arg(long)]
     pub hold: Option<String>,
     /// Emit JSON; publication is not an application acknowledgement.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetPolicyRolloutArgs {
+    /// Stable operation identity. Retry with the same ID, zone, revision and policy.
+    #[arg(long, default_value = "")]
+    pub id: String,
+    /// JSON file containing the executable FleetRuntimePolicy fields.
+    #[arg(long, value_parser = parse_safe_binary_pathbuf)]
+    pub file: Option<PathBuf>,
+    /// Positive, increasing revision within this exact policy zone.
+    #[arg(long)]
+    pub revision: Option<u64>,
+    /// Exact zone, or `all` for fleet-wide restrictions.
+    #[arg(long, default_value = "")]
+    pub zone: String,
+    /// One total deadline for connection, hold, publication and acknowledgement.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    pub timeout_seconds: u64,
+    /// Delay between fresh observations, bounded by the remaining total deadline.
+    #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u64).range(10..=5_000))]
+    pub poll_interval_ms: u64,
+    /// Emit the signed stage report, including durable recovery identities.
     #[arg(long)]
     pub json: bool,
 }
@@ -9247,5 +9274,77 @@ mod tests {
         // Should accept relative paths too
         assert!(parse_safe_binary_pathbuf("node").is_ok());
         assert!(parse_safe_binary_pathbuf("bin/node").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod fleet_policy_rollout_cli_tests {
+    use super::*;
+
+    #[test]
+    fn rollout_parses_explicit_retry_identity_policy_and_shared_budget() {
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "fleet",
+            "policy",
+            "rollout",
+            "--id",
+            "release-42",
+            "--zone",
+            "east",
+            "--file",
+            "policy.json",
+            "--revision",
+            "7",
+            "--timeout-seconds",
+            "90",
+            "--poll-interval-ms",
+            "50",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Fleet(FleetCommand::Policy(FleetPolicyCommand::Rollout(args))) = cli.command
+        else {
+            panic!("expected guarded policy rollout");
+        };
+        assert_eq!(args.id, "release-42");
+        assert_eq!(args.zone, "east");
+        assert_eq!(args.file, Some(PathBuf::from("policy.json")));
+        assert_eq!(args.revision, Some(7));
+        assert_eq!(args.timeout_seconds, 90);
+        assert_eq!(args.poll_interval_ms, 50);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn rollout_rejects_unbounded_deadlines_and_busy_polling_before_dispatch() {
+        for (flag, value) in [
+            ("--timeout-seconds", "0"),
+            ("--timeout-seconds", "86401"),
+            ("--poll-interval-ms", "0"),
+            ("--poll-interval-ms", "9"),
+            ("--poll-interval-ms", "5001"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "franken-node",
+                    "fleet",
+                    "policy",
+                    "rollout",
+                    "--id",
+                    "release-42",
+                    "--zone",
+                    "east",
+                    "--file",
+                    "policy.json",
+                    "--revision",
+                    "7",
+                    flag,
+                    value,
+                ])
+                .is_err(),
+                "{flag}={value} must be rejected"
+            );
+        }
     }
 }

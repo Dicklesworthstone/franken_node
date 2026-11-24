@@ -41,6 +41,7 @@ use super::fleet_transport::{
     MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus, validate_action_id,
     validate_action_record, validate_node_status,
 };
+use super::fleet_transport::{FleetGuardedResumeReceipt, GuardedFleetNativeSessionResume};
 
 /// Schema for ordinary responses; v2 binds coordinator append order.
 pub const FLEET_HTTP_API_SCHEMA: &str = "franken-node/fleet-http-api/v2";
@@ -57,6 +58,8 @@ pub const FLEET_HTTP_NODES_PATH: &str = "/v2/fleet/nodes";
 pub const FLEET_HTTP_STATE_PATH: &str = "/v2/fleet/state";
 /// `POST` atomically checks enrolled maintenance observations and publishes a policy.
 pub const FLEET_HTTP_GUARDED_POLICY_PATH: &str = "/v2/fleet/policies/guarded";
+/// `POST` checks post-policy acknowledgements and atomically releases one owner.
+pub const FLEET_HTTP_GUARDED_RESUME_PATH: &str = "/v2/fleet/maintenance/guarded-resume";
 /// `POST` proposes, verifies enrolled supervisor drains, and commits an epoch transition barrier.
 pub const FLEET_HTTP_EPOCH_BARRIER_PATH: &str = "/v2/fleet/epoch-barrier";
 /// Operator-only retained commit export; append a canonical positive epoch.
@@ -457,6 +460,8 @@ pub struct HttpFleetTransport {
     url: FleetControlPlaneUrl,
     token: String,
     agent: ureq::Agent,
+    timeout: Duration,
+    operation_deadline: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for HttpFleetTransport {
@@ -491,6 +496,8 @@ impl HttpFleetTransport {
             url,
             token,
             agent: ureq::Agent::new_with_config(config),
+            timeout,
+            operation_deadline: None,
         })
     }
 
@@ -522,6 +529,24 @@ impl HttpFleetTransport {
         format!("Bearer {}", self.token)
     }
 
+    fn request_agent(&self) -> Result<ureq::Agent, FleetTransportError> {
+        let Some(deadline) = self.operation_deadline else {
+            return Ok(self.agent.clone());
+        };
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| FleetTransportError::stale_state("fleet operation deadline elapsed"))?;
+        // One budget covers every request and response body, including health
+        // probes and retries; each request receives only its remaining share.
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout.min(remaining)))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        Ok(ureq::Agent::new_with_config(config))
+    }
+
     fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -537,10 +562,8 @@ impl HttpFleetTransport {
         response_limit: u64,
     ) -> Result<T, FleetTransportError> {
         let endpoint = self.url.endpoint(path);
-        let mut request = self
-            .agent
-            .get(&endpoint)
-            .header("Accept", "application/json");
+        let agent = self.request_agent()?;
+        let mut request = agent.get(&endpoint).header("Accept", "application/json");
         if authenticated {
             request = request.header("Authorization", &self.authorization());
         }
@@ -579,8 +602,8 @@ impl HttpFleetTransport {
                 payload.len()
             )));
         }
-        let response = self
-            .agent
+        let agent = self.request_agent()?;
+        let response = agent
             .post(&endpoint)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
@@ -733,6 +756,40 @@ fn validate_node_snapshot(nodes: &mut [NodeStatus]) -> Result<(), FleetTransport
 }
 
 impl FleetTransport for HttpFleetTransport {
+    fn set_operation_deadline(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), FleetTransportError> {
+        self.operation_deadline = deadline;
+        Ok(())
+    }
+
+    fn resume_native_sessions_with_maintenance_guard(
+        &mut self,
+        request: &GuardedFleetNativeSessionResume,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        request.validate()?;
+        let receipt: FleetGuardedResumeReceipt = self.post_json_with_limits(
+            FLEET_HTTP_GUARDED_RESUME_PATH,
+            request,
+            MAX_GUARDED_POLICY_REQUEST_BYTES,
+            MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
+        )?;
+        receipt.validate()?;
+        if receipt.request.action != request.action
+            || receipt.request.policy_action != request.policy_action
+            || receipt.request.guard.hold_action_id != request.guard.hold_action_id
+            || receipt.observation_scope
+                != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
+            || (!receipt.already_resumed && receipt.request != *request)
+        {
+            return Err(FleetTransportError::stale_state(
+                "fleet coordinator returned a guarded resume for a different action, policy, owner or request",
+            ));
+        }
+        Ok(receipt)
+    }
+
     /// Initialization for a remote store is a health probe plus one
     /// fully validated authenticated node snapshot, so a wrong token or
     /// malformed coordinator state fails here rather than mid-command.

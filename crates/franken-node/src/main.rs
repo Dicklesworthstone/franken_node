@@ -32966,6 +32966,35 @@ impl FleetTransportHandle {
 }
 
 impl PersistedFleetTransport for FleetTransportHandle {
+    fn set_operation_deadline(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> std::result::Result<(), FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.set_operation_deadline(deadline),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.set_operation_deadline(deadline),
+        }
+    }
+
+    fn resume_native_sessions_with_maintenance_guard(
+        &mut self,
+        request: &control_plane::fleet_transport::GuardedFleetNativeSessionResume,
+    ) -> std::result::Result<
+        control_plane::fleet_transport::FleetGuardedResumeReceipt,
+        FleetTransportError,
+    > {
+        match self {
+            Self::Durable(transport) => {
+                transport.resume_native_sessions_with_maintenance_guard(request)
+            }
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => {
+                transport.resume_native_sessions_with_maintenance_guard(request)
+            }
+        }
+    }
+
     fn initialize(&mut self) -> std::result::Result<(), FleetTransportError> {
         match self {
             Self::Durable(transport) => transport.initialize(),
@@ -33128,6 +33157,13 @@ fn configured_fleet_transport_kind() -> FleetTransportKind {
 }
 
 fn open_fleet_transport(project_root: &Path) -> Result<(u64, PathBuf, FleetTransportHandle)> {
+    open_fleet_transport_with_deadline(project_root, None)
+}
+
+fn open_fleet_transport_with_deadline(
+    project_root: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<(u64, PathBuf, FleetTransportHandle)> {
     // bd-ph79w: fleet transport consumes only `[fleet]` settings; full config
     // validation would abort every fleet command in workspaces that have not
     // run `init` with an unrelated trust.registry_signing_key error.
@@ -33135,19 +33171,24 @@ fn open_fleet_transport(project_root: &Path) -> Result<(u64, PathBuf, FleetTrans
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let state_dir = resolve_fleet_state_dir(project_root, &resolved)?;
     if let Some(url) = resolved.config.fleet.control_plane_url.as_deref() {
-        return open_http_fleet_transport(project_root, &resolved, url).map(|transport| {
-            (
-                resolved.config.fleet.convergence_timeout_seconds,
-                state_dir,
-                transport,
-            )
-        });
+        return open_http_fleet_transport(project_root, &resolved, url, deadline).map(
+            |transport| {
+                (
+                    resolved.config.fleet.convergence_timeout_seconds,
+                    state_dir,
+                    transport,
+                )
+            },
+        );
     }
     // bd-reality-20260820-w0fc6.3: the authoritative store is now the
     // WAL-durable frankensqlite database; the legacy JSONL layout is imported
     // once at initialize and deleting the db files rolls back to it.
-    let mut transport = fleet_transport_durable::DurableFleetTransport::new(state_dir.clone())
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let mut transport = fleet_transport_durable::DurableFleetTransport::new_with_deadline(
+        state_dir.clone(),
+        deadline,
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     transport
         .initialize()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -33166,6 +33207,7 @@ fn open_http_fleet_transport(
     project_root: &Path,
     resolved: &config::ResolvedConfig,
     url: &str,
+    deadline: Option<std::time::Instant>,
 ) -> Result<FleetTransportHandle> {
     let token_path = resolved
         .config
@@ -33187,6 +33229,7 @@ fn open_http_fleet_transport(
         control_plane::fleet_transport_http::FLEET_HTTP_DEFAULT_TIMEOUT,
     )
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    transport.set_operation_deadline(deadline)?;
     transport
         .initialize()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -33198,6 +33241,7 @@ fn open_http_fleet_transport(
     _project_root: &Path,
     _resolved: &config::ResolvedConfig,
     url: &str,
+    _deadline: Option<std::time::Instant>,
 ) -> Result<FleetTransportHandle> {
     anyhow::bail!(
         "fleet.control_plane_url={url} requires the `http-client` feature, which this build omits"
@@ -33624,7 +33668,7 @@ fn handle_fleet_export_epoch(args: &cli::FleetExportEpochArgs) -> Result<()> {
             )
         })?;
         let FleetTransportHandle::Http(transport) =
-            open_http_fleet_transport(Path::new("."), &resolved, url)?
+            open_http_fleet_transport(Path::new("."), &resolved, url, None)?
         else {
             anyhow::bail!("`fleet export-epoch` requires the HTTP coordinator");
         };
@@ -33705,7 +33749,7 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
                 )
             })?;
         let FleetTransportHandle::Http(transport) =
-            open_http_fleet_transport(Path::new("."), &resolved, url)?
+            open_http_fleet_transport(Path::new("."), &resolved, url, None)?
         else {
             anyhow::bail!("`fleet certify-quiescence` requires the live HTTP coordinator");
         };
@@ -35078,6 +35122,110 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
         if let Some(hold) = &args.hold {
             println!(
                 "  publication committed under maintenance owner {hold}; observe policy application with `fleet hold --wait` before explicitly resuming"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_fleet_policy_rollout(args: &cli::FleetPolicyRolloutArgs) -> Result<()> {
+    use control_plane::fleet_policy_rollout::FleetPolicyRollout;
+    use control_plane::fleet_transport::{FleetPolicyArtifact, FleetRuntimePolicy};
+
+    let revision = args
+        .revision
+        .ok_or_else(|| anyhow::anyhow!("`fleet policy rollout` requires --revision"))?;
+    let path = args
+        .file
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`fleet policy rollout` requires --file"))?;
+    let selected = std::fs::canonicalize(path)
+        .with_context(|| format!("failed selecting fleet policy input {}", path.display()))?;
+    let parent = selected
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("fleet policy input has no parent"))?;
+    let name = selected
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("fleet policy input has no file name"))?;
+    let raw = supply_chain::module_resolution_graph::read_project_metadata(
+        parent,
+        Path::new(name),
+        16 * 1024,
+    )?;
+    let policy: FleetRuntimePolicy = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid executable fleet policy {}", path.display()))?;
+    let artifact = FleetPolicyArtifact::new(revision, policy)?;
+    // Resolve signing credentials before publishing any action. The operation
+    // budget is created before connecting and shared by all subsequent calls.
+    let signing_material = load_fleet_signing_material()?;
+    let rollout = FleetPolicyRollout::new(
+        &args.id,
+        &args.zone,
+        artifact,
+        Duration::from_secs(args.timeout_seconds),
+        Duration::from_millis(args.poll_interval_ms),
+    )?;
+    let (_, state_dir, mut transport) =
+        open_fleet_transport_with_deadline(Path::new("."), Some(rollout.deadline()))?;
+    let kind = transport.kind();
+    let outcome = rollout.run(&mut transport);
+    let payload = serde_json::json!({
+        "rollout": &outcome,
+        "transport": kind.label(),
+        "live_control_plane": kind.live(),
+        "control_plane_url": transport.control_plane_url(),
+        "state_dir": (kind == FleetTransportKind::File).then_some(state_dir),
+        "enforcement_scope": "new_run_admission",
+    });
+    let signature = sign_fleet_convergence_receipt_payload(
+        &payload, &signing_material.signing_key, signing_material.source, "fleet-control-plane",
+    ).with_context(|| format!(
+        "rollout {} reached {:?} but its receipt could not be signed; retry the same rollout ID and policy",
+        args.id, outcome.phase,
+    ))?;
+    let report = serde_json::json!({
+        "schema_version": "franken-node/fleet-policy-rollout-cli/v1",
+        "command": "fleet.policy.rollout",
+        "ok": outcome.completed,
+        "receipt": { "payload": payload, "signature": signature },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !outcome.completed {
+            fail_closed_after_json();
+        }
+    } else {
+        println!(
+            "fleet policy rollout: id={} zone={} revision={} phase={:?} completed={} transport={}",
+            args.id,
+            args.zone,
+            revision,
+            outcome.phase,
+            outcome.completed,
+            kind.label(),
+        );
+        println!(
+            "  hold={} policy={} resume={} resume_commit_confirmed={} fleet_quiescence_certified=false",
+            outcome.hold_action_id,
+            outcome.policy_action_id,
+            outcome.resume_action_id,
+            outcome.guarded_resume.is_some(),
+        );
+        if let Some(evidence) = &outcome.evidence {
+            println!(
+                "  observed_nodes={} checkpoint_complete={} admission_resumed={}",
+                evidence.nodes.len(),
+                evidence.complete,
+                evidence.admission_resumed,
+            );
+        }
+        if !outcome.completed {
+            anyhow::bail!(
+                "rollout is incomplete: {}; retry the same --id, --zone, --revision and --file to recover its durable stage and any committed response",
+                outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or("acknowledgement deadline elapsed"),
             );
         }
     }
@@ -50837,6 +50985,11 @@ fn main() -> Result<()> {
                 cli::FleetPolicyCommand::Publish(args) => {
                     if let Err(error) = run_fleet_policy_publish(&args) {
                         return fleet_fail("fleet.policy.publish", args.json, error);
+                    }
+                }
+                cli::FleetPolicyCommand::Rollout(args) => {
+                    if let Err(error) = run_fleet_policy_rollout(&args) {
+                        return fleet_fail("fleet.policy.rollout", args.json, error);
                     }
                 }
                 cli::FleetPolicyCommand::Status(args) => {

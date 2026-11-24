@@ -9345,3 +9345,214 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     control_2.request_shutdown();
     assert!(server_2.join().expect("server 2").expect("server 2 exit") > 0);
 }
+
+fn assert_rollout_receipt_signature(report: &serde_json::Value, key: &ed25519_dalek::SigningKey) {
+    let receipt = &report["receipt"];
+    let canonical = canonical_fleet_convergence_receipt_payload(&receipt["payload"]).unwrap();
+    let signature = ed25519_dalek::Signature::from_slice(
+        &hex::decode(receipt["signature"]["signature_hex"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    key.verifying_key()
+        .verify_strict(&canonical, &signature)
+        .unwrap();
+    assert_eq!(
+        receipt["signature"]["public_key_hex"],
+        hex::encode(key.verifying_key().to_bytes())
+    );
+}
+
+#[test]
+fn fleet_policy_rollout_refuses_missing_signer_before_hold_and_emits_one_signed_timeout_report() {
+    let project = tempdir().expect("rollout project");
+    let fleet_dir = project.path().join("fleet-state");
+    let config_home = project.path().join("isolated-config");
+    std::fs::write(
+        project.path().join("policy.json"),
+        r#"{"block_private_network":true}"#,
+    )
+    .unwrap();
+    let args = [
+        "fleet",
+        "policy",
+        "rollout",
+        "--id",
+        "cli-rollout-42",
+        "--zone",
+        "east",
+        "--file",
+        "policy.json",
+        "--revision",
+        "1",
+        "--timeout-seconds",
+        "1",
+        "--poll-interval-ms",
+        "10",
+        "--json",
+    ];
+    let missing = run_cli_in_dir_with_fleet_state_and_env(
+        project.path(),
+        &args,
+        &fleet_dir,
+        &[("XDG_CONFIG_HOME", config_home.to_str().unwrap())],
+    );
+    assert!(!missing.status.success());
+    let refusal = json_stdout(&missing, "missing rollout signer");
+    assert_eq!(refusal["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("configured fleet-level signing key")
+    );
+    assert!(
+        !fleet_dir.exists(),
+        "no transport or hold may be created before signer resolution"
+    );
+    assert!(
+        !project
+            .path()
+            .join(".franken-node/keys/receipt-signing.key")
+            .exists()
+    );
+
+    let (key_path, key) = write_test_signing_key(project.path(), "keys/rollout.key", 97);
+    let timeout = run_cli_in_dir_with_fleet_state_and_env(
+        project.path(),
+        &args,
+        &fleet_dir,
+        &[
+            ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                key_path.to_str().unwrap(),
+            ),
+        ],
+    );
+    assert!(!timeout.status.success());
+    // Parsing the entire stdout also rejects a second error envelope.
+    let report = json_stdout(&timeout, "signed rollout timeout");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/fleet-policy-rollout-cli/v1"
+    );
+    assert_eq!(report["ok"], false);
+    let rollout = &report["receipt"]["payload"]["rollout"];
+    assert_eq!(rollout["phase"], "holding");
+    assert_eq!(rollout["timed_out"], true);
+    assert!(rollout["guarded_resume"].is_null());
+    assert_rollout_receipt_signature(&report, &key);
+    let actions = seed_durable_transport(&fleet_dir).list_actions().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        &actions[0].action,
+        FleetAction::NativeSessionHold { .. }
+    ));
+    assert_eq!(
+        actions[0].action_id,
+        rollout["hold_action_id"].as_str().unwrap()
+    );
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_policy_rollout_cli_waits_for_real_agent_and_preserves_another_owner() {
+    let fixture = MaintenanceCliFixture::new();
+    std::fs::write(
+        fixture.project.path().join("policy.json"),
+        r#"{"block_private_network":true}"#,
+    )
+    .unwrap();
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--id",
+        "independent-maintenance",
+        "--reason",
+        "independent operator",
+        "--json",
+    ]);
+    fixture.restart_agent("maintenance", true, 0);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let output = std::thread::scope(|scope| {
+        let agent = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(35);
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "rollout agent test deadline elapsed"
+                );
+                fixture.success(&[
+                    "fleet",
+                    "agent",
+                    "--node-id",
+                    "maintenance-node",
+                    "--zone",
+                    "east",
+                    "--fallback-file-transport",
+                    "--once",
+                    "--json",
+                ]);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let output = fixture.run(
+            &[
+                "fleet",
+                "policy",
+                "rollout",
+                "--id",
+                "native-rollout-42",
+                "--zone",
+                "east",
+                "--file",
+                "policy.json",
+                "--revision",
+                "1",
+                "--timeout-seconds",
+                "30",
+                "--poll-interval-ms",
+                "20",
+                "--json",
+            ],
+            "30",
+        );
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        agent.join().expect("native rollout agent");
+        output
+    });
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_stdout(&output, "real-agent policy rollout");
+    assert_eq!(report["ok"], true);
+    let rollout = &report["receipt"]["payload"]["rollout"];
+    assert_eq!(rollout["phase"], "complete");
+    assert_eq!(rollout["evidence"]["complete"], true);
+    assert_eq!(rollout["evidence"]["admission_resumed"], false);
+    assert_eq!(rollout["fleet_quiescence_certified"], false);
+    assert_rollout_receipt_signature(&report, &fixture.signing_key);
+    let holds = frankenengine_node::control_plane::fleet_transport::fleet_native_session_holds(
+        &fixture.actions(),
+        "east",
+    )
+    .unwrap();
+    assert_eq!(
+        holds,
+        std::collections::BTreeSet::from(["independent-maintenance".to_owned()])
+    );
+    assert_eq!(
+        load_active_fleet_policy(fixture.project.path())
+            .unwrap()
+            .unwrap()
+            .policies["east"]
+            .revision,
+        1
+    );
+    fixture.assert_native_admission(false);
+}

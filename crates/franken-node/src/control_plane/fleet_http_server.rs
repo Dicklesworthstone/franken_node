@@ -30,6 +30,7 @@ use subtle::ConstantTimeEq;
 use crate::capacity_defaults::aliases::MAX_NODES_CAP;
 use crate::control_plane::control_epoch::EpochSigningKey;
 
+use super::fleet_transport::GuardedFleetNativeSessionResume;
 use super::fleet_transport::{
     FleetAction, FleetActionRecord, FleetEpochCommitSigner, FleetGuardedPolicyObservationScope,
     FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
@@ -38,6 +39,7 @@ use super::fleet_transport::{
     validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
+use super::fleet_transport_http::FLEET_HTTP_GUARDED_RESUME_PATH;
 use super::fleet_transport_http::{
     FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_EPOCH_BARRIER_PATH,
     FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA, FLEET_HTTP_EPOCH_COMMIT_ROUTE,
@@ -686,6 +688,7 @@ impl FleetControlPlaneService {
                     | FLEET_HTTP_NODES_PATH
                     | FLEET_HTTP_STATE_PATH
                     | FLEET_HTTP_GUARDED_POLICY_PATH
+                    | FLEET_HTTP_GUARDED_RESUME_PATH
                     | FLEET_HTTP_EPOCH_BARRIER_PATH
             );
         if !known_path {
@@ -720,7 +723,10 @@ impl FleetControlPlaneService {
                 "a valid `Authorization: Bearer <token>` header is required",
             );
         };
-        let request_limit = if path == FLEET_HTTP_GUARDED_POLICY_PATH {
+        let request_limit = if matches!(
+            path,
+            FLEET_HTTP_GUARDED_POLICY_PATH | FLEET_HTTP_GUARDED_RESUME_PATH
+        ) {
             MAX_GUARDED_POLICY_REQUEST_BYTES
         } else {
             FLEET_HTTP_MAX_REQUEST_BYTES
@@ -741,6 +747,7 @@ impl FleetControlPlaneService {
             let permitted = match (&principal, path) {
                 (FleetPrincipal::Operator, FLEET_HTTP_ACTIONS_PATH)
                 | (FleetPrincipal::Operator, FLEET_HTTP_GUARDED_POLICY_PATH)
+                | (FleetPrincipal::Operator, FLEET_HTTP_GUARDED_RESUME_PATH)
                 | (FleetPrincipal::Operator, FLEET_HTTP_EPOCH_BARRIER_PATH)
                 | (FleetPrincipal::Node { .. }, FLEET_HTTP_NODES_PATH) => true,
                 (FleetPrincipal::Operator, FLEET_HTTP_NODES_PATH) => {
@@ -877,6 +884,39 @@ impl FleetControlPlaneService {
                     )?;
                     Ok(FleetHttpResponse::json(
                         if receipt.already_published { 200 } else { 201 },
+                        "ok",
+                        &receipt,
+                    ))
+                })
+            }
+            ("POST", FLEET_HTTP_GUARDED_RESUME_PATH) => {
+                let Some(enrollment) = enrollment else {
+                    return FleetHttpResponse::problem(
+                        409,
+                        "conflict",
+                        "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
+                        "guarded resume requires enrolled node credentials and fresh post-policy maintenance acknowledgements",
+                    );
+                };
+                let resume: GuardedFleetNativeSessionResume = match parse_body(request.body) {
+                    Ok(resume) => resume,
+                    Err(response) => return response,
+                };
+                if let Err(error) = resume.validate() {
+                    return invalid_record(&error);
+                }
+                let clock = self.clock;
+                self.with_transport(move |transport, authenticated| {
+                    let receipt = transport
+                        .resume_native_sessions_with_maintenance_guard_projected(
+                            &resume,
+                            FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                            MAX_GUARDED_POLICY_STALE_AFTER,
+                            clock,
+                            |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
+                        )?;
+                    Ok(FleetHttpResponse::json(
+                        if receipt.already_resumed { 200 } else { 201 },
                         "ok",
                         &receipt,
                     ))
@@ -1435,6 +1475,7 @@ fn build_fleet_app(
         .get(FLEET_HTTP_ACTIONS_PATH, route("GET"))
         .post(FLEET_HTTP_ACTIONS_PATH, route("POST"))
         .post(FLEET_HTTP_GUARDED_POLICY_PATH, route("POST"))
+        .post(FLEET_HTTP_GUARDED_RESUME_PATH, route("POST"))
         .post(FLEET_HTTP_EPOCH_BARRIER_PATH, route("POST"))
         .get(FLEET_HTTP_EPOCH_COMMIT_ROUTE, route("GET"))
         .get(FLEET_HTTP_NODES_PATH, route("GET"))

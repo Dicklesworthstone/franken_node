@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fsqlite::compat::{Transaction, TransactionExt};
@@ -49,6 +49,10 @@ use super::fleet_transport::{
     certify_fleet_epoch_quiescence, fleet_epoch_quiescence_manifest_hash, validate_action_record,
     validate_fleet_native_session_publication, validate_fleet_policy_publication,
     validate_guarded_fleet_policy_publication, validate_node_status,
+};
+use super::fleet_transport::{
+    FLEET_GUARDED_RESUME_RECEIPT_SCHEMA, FleetGuardedResumeReceipt,
+    GuardedFleetNativeSessionResume, validate_guarded_fleet_native_session_resume,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -218,6 +222,7 @@ pub struct DurableFleetTransport {
     db_path: PathBuf,
     state_dir: PathBuf,
     connection: Mutex<Option<Connection>>,
+    operation_deadline: Option<Instant>,
 }
 
 impl DurableFleetTransport {
@@ -228,15 +233,30 @@ impl DurableFleetTransport {
     /// Returns [`FleetTransportError::Io`] when the directory or database
     /// cannot be opened with the Tier-1 durability pragmas.
     pub fn new(state_dir: impl Into<PathBuf>) -> Result<Self, FleetTransportError> {
+        Self::new_with_deadline(state_dir, None)
+    }
+
+    /// Open the durable store with the caller's existing operation budget,
+    /// including initial journal-mode and durability pragmas.
+    pub fn new_with_deadline(
+        state_dir: impl Into<PathBuf>,
+        deadline: Option<Instant>,
+    ) -> Result<Self, FleetTransportError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(FleetTransportError::stale_state(
+                "fleet operation deadline elapsed",
+            ));
+        }
         let state_dir = state_dir.into();
         std::fs::create_dir_all(&state_dir)
             .map_err(|err| FleetTransportError::io(format!("create fleet state dir: {err}")))?;
         let db_path = state_dir.join(FLEET_DB_FILE);
-        let connection = Self::open_tier1_connection(&db_path)?;
+        let connection = Self::open_tier1_connection_with_deadline(&db_path, deadline)?;
         Ok(Self {
             db_path,
             state_dir,
             connection: Mutex::new(Some(connection)),
+            operation_deadline: deadline,
         })
     }
 
@@ -253,17 +273,46 @@ impl DurableFleetTransport {
     }
 
     fn open_tier1_connection(db_path: &Path) -> Result<Connection, FleetTransportError> {
+        Self::open_tier1_connection_with_deadline(db_path, None)
+    }
+
+    fn open_tier1_connection_with_deadline(
+        db_path: &Path,
+        deadline: Option<Instant>,
+    ) -> Result<Connection, FleetTransportError> {
         let connection = Connection::open(db_path.to_string_lossy().as_ref())
             .map_err(|err| FleetTransportError::io(format!("open {}: {err}", db_path.display())))?;
         for pragma in [
             "PRAGMA journal_mode=WAL;",
             "PRAGMA synchronous=FULL;",
-            format!("PRAGMA busy_timeout={BUSY_TIMEOUT_MILLIS};").as_str(),
             "PRAGMA foreign_keys=ON;",
         ] {
+            let remaining = deadline
+                .map(|deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or_else(|| {
+                            FleetTransportError::stale_state("fleet operation deadline elapsed")
+                        })
+                })
+                .transpose()?;
+            let busy_millis = remaining.map_or(BUSY_TIMEOUT_MILLIS, |remaining| {
+                u64::try_from(remaining.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(BUSY_TIMEOUT_MILLIS)
+            });
+            connection
+                .query(&format!("PRAGMA busy_timeout={busy_millis};"))
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
             connection
                 .query(pragma)
                 .map_err(|err| FleetTransportError::io(format!("pragma {pragma}: {err}")))?;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(FleetTransportError::stale_state(
+                "fleet operation deadline elapsed",
+            ));
         }
         Ok(connection)
     }
@@ -277,13 +326,61 @@ impl DurableFleetTransport {
         // snapshot; never retry only the last statement of an admission.
         let mut attempt = 0_u32;
         loop {
-            let guard = self
-                .connection
-                .lock()
-                .map_err(|_| FleetTransportError::io("fleet db mutex poisoned".to_string()))?;
+            let guard = loop {
+                let Some(deadline) = self.operation_deadline else {
+                    break self
+                        .connection
+                        .lock()
+                        .map_err(|_| FleetTransportError::io("fleet db mutex poisoned"))?;
+                };
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or_else(|| {
+                        FleetTransportError::stale_state("fleet operation deadline elapsed")
+                    })?;
+                match self.connection.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err(FleetTransportError::io("fleet db mutex poisoned"));
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+                    }
+                }
+            };
+            // Recompute after acquiring the mutex; time spent behind another
+            // local reader consumes the same budget as SQLite busy waits.
+            let remaining = self
+                .operation_deadline
+                .map(|deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or_else(|| {
+                            FleetTransportError::stale_state("fleet operation deadline elapsed")
+                        })
+                })
+                .transpose()?;
             let connection = guard
                 .as_ref()
                 .ok_or_else(|| FleetTransportError::io("fleet db connection closed".to_string()))?;
+            let busy_millis = remaining.map_or(BUSY_TIMEOUT_MILLIS, |remaining| {
+                u64::try_from(remaining.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(BUSY_TIMEOUT_MILLIS)
+            });
+            connection
+                .query(&format!("PRAGMA busy_timeout={busy_millis};"))
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            if self
+                .operation_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return Err(FleetTransportError::stale_state(
+                    "fleet operation deadline elapsed",
+                ));
+            }
             match operation(connection) {
                 Ok(value) => return Ok(value),
                 Err(err)
@@ -291,7 +388,10 @@ impl DurableFleetTransport {
                         && attempt + 1 < SNAPSHOT_CONFLICT_RETRY_ATTEMPTS =>
                 {
                     drop(guard);
-                    std::thread::sleep(snapshot_conflict_backoff(attempt));
+                    let backoff = snapshot_conflict_backoff(attempt);
+                    std::thread::sleep(self.operation_deadline.map_or(backoff, |deadline| {
+                        backoff.min(deadline.saturating_duration_since(Instant::now()))
+                    }));
                     attempt += 1;
                 }
                 Err(err) => return Err(err),
@@ -831,6 +931,120 @@ impl DurableFleetTransport {
         })
     }
 
+    /// The publication receipt, exact action/node snapshot, own-owner release
+    /// and retained release receipt are checked and committed together.
+    pub fn resume_native_sessions_with_maintenance_guard_projected(
+        &mut self,
+        request: &GuardedFleetNativeSessionResume,
+        observation_scope: FleetGuardedPolicyObservationScope,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        request.validate()?;
+        self.ensure_initialized()?;
+        self.with_connection(|connection| {
+            let mut tx = connection.transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            serialize_fleet_mutation(&tx)?;
+            let retained = tx.query_with_params(
+                "SELECT receipt_json FROM fleet_guarded_native_resumes WHERE action_id = ?1;",
+                &[SqliteValue::Text(request.action.action_id.clone().into())],
+            ).map_err(|error| FleetTransportError::io(error.to_string()))?;
+            if let [row] = retained.as_slice() {
+                let raw = text(&row.values()[0], "receipt_json")?;
+                if raw.len() > MAX_GUARDED_POLICY_RECEIPT_BYTES {
+                    return Err(FleetTransportError::serialization("stored guarded resume exceeds its byte bound"));
+                }
+                let mut receipt: FleetGuardedResumeReceipt = serde_json::from_str(&raw)
+                    .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+                receipt.validate()?;
+                if receipt.already_resumed
+                    || receipt.request.action != request.action
+                    || receipt.request.policy_action != request.policy_action
+                    || receipt.request.guard.hold_action_id != request.guard.hold_action_id
+                {
+                    return Err(FleetTransportError::action_conflict(
+                        "guarded resume identity belongs to a different action, policy or owner",
+                    ));
+                }
+                let actions = tx.query_with_params(
+                    "SELECT action_json FROM fleet_actions WHERE action_id = ?1;",
+                    &[SqliteValue::Text(request.action.action_id.clone().into())],
+                ).map_err(|error| FleetTransportError::io(error.to_string()))?;
+                if actions.len() != 1 || parse_action_row(&actions[0].values()[0])? != request.action {
+                    return Err(FleetTransportError::serialization(
+                        "guarded resume receipt no longer matches its immutable action",
+                    ));
+                }
+                receipt.already_resumed = true;
+                tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
+                return Ok(receipt);
+            }
+            if !retained.is_empty() {
+                return Err(FleetTransportError::serialization("guarded resume identity is not unique"));
+            }
+            let publications = tx.query_with_params(
+                "SELECT receipt_json FROM fleet_guarded_policy_publications WHERE action_id = ?1;",
+                &[SqliteValue::Text(request.policy_action.action_id.clone().into())],
+            ).map_err(|error| FleetTransportError::io(error.to_string()))?;
+            let [row] = publications.as_slice() else {
+                return Err(FleetTransportError::stale_state(
+                    "guarded resume requires the original durable guarded policy publication",
+                ));
+            };
+            let raw = text(&row.values()[0], "receipt_json")?;
+            if raw.len() > MAX_GUARDED_POLICY_RECEIPT_BYTES {
+                return Err(FleetTransportError::serialization("stored guarded policy exceeds its byte bound"));
+            }
+            let publication: FleetGuardedPolicyReceipt = serde_json::from_str(&raw)
+                .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+            publication.validate()?;
+            if publication.action != request.policy_action
+                || publication.guard.hold_action_id != request.guard.hold_action_id
+                || publication.already_published
+                || publication.evidence.nodes.iter().any(|node| {
+                    !request.guard.required_nodes.contains(&(node.zone_id.clone(), node.node_id.clone()))
+                })
+            {
+                return Err(FleetTransportError::action_conflict(
+                    "guarded resume changed its original publication, owner or retained participants",
+                ));
+            }
+            let mut state = FleetSharedState {
+                schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
+                actions: Self::query_actions(connection)?,
+                nodes: Self::query_nodes(connection)?,
+            };
+            project_nodes(&mut state.nodes)?;
+            let accepted_at = now();
+            let evidence = validate_guarded_fleet_native_session_resume(
+                request, &state, accepted_at, max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
+            )?;
+            let receipt = FleetGuardedResumeReceipt {
+                schema_version: FLEET_GUARDED_RESUME_RECEIPT_SCHEMA.to_owned(),
+                request: request.clone(), evidence, accepted_at, observation_scope,
+                already_resumed: false,
+            };
+            receipt.validate()?;
+            let receipt_json = serde_json::to_string(&receipt)
+                .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+            Self::insert_action_in_transaction(&tx, &request.action)?;
+            tx.execute_with_params(
+                "INSERT INTO fleet_guarded_native_resumes(action_id, receipt_json) VALUES (?1, ?2);",
+                &[SqliteValue::Text(request.action.action_id.clone().into()), SqliteValue::Text(receipt_json.into())],
+            ).map_err(|error| FleetTransportError::io(error.to_string()))?;
+            enforce_table_capacity(&tx, "fleet_guarded_native_resumes", MAX_ACTION_LOG_ENTRIES)?;
+            // Serialization and signature verification may be expensive. A
+            // deadline that elapsed during them must roll back the release.
+            if now() >= request.expires_at {
+                return Err(FleetTransportError::stale_state("guarded resume authorization expired before commit"));
+            }
+            tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok(receipt)
+        })
+    }
+
     fn query_epoch_head(
         &self,
         connection: &Connection,
@@ -1243,6 +1457,14 @@ impl FleetTransport for DurableFleetTransport {
                 )
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;
             connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS fleet_guarded_native_resumes (
+                    action_id TEXT PRIMARY KEY REFERENCES fleet_actions(action_id),
+                    receipt_json TEXT NOT NULL
+                );",
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            connection
                 .execute_with_params(
                     "INSERT INTO fleet_meta(key, value) VALUES (?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
@@ -1273,6 +1495,27 @@ impl FleetTransport for DurableFleetTransport {
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError> {
         self.ensure_initialized()?;
         self.with_connection(|connection| Self::insert_action(connection, action))
+    }
+
+    fn set_operation_deadline(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<(), FleetTransportError> {
+        self.operation_deadline = deadline;
+        Ok(())
+    }
+
+    fn resume_native_sessions_with_maintenance_guard(
+        &mut self,
+        request: &GuardedFleetNativeSessionResume,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        self.resume_native_sessions_with_maintenance_guard_projected(
+            request,
+            FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+            MAX_GUARDED_POLICY_STALE_AFTER,
+            Utc::now,
+            |_| Ok(()),
+        )
     }
 
     fn publish_policy_with_maintenance_guard(
