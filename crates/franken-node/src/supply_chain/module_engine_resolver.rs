@@ -18,7 +18,7 @@ use super::registry::{
     RegisteredResolution, RegisteredTarget, RegistrySummary,
     RequestStyle, ResolutionKind,
 };
-use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl, SourceLanguage};
+use super::{CapturedModuleGraph, ModuleId, ResolutionError as CaptureError, ResolutionUrl, SourceLanguage};
 use frankenengine_engine::capability::RuntimeCapability;
 use frankenengine_engine::hash_tiers::ContentHash;
 use frankenengine_engine::import_attributes::ImportAttributes as EngineImportAttributes;
@@ -730,6 +730,40 @@ impl CapturedEngineResolver {
             event: event(context, "allow", ""),
         }
     }
+
+    fn resolve_shared_module(
+        &self,
+        module: &RegisteredModule,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<SharedResolutionOutcome> {
+        let slot = self.shared_records.get(module.id());
+        if let Some(Some(record)) = slot.and_then(OnceLock::get) {
+            self.authorize(request, record.record(), context, policy)?;
+            return Ok(self.shared_outcome(request, Arc::clone(record), context));
+        }
+        let candidate = Arc::new(SharedModuleRecord::new(self.record(module, request, context)?));
+        self.authorize(request, candidate.record(), context, policy)?;
+        // Identity caching is shared across relative/dirname aliases and roots;
+        // every request is authorized with its actual runtime spelling first.
+        let record = slot
+            .and_then(|slot| {
+                slot.get_or_init(|| {
+                    let bytes = candidate.source.capacity();
+                    self.retained_shared_source_bytes
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
+                            retained.checked_add(bytes)
+                                .filter(|total| *total <= self.shared_record_source_budget)
+                        })
+                        .ok()
+                        .map(|_| Arc::clone(&candidate))
+                }).as_ref()
+            })
+            .map(Arc::clone)
+            .unwrap_or(candidate);
+        Ok(self.shared_outcome(request, record, context))
+    }
 }
 
 impl ModuleResolver for CapturedEngineResolver {
@@ -824,39 +858,7 @@ impl ModuleResolver for CapturedEngineResolver {
     ) -> ResolutionResult<SharedResolutionOutcome> {
         self.validate_request(request, context)?;
         let module = self.lookup(request, context)?;
-        let slot = self.shared_records.get(module.id());
-        if let Some(Some(record)) = slot.and_then(OnceLock::get) {
-            // Cache identity only. Even an alias of an already loaded module
-            // needs an exact captured route and a fresh policy decision.
-            self.authorize(request, record.record(), context, policy)?;
-            return Ok(self.shared_outcome(request, Arc::clone(record), context));
-        }
-
-        let candidate = Arc::new(SharedModuleRecord::new(
-            self.record(module, request, context)?,
-        ));
-        self.authorize(request, candidate.record(), context, policy)?;
-        // Policy runs outside initialization: a denied request retains nothing,
-        // and a reentrant policy may safely resolve the same candidate. Competing
-        // successful first loads use the winning record and its one hash cell.
-        let record = slot
-            .and_then(|slot| {
-                slot.get_or_init(|| {
-                    let bytes = candidate.source.capacity();
-                    self.retained_shared_source_bytes
-                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
-                            retained
-                                .checked_add(bytes)
-                                .filter(|total| *total <= self.shared_record_source_budget)
-                        })
-                        .ok()
-                        .map(|_| Arc::clone(&candidate))
-                })
-                .as_ref()
-            })
-            .map(Arc::clone)
-            .unwrap_or(candidate);
-        Ok(self.shared_outcome(request, record, context))
+        self.resolve_shared_module(module, request, context, policy)
     }
 
     fn resolve(
@@ -878,14 +880,28 @@ impl ModuleResolver for CapturedEngineResolver {
         context: &ResolutionContext,
         policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<Vec<ResolutionOutcome>> {
+        self.resolve_chain_at(entry_request, context, policy, None, None)
+    }
+}
+
+impl CapturedEngineResolver {
+    fn resolve_chain_at(
+        &self,
+        entry_request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+        root: Option<&Path>,
+        dirname_specifier: Option<&str>,
+    ) -> ResolutionResult<Vec<ResolutionOutcome>> {
         self.validate_request(entry_request, context)?;
         let requests = self
             .registry
-            .walk_requests_with_attributes(
+            .walk_source_requests(
                 entry_request.referrer.as_deref(),
-                &entry_request.specifier,
+                dirname_specifier.unwrap_or(&entry_request.specifier),
                 source_style(entry_request.style),
                 entry_request.import_attributes.as_map(),
+                dirname_specifier.is_some(),
             )
             .map_err(|error| registry_error(error, entry_request, context))?;
         let mut outcomes: Vec<ResolutionOutcome> = Vec::new();
@@ -893,7 +909,20 @@ impl ModuleResolver for CapturedEngineResolver {
         let mut source_bytes = 0_usize;
         for route in requests {
             let route = route.map_err(|error| registry_error(error, entry_request, context))?;
-            let mut request = ModuleRequest::new(route.specifier, engine_style(route.style))
+            let specifier = if route.dirname_request {
+                let root = root.ok_or_else(|| denied(
+                    ResolutionErrorCode::UnsupportedSpecifier,
+                    "dirname-derived traversal requires an installed execution root",
+                    entry_request, context, None,
+                ))?;
+                let origin = self.registry.source_origin(route.referrer)
+                    .map_err(|error| registry_error(error, entry_request, context))?;
+                dirname_runtime_specifier(root, origin, route.specifier)
+                    .map_err(|error| registry_error(error, entry_request, context))?
+            } else {
+                route.specifier.to_owned()
+            };
+            let mut request = ModuleRequest::new(specifier, engine_style(route.style))
                 .with_import_attributes(engine_attributes(route.import_attributes))
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
             request.referrer = route.referrer.map(str::to_owned);
@@ -944,6 +973,40 @@ struct RootedCapturedEngineResolver {
 }
 
 impl RootedCapturedEngineResolver {
+    fn dirname_request(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+    ) -> ResolutionResult<Option<String>> {
+        if !Path::new(&request.specifier).is_absolute() {
+            return Ok(None);
+        }
+        let invalid = || denied(
+            ResolutionErrorCode::UnsupportedSpecifier,
+            "absolute module requests require an exact captured dirname origin",
+            request, context, None,
+        );
+        if request.style != ImportStyle::Require
+            || !request.import_attributes.as_map().is_empty()
+            || request.specifier.len() > 2 * super::super::MAX_PATH
+        {
+            return Err(invalid());
+        }
+        let origin = self.inner.registry.source_origin(request.referrer.as_deref())
+            .map_err(|error| registry_error(error, request, context))?;
+        let filename = self.root.join(&origin.path);
+        let directory = filename.parent().and_then(Path::to_str).ok_or_else(invalid)?;
+        let suffix = request.specifier.strip_prefix(directory)
+            .filter(|suffix| suffix.starts_with('/'))
+            .ok_or_else(invalid)?;
+        let relative = format!(".{suffix}");
+        // Resolve no filesystem entry here. Validate each path step before
+        // exact route lookup, including reserved operator-state components.
+        super::super::normalize(super::parent(&origin.path), &relative)
+            .map_err(|error| registry_error(error, request, context))?;
+        Ok(Some(relative))
+    }
+
     fn captured_paths(
         &self,
         request: &ModuleRequest,
@@ -981,19 +1044,40 @@ impl ModuleResolver for RootedCapturedEngineResolver {
     fn resolve(
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<ResolutionOutcome> {
-        self.inner.resolve(request, context, policy)
+        self.inner.validate_request(request, context)?;
+        let Some(specifier) = self.dirname_request(request, context)? else {
+            return self.inner.resolve(request, context, policy);
+        };
+        let module = self.inner.registry.lookup_dirname(request.referrer.as_deref(), &specifier)
+            .map_err(|error| registry_error(error, request, context))?;
+        let record = self.inner.record(module, request, context)?;
+        self.inner.authorize(request, &record, context, policy)?;
+        Ok(self.inner.outcome(request, record, context))
     }
 
     fn resolve_shared(
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<SharedResolutionOutcome> {
-        self.inner.resolve_shared(request, context, policy)
+        self.inner.validate_request(request, context)?;
+        let Some(specifier) = self.dirname_request(request, context)? else {
+            return self.inner.resolve_shared(request, context, policy);
+        };
+        let module = self.inner.registry.lookup_dirname(request.referrer.as_deref(), &specifier)
+            .map_err(|error| registry_error(error, request, context))?;
+        self.inner.resolve_shared_module(module, request, context, policy)
     }
 
     fn resolve_metadata(
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<MetadataResolutionOutcome> {
-        self.inner.resolve_metadata(request, context, policy)
+        self.inner.validate_request(request, context)?;
+        let Some(specifier) = self.dirname_request(request, context)? else {
+            return self.inner.resolve_metadata(request, context, policy);
+        };
+        self.inner.validate_commonjs_metadata(request, context)?;
+        let target = self.inner.registry.lookup_dirname_resolution(request.referrer.as_deref(), &specifier)
+            .map_err(|error| registry_error(error, request, context))?;
+        metadata_outcome(request, self.inner.filename_metadata(target), context, policy)
     }
 
     fn resolve_require_metadata_from_paths(
@@ -1022,8 +1106,24 @@ impl ModuleResolver for RootedCapturedEngineResolver {
     fn resolve_chain(
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<Vec<ResolutionOutcome>> {
-        self.inner.resolve_chain(request, context, policy)
+        let specifier = self.dirname_request(request, context)?;
+        self.inner.resolve_chain_at(request, context, policy, Some(&self.root), specifier.as_deref())
     }
+}
+
+fn dirname_runtime_specifier(
+    root: &Path,
+    origin: &ModuleId,
+    specifier: &str,
+) -> Result<String, CaptureError> {
+    let suffix = specifier.strip_prefix('.')
+        .filter(|suffix| suffix.starts_with('/'))
+        .ok_or_else(|| super::error("ERR_MODULE_REGISTRY_ROUTE", "invalid dirname request"))?;
+    let filename = root.join(&origin.path);
+    let directory = filename.parent().and_then(Path::to_str).ok_or_else(|| super::error(
+        "ERR_MODULE_ENGINE_SOURCE_LOCATION", "module origin is not UTF-8",
+    ))?;
+    Ok(format!("{directory}{suffix}"))
 }
 
 fn metadata_outcome(
@@ -1201,6 +1301,71 @@ mod tests {
     }
     fn granted() -> CapabilityPolicyHook {
         CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]))
+    }
+
+    #[test]
+    fn dirname_chain_authorizes_relocated_cycle_edges_before_deduplication() {
+        struct Observe(RefCell<Vec<String>>);
+        impl ModulePolicyHook for Observe {
+            fn authorize(&self, request: &ModuleRequest, _: &ModuleRecord, _: &ResolutionContext)
+                -> ResolutionResult<()>
+            {
+                self.0.borrow_mut().push(request.specifier.clone());
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require(__dirname+'/dep.cjs');");
+        put(root.path(), "dep.cjs", "require(__dirname+'/app.cjs');");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let inner = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let entry = inner.entry_request();
+        assert!(inner.resolve_chain(&entry, &context(), &granted()).is_err());
+        let destination = root.path().join("unopened destination");
+        assert!(!destination.exists());
+        let rooted = RootedCapturedEngineResolver { inner, root: destination.clone() };
+        let observe = Observe(RefCell::new(Vec::new()));
+        let outcomes = rooted.resolve_chain(&entry, &context(), &observe).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(*observe.0.borrow(), vec![
+            entry.specifier.clone(),
+            destination.join("dep.cjs").display().to_string(),
+            destination.join("app.cjs").display().to_string(),
+        ]);
+        let mut denial = granted();
+        denial.denied_specifiers.insert(destination.join("app.cjs").display().to_string());
+        assert_eq!(rooted.resolve_chain(&entry, &context(), &denial).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dirname_requests_preserve_the_root_directory_separator() {
+        let source = tempfile::tempdir().unwrap();
+        put(source.path(), "app.cjs",
+            "require(__dirname+'/dep.cjs'); require.resolve(__dirname+'/asset.txt');");
+        put(source.path(), "dep.cjs", "module.exports=42;");
+        put(source.path(), "asset.txt", "metadata only");
+        let graph = capture(source.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let inner = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let entry = inner.entry_request();
+        // No file in the execution root is read. The engine supplies '/' as
+        // dirname for '/app.cjs', so concatenating '/dep.cjs' yields '//dep.cjs'.
+        let rooted = RootedCapturedEngineResolver { inner, root: PathBuf::from("/") };
+        let request = |specifier: &str| ModuleRequest::new(specifier, ImportStyle::Require)
+            .with_referrer(entry.specifier.clone())
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let resolved = rooted.resolve_shared(&request("//dep.cjs"), &context(), &granted()).unwrap();
+        assert_eq!(resolved.module.request_specifier, "//dep.cjs");
+        assert_eq!(rooted.resolve_metadata(&request("//asset.txt"), &context(), &granted())
+            .unwrap().module.request_specifier, "//asset.txt");
+        assert!(rooted.resolve_shared(&request("/dep.cjs"), &context(), &granted()).is_err());
+        assert!(rooted.resolve_metadata(&request("/asset.txt"), &context(), &granted()).is_err());
+        let chain = rooted.resolve_chain(&entry, &context(), &granted()).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].module.request_specifier, "//dep.cjs");
     }
 
     #[test]

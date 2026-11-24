@@ -792,6 +792,147 @@ fn commonjs_lookup_directories_stop_at_project_root_and_skip_node_modules_parent
     }
 }
 
+#[test]
+fn dirname_requests_capture_exact_purpose_and_importer_without_relative_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "nested/app.cjs", r#"
+const suffix='/dep.cjs';
+const load=require;
+load(__dirname + suffix);
+load.resolve(__dirname + '/asset.txt');
+try { require(__dirname + '/missing.cjs'); } catch (error) {}
+"#);
+    put(root.path(), "nested/dep.cjs", "module.exports=42;");
+    put(root.path(), "nested/asset.txt", "this is not JavaScript");
+    let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().diagnostics.is_empty());
+    assert_eq!(graph.report().modules.len(), 2);
+    assert_eq!(graph.report().resolution_targets.len(), 1);
+    assert_eq!(graph.report().edges.len(), 3);
+    assert!(graph.report().edges.iter().all(|edge| edge.dirname_request));
+    let pin = graph.report().input_hash.clone();
+    let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+    let entry = registry.entrypoint();
+    let dep = registry.lookup_dirname(Some(entry), "./dep.cjs").unwrap();
+    assert_eq!(dep.origin().path, "nested/dep.cjs");
+    assert_eq!(registry.lookup_dirname_resolution(Some(entry), "./asset.txt").unwrap().origin().path,
+        "nested/asset.txt");
+    for request in ["./dep.cjs", "./asset.txt", "./missing.cjs"] {
+        assert_eq!(registry.lookup(Some(entry), request, RequestStyle::Require).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_ROUTE");
+        assert_eq!(registry.lookup_resolution(Some(entry), request).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_ROUTE");
+    }
+    assert_eq!(registry.lookup_dirname(Some(entry), "./asset.txt").err().unwrap().code,
+        "ERR_MODULE_REGISTRY_ROUTE");
+    assert_eq!(registry.lookup_dirname_resolution(Some(entry), "./dep.cjs").err().unwrap().code,
+        "ERR_MODULE_REGISTRY_ROUTE");
+    assert_eq!(registry.lookup_dirname(Some(dep.id()), "./dep.cjs").err().unwrap().code,
+        "ERR_MODULE_REGISTRY_ROUTE");
+    assert_eq!(registry.lookup_dirname(Some(entry), "./missing.cjs").err().unwrap().code,
+        "MODULE_NOT_FOUND");
+}
+
+#[test]
+fn dirname_request_capsules_replay_sources_and_absence_after_source_retirement() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("original");
+    put(&root, "nested/app.cjs", "require(__dirname+'/dep.cjs'); try { require.resolve(__dirname+'/missing'); } catch(e) {}");
+    put(&root, "nested/dep.cjs", "module.exports=42;");
+    let graph = capture(&root, "nested/app.cjs", GraphOptions::default()).unwrap();
+    let pin = graph.report().input_hash.clone();
+    let capsule = capsule::encode(&graph).unwrap();
+    std::fs::rename(&root, parent.path().join("retired")).unwrap();
+    put(&root, "nested/dep.cjs", "throw new Error('live replacement');");
+    put(&root, "nested/missing", "module.exports='must stay missing';");
+    let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+    assert_eq!(graph.report(), replayed.report());
+    let registry = PinnedModuleRegistry::new(replayed, &pin).ok().unwrap();
+    assert_eq!(registry.lookup_dirname(Some(registry.entrypoint()), "./dep.cjs").unwrap().source(),
+        "module.exports=42;");
+    assert_eq!(registry.lookup_dirname_resolution(Some(registry.entrypoint()), "./missing").err().unwrap().code,
+        "MODULE_NOT_FOUND");
+}
+
+#[test]
+fn dirname_requests_reject_mutation_shadowing_escaped_bindings_and_unknown_suffixes() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "dep.cjs", "module.exports=42;");
+    for source in [
+        "__dirname='/foreign'; require(__dirname+'/dep.cjs');",
+        "function f(__dirname){return require(__dirname+'/dep.cjs');}",
+        "{ const __dirname='/foreign'; require(__dirname+'/dep.cjs'); }",
+        "const {__dirname}=input; require(__dirname+'/dep.cjs');",
+        "arguments[4]='/foreign'; require(__dirname+'/dep.cjs');",
+        "const args=arguments; require(__dirname+'/dep.cjs');",
+        "eval('change()'); require(__dirname+'/dep.cjs');",
+        "__dirn\\u0061me='/foreign'; require(__dirname+'/dep.cjs');",
+        "let suffix='/dep.cjs'; require(__dirname+suffix);",
+        "require(__dirname+suffix); const suffix='/dep.cjs';",
+        "require(__dirname+(flag?'/dep.cjs':unknown));",
+        "require(__dirname+('x'+sideEffect()));",
+        "require.resolve(__dirname+'/dep.cjs',{paths:['elsewhere']});",
+        "require.resolve.paths(__dirname+'/dep.cjs');",
+        "import(__dirname+'/dep.cjs');",
+    ] {
+        let (_, _, analyzed) = scan_source(source, SourceLanguage::JavaScript);
+        assert!(analyzed, "{source}");
+        put(root.path(), "app.cjs", source);
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        // An immutable shadow can still yield an exact ordinary string. That
+        // observation is not dirname authority: the absolute-path refusal must
+        // survive the complete source-closure admission, not merely scanning.
+        assert!(PinnedModuleRegistry::new(graph, &pin).is_err(),
+            "unproved dirname request acquired executable authority: {source}");
+    }
+    for source in [
+        "const suffix='/dep.cjs'; require(__dirname+suffix);",
+        "require.resolve((__dirname) + '/dep.cjs', {});",
+        "(require as Loader)((__dirname as string) + ('/dep.cjs' as string));",
+    ] {
+        let (loads, notices, analyzed) = scan_source(source, SourceLanguage::TypeScript);
+        assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+        assert!(loads.iter().all(|load| load.dirname_request && load.specifier.as_deref()==Some("./dep.cjs")));
+    }
+    // A block-local variable with this name can still prove an ordinary
+    // relative string. Preserve that pre-existing const-expression support
+    // without granting the native dirname route for the same target.
+    put(root.path(), "app.cjs", "{ const __dirname='./'; require(__dirname+'dep.cjs'); }");
+    let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().fully_resolved);
+    assert!(!graph.report().edges[0].dirname_request);
+    let pin = graph.report().input_hash.clone();
+    let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+    assert!(registry.lookup(Some(registry.entrypoint()), "./dep.cjs", RequestStyle::Require).is_ok());
+    assert!(registry.lookup_dirname(Some(registry.entrypoint()), "./dep.cjs").is_err());
+}
+
+#[test]
+fn dirname_request_paths_cannot_leave_project_or_traverse_operator_state() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "dep.cjs", "module.exports=42;");
+    for suffix in ["/../../outside.cjs", "/../../root/dep.cjs"] {
+        put(root.path(), "nested/app.cjs", &format!("require(__dirname+'{suffix}');"));
+        assert_eq!(capture(root.path(), "nested/app.cjs", GraphOptions::default()).err().unwrap().code,
+            "ERR_MODULE_OUTSIDE_PROJECT");
+    }
+    for suffix in ["/../.franken-node/../dep.cjs", "/../.git/../dep.cjs", "/../bad\\\\dep.cjs"] {
+        put(root.path(), "nested/app.cjs", &format!("require(__dirname+'{suffix}');"));
+        let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(PinnedModuleRegistry::new(graph, &pin).is_err(), "{suffix}");
+    }
+    put(root.path(), "nested/app.cjs", "require(__dirname+'/../dep.cjs');");
+    let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().fully_resolved);
+    assert_eq!(graph.report().edges[0].target.as_ref().unwrap().path, "dep.cjs");
+    // The suffix byte bound is checked before publishing any inferred route.
+    let source = format!("require(__dirname+'/{}');", "a".repeat(super::super::MAX_PATH));
+    let (loads, _, _) = scan_source(&source, SourceLanguage::JavaScript);
+    assert!(loads[0].specifier.is_none());
+}
+
 #[cfg(feature = "engine")]
 mod native {
     use super::super::engine_resolver::CapturedEngineResolver;
@@ -845,6 +986,142 @@ mod native {
             version: "1.0.0".into(),
             metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn native_dirname_requests_match_node_and_replay_under_independent_roots() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("original project");
+        put(&root, "app.cjs", r#"
+const suffix='/pkg';
+const first=require(__dirname+suffix);
+const second=require(__dirname+'/pkg/index.cjs');
+console.log('same',first===second);
+console.log('value',first.value);
+console.log('asset',require.resolve(__dirname+'/pkg/data.txt'));
+try { require(__dirname+'/optional.cjs'); } catch(error) { console.log('absent',error.code); }
+"#);
+        put(&root, "pkg/package.json", r#"{"main":"index.cjs"}"#);
+        put(&root, "pkg/index.cjs", "module.exports={value:require(__dirname+'/../leaf.cjs')};");
+        put(&root, "leaf.cjs", "module.exports=42;");
+        put(&root, "pkg/data.txt", "this must never be executed");
+        let reference = std::process::Command::new("node").arg("app.cjs")
+            .current_dir(&root).output().expect("Node reference for dirname requests");
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+        let expected = format!("same true\nvalue 42\nasset {}\nabsent MODULE_NOT_FOUND\n",
+            root.join("pkg/data.txt").display());
+        assert_eq!(String::from_utf8(reference.stdout).unwrap(), expected);
+        let graph = capture(&root, "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        std::fs::rename(&root, parent.path().join("retired source")).unwrap();
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(graph.report(), replayed.report());
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        for destination in ["relocated first", "relocated second"] {
+            let destination = parent.path().join(destination);
+            assert!(!destination.exists());
+            let expected = expected.replace(root.to_str().unwrap(), destination.to_str().unwrap());
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let policy = Arc::new(policy());
+                let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+                let installed = resolver.execution_resolver(&destination, policy).unwrap();
+                let output = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                    .expect("captured dirname requests execute through the native resolver");
+                let actual = output.console_output.iter().map(|line| line.message.as_str())
+                    .collect::<Vec<_>>().join("\n") + "\n";
+                assert_eq!(actual, expected, "{lane:?}");
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct DirnamePolicy {
+        seen: std::sync::Mutex<Vec<String>>,
+        deny: std::sync::atomic::AtomicBool,
+    }
+
+    impl ModulePolicyHook for DirnamePolicy {
+        fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord, context: &ResolutionContext)
+            -> ResolutionResult<()>
+        {
+            self.seen.lock().unwrap().push(request.specifier.clone());
+            let mut policy = policy();
+            if self.deny.load(Ordering::SeqCst) {
+                policy.denied_specifiers.insert(request.specifier.clone());
+            }
+            policy.authorize(request, record, context)
+        }
+
+        fn authorize_metadata(&self, request: &ModuleRequest, metadata: &ModuleMetadata, context: &ResolutionContext)
+            -> ResolutionResult<()>
+        {
+            self.seen.lock().unwrap().push(request.specifier.clone());
+            let mut policy = policy();
+            if self.deny.load(Ordering::SeqCst) {
+                policy.denied_specifiers.insert(request.specifier.clone());
+            }
+            policy.authorize_metadata(request, metadata, context)
+        }
+    }
+
+    #[test]
+    fn dirname_engine_routes_keep_original_requests_purposes_roots_and_cached_policy() {
+        use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
+        use frankenengine_engine::module_resolver::{ImportStyle, ResolutionErrorCode};
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "nested/app.cjs", "require(__dirname+'/dep.cjs'); require.resolve(__dirname+'/asset.txt');");
+        put(root.path(), "nested/dep.cjs", "module.exports=42;");
+        put(root.path(), "nested/asset.txt", "metadata only");
+        let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let policy = Arc::new(DirnamePolicy::default());
+        let installed = resolver.execution_resolver(root.path(), policy.clone()).unwrap();
+        let request = |path: String| ModuleRequest::new(path, ImportStyle::Require)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let load = request(root.path().join("nested/dep.cjs").display().to_string());
+        let metadata = request(root.path().join("nested/asset.txt").display().to_string());
+        let first = installed.resolve_shared(&load, &context()).unwrap();
+        let cached = installed.resolve_shared(&load, &context()).unwrap();
+        assert!(Arc::ptr_eq(&first.module.record, &cached.module.record));
+        assert_eq!(first.module.request_specifier, load.specifier);
+        assert_eq!(installed.resolve_metadata(&metadata, &context()).unwrap().module.request_specifier,
+            metadata.specifier);
+        assert_eq!(*policy.seen.lock().unwrap(),
+            vec![load.specifier.clone(), load.specifier.clone(), metadata.specifier.clone()]);
+        for other in [
+            "./dep.cjs".into(),
+            root.path().join("nested/./dep.cjs").display().to_string(),
+            root.path().join("nested/../nested/dep.cjs").display().to_string(),
+            root.path().join("nested/.franken-node/../dep.cjs").display().to_string(),
+            format!("{}-foreign/nested/dep.cjs", root.path().display()),
+        ] {
+            assert!(installed.resolve_shared(&request(other), &context()).is_err());
+        }
+        assert!(installed.resolve_shared(&metadata, &context()).is_err());
+        assert!(installed.resolve_metadata(&load, &context()).is_err());
+        assert!(installed.resolve_require_metadata_from_paths(&metadata, &["nested".into()], &context()).is_err());
+        let mut foreign = load.clone();
+        foreign.referrer = Some(first.module.record.id.clone());
+        assert!(installed.resolve_shared(&foreign, &context()).is_err());
+        foreign = load.clone();
+        foreign.style = ImportStyle::Import;
+        assert!(installed.resolve_shared(&foreign, &context()).is_err());
+        assert!(resolver.resolve(&load, &context(), &self::policy()).is_err());
+        policy.deny.store(true, Ordering::SeqCst);
+        assert_eq!(installed.resolve_shared(&load, &context()).unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        assert_eq!(installed.resolve_metadata(&metadata, &context()).unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        let relocated = root.path().join("other-root");
+        let second_policy = Arc::new(DirnamePolicy::default());
+        let second = resolver.execution_resolver(&relocated, second_policy.clone()).unwrap();
+        assert!(second.resolve_shared(&load, &context()).is_err());
+        let moved = request(relocated.join("nested/dep.cjs").display().to_string());
+        let moved_result = second.resolve_shared(&moved, &context()).unwrap();
+        assert!(Arc::ptr_eq(&first.module.record, &moved_result.module.record));
+        assert_eq!(*second_policy.seen.lock().unwrap(), vec![moved.specifier]);
     }
 
 

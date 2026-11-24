@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, CaptureError>;
-type Routes = BTreeSet<(String, RequestStyle, ImportAttributes, Option<CommonJsSearch>)>;
+type Routes = BTreeSet<(String, RequestStyle, ImportAttributes, Option<CommonJsSearch>, bool)>;
 const MAX_PREPARED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Source-free engine preparation evidence. A report identifies an original
@@ -230,6 +230,7 @@ impl SourcePreparer {
                     request_style(load.kind),
                     load.import_attributes,
                     commonjs_search,
+                    load.dirname_request,
                 ));
             }
             routes
@@ -351,6 +352,7 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             request_style(edge.kind),
             edge.import_attributes.clone(),
             edge.commonjs_search.clone(),
+            edge.dirname_request,
         ));
         if matches!(
             edge.kind,

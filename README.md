@@ -4943,6 +4943,20 @@ one pass.
   explicit-root lookup that encounters an invalid package `main` is refused
   during capture: the pinned engine cannot yet preserve that terminal missing
   module error across its per-root probes.
+  Frozen CommonJS modules also support current-module paths such as
+  `require(__dirname + '/lib/adapter.cjs')` and
+  `require.resolve(__dirname + '/assets/schema.json')`. The suffix may be a
+  captured immutable string, and proven loader aliases retain this support.
+  Capture proves the unchanged native dirname and pins the exact suffix,
+  importer and load-or-metadata purpose. The absolute runtime request relocates
+  with each execution or replay root; cached modules still require fresh
+  policy authorization using that original request. Resolving a filename does
+  not authorize loading it. Paths cannot leave the project, traverse reserved
+  operator state, borrow another importer's route, or use live files missing
+  from the capsule. Arbitrary absolute strings, mutable or escaped dirname
+  bindings, directory aliases, dirname templates and explicit `options.paths`
+  combinations remain outside this native-dirname capture form. Ordinary
+  proven relative string expressions retain their existing behavior.
   ESM packages can construct a captured loader with
   `createRequire(fileURLToPath(import.meta.url))`. Named, renamed, default and
   namespace imports from `url` or `node:url` are supported, as are earlier

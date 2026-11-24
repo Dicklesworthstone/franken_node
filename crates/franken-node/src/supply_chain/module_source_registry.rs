@@ -98,6 +98,8 @@ pub enum RegisteredTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegisteredDependency {
     pub specifier: String,
+    #[serde(skip_serializing_if = "super::is_false")]
+    pub dirname_request: bool,
     pub style: RequestStyle,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub import_attributes: ImportAttributes,
@@ -206,6 +208,7 @@ pub struct RegistrySummary {
 pub struct RegisteredRequest<'a> {
     pub referrer: Option<&'a str>,
     pub specifier: &'a str,
+    pub dirname_request: bool,
     pub style: RequestStyle,
     pub import_attributes: &'a ImportAttributes,
     pub module: &'a RegisteredModule,
@@ -270,6 +273,7 @@ impl<'a> Iterator for ReachableRequests<'a> {
             return Some(Ok(RegisteredRequest {
                 referrer: Some(importer.id()),
                 specifier: &dependency.specifier,
+                dirname_request: dependency.dirname_request,
                 style: dependency.style,
                 import_attributes: &dependency.import_attributes,
                 module,
@@ -289,11 +293,13 @@ pub struct PinnedModuleRegistry {
     // Split the key so BTreeMap's borrowed lookup can use &str directly.
     // A tuple of owned strings allocated on every successful load.
     routes: BTreeMap<String, ImporterRoutes>,
+    dirname_routes: BTreeMap<String, ImporterRoutes>,
     // Purpose is structural: these names never enter executable route lookup
     // or breadth-first dependency traversal, even when their target is loaded
     // elsewhere in the graph.
     resolutions: BTreeMap<String, RegisteredResolution>,
     resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
+    dirname_resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
     explicit_resolution_routes: ExplicitResolutionRoutes,
     lookup_path_routes: LookupPathRoutes,
     url_resolutions: BTreeMap<String, RegisteredUrlResolution>,
@@ -375,6 +381,15 @@ impl PinnedModuleRegistry {
             return Err(incomplete());
         }
         for edge in &report.edges {
+            if edge.dirname_request
+                && (!matches!(edge.kind, LoadKind::Require | LoadKind::RequireResolve)
+                    || edge.commonjs_search.is_some()
+                    || !edge.specifier.as_deref().is_some_and(|request| request.starts_with("./"))
+                    || !edge.import_attributes.is_empty()
+                    || edge.state == EdgeState::TypeOnly)
+            {
+                return Err(invalid_graph());
+            }
             if let Some(search) = &edge.commonjs_search {
                 if edge.kind != LoadKind::RequireResolve
                     || edge.state == EdgeState::TypeOnly
@@ -690,7 +705,9 @@ impl PinnedModuleRegistry {
                 });
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
+        let mut dirname_routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
+        let mut dirname_resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
         let mut explicit_resolution_routes = ExplicitResolutionRoutes::new();
         let mut lookup_path_routes = LookupPathRoutes::new();
         let mut url_resolution_routes =
@@ -810,7 +827,12 @@ impl PinnedModuleRegistry {
                     by_paths.insert(paths.clone(), target);
                     continue;
                 }
-                let by_specifier = resolution_routes.entry(importer.clone()).or_default();
+                let selected_routes = if edge.dirname_request {
+                    &mut dirname_resolution_routes
+                } else {
+                    &mut resolution_routes
+                };
+                let by_specifier = selected_routes.entry(importer.clone()).or_default();
                 if let Some(previous) = by_specifier.get(specifier) {
                     if previous != &target {
                         return Err(invalid_graph());
@@ -828,7 +850,8 @@ impl PinnedModuleRegistry {
             {
                 return Err(invalid_graph());
             }
-            let by_attributes = routes
+            let selected_routes = if edge.dirname_request { &mut dirname_routes } else { &mut routes };
+            let by_attributes = selected_routes
                 .entry(importer.clone())
                 .or_default()
                 .entry(style)
@@ -850,6 +873,7 @@ impl PinnedModuleRegistry {
                 .dependencies
                 .push(RegisteredDependency {
                     specifier: specifier.clone(),
+                    dirname_request: edge.dirname_request,
                     style,
                     import_attributes: edge.import_attributes.clone(),
                     target,
@@ -879,8 +903,10 @@ impl PinnedModuleRegistry {
             summary,
             modules,
             routes,
+            dirname_routes,
             resolutions,
             resolution_routes,
+            dirname_resolution_routes,
             explicit_resolution_routes,
             lookup_path_routes,
             url_resolutions,
@@ -961,6 +987,26 @@ impl PinnedModuleRegistry {
         referrer: Option<&str>,
         specifier: &str,
     ) -> Result<&RegisteredResolution> {
+        self.lookup_filename(referrer, specifier, false)
+    }
+
+    /// Look up a proved dirname-derived filename request by its captured
+    /// relative suffix. The embedding adapter must separately prove the
+    /// runtime absolute dirname; this result never grants executable loading.
+    pub fn lookup_dirname_resolution(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<&RegisteredResolution> {
+        self.lookup_filename(referrer, specifier, true)
+    }
+
+    fn lookup_filename(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+        dirname_request: bool,
+    ) -> Result<&RegisteredResolution> {
         validate_specifier(specifier)?;
         let importer = referrer.ok_or_else(|| {
             error(
@@ -974,8 +1020,8 @@ impl PinnedModuleRegistry {
                 "referrer does not belong to this sealed graph",
             ));
         }
-        let target = self
-            .resolution_routes
+        let routes = if dirname_request { &self.dirname_resolution_routes } else { &self.resolution_routes };
+        let target = routes
             .get(importer)
             .and_then(|requests| requests.get(specifier))
             .ok_or_else(|| {
@@ -1086,6 +1132,37 @@ impl PinnedModuleRegistry {
         style: RequestStyle,
         import_attributes: &ImportAttributes,
     ) -> Result<&RegisteredModule> {
+        self.lookup_source(referrer, specifier, style, import_attributes, false)
+    }
+
+    /// Select only the dirname-origin CommonJS table. Ordinary relative
+    /// requests, filename metadata and other importers cannot borrow it.
+    /// Native embedders must first verify the installed absolute origin.
+    pub fn lookup_dirname(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<&RegisteredModule> {
+        self.lookup_source(referrer, specifier, RequestStyle::Require, &EMPTY_IMPORT_ATTRIBUTES, true)
+    }
+
+    pub(super) fn source_origin(&self, referrer: Option<&str>) -> Result<&ModuleId> {
+        let importer = self.metadata_importer(referrer)?;
+        let module = self.modules.get(importer).ok_or_else(invalid_graph)?;
+        if module.kind() == ModuleKind::NativeBuiltin {
+            return Err(invalid_graph());
+        }
+        Ok(module.origin())
+    }
+
+    fn lookup_source(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+        style: RequestStyle,
+        import_attributes: &ImportAttributes,
+        dirname_request: bool,
+    ) -> Result<&RegisteredModule> {
         validate_specifier(specifier)?;
         super::import_attributes::validate(import_attributes)?;
         if matches!(
@@ -1100,7 +1177,8 @@ impl PinnedModuleRegistry {
         let id = match referrer {
             None if specifier == self.entrypoint()
                 && style == self.entry_style()
-                && import_attributes.is_empty() =>
+                && import_attributes.is_empty()
+                && !dirname_request =>
             {
                 self.entrypoint()
             }
@@ -1117,7 +1195,8 @@ impl PinnedModuleRegistry {
                         "referrer does not belong to this sealed graph",
                     ));
                 }
-                let target = self.routes
+                let routes = if dirname_request { &self.dirname_routes } else { &self.routes };
+                let target = routes
                     .get(importer)
                     .and_then(|styles| styles.get(&style))
                     .and_then(|specifiers| specifiers.get(specifier))
@@ -1158,12 +1237,24 @@ impl PinnedModuleRegistry {
         style: RequestStyle,
         import_attributes: &'a ImportAttributes,
     ) -> Result<ReachableRequests<'a>> {
-        let module = self.lookup_with_attributes(referrer, specifier, style, import_attributes)?;
+        self.walk_source_requests(referrer, specifier, style, import_attributes, false)
+    }
+
+    pub(super) fn walk_source_requests<'a>(
+        &'a self,
+        referrer: Option<&'a str>,
+        specifier: &'a str,
+        style: RequestStyle,
+        import_attributes: &'a ImportAttributes,
+        dirname_request: bool,
+    ) -> Result<ReachableRequests<'a>> {
+        let module = self.lookup_source(referrer, specifier, style, import_attributes, dirname_request)?;
         Ok(ReachableRequests {
             registry: self,
             entry: Some(RegisteredRequest {
                 referrer,
                 specifier,
+                dirname_request,
                 style,
                 import_attributes,
                 module,
@@ -1181,13 +1272,15 @@ impl PinnedModuleRegistry {
     /// its returned module list, so diamond/cycle edges cannot bypass policy.
     /// Consumers that can stop on denial should use `walk_requests` instead
     /// of allocating this complete owned projection.
+    /// The final tuple field preserves dirname-origin authority; consumers
+    /// must not relabel these suffixes as ordinary relative request strings.
     #[allow(clippy::type_complexity)]
     pub fn reachable_requests(
         &self,
         referrer: Option<&str>,
         specifier: &str,
         style: RequestStyle,
-    ) -> Result<Vec<(Option<String>, String, RequestStyle, ImportAttributes)>> {
+    ) -> Result<Vec<(Option<String>, String, RequestStyle, ImportAttributes, bool)>> {
         self.walk_requests(referrer, specifier, style)?
             .map(|request| {
                 request.map(|request| {
@@ -1196,6 +1289,7 @@ impl PinnedModuleRegistry {
                         request.specifier.to_owned(),
                         request.style,
                         request.import_attributes.clone(),
+                        request.dirname_request,
                     )
                 })
             })
@@ -2482,7 +2576,7 @@ import('./dep.mjs', {with:{color:'blue',type:'json'}});
         assert_eq!(
             requests
                 .iter()
-                .filter(|(_, s, _, _)| s == "./shared.mjs")
+                .filter(|(_, s, _, _, _)| s == "./shared.mjs")
                 .count(),
             2
         );
@@ -2553,6 +2647,7 @@ import('./dep.mjs', {with:{color:'blue',type:'json'}});
                 request.specifier.to_owned(),
                 request.style,
                 request.import_attributes.clone(),
+                request.dirname_request,
             ));
         }
         assert_eq!(
@@ -2563,7 +2658,7 @@ import('./dep.mjs', {with:{color:'blue',type:'json'}});
         assert_eq!(
             order
                 .iter()
-                .map(|(_, specifier, _, _)| specifier.as_str())
+                .map(|(_, specifier, _, _, _)| specifier.as_str())
                 .collect::<Vec<_>>(),
             vec![
                 r.entrypoint(),

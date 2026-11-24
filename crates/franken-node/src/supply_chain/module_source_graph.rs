@@ -181,6 +181,10 @@ pub struct SourceEdge {
     /// Potential loads only; the scanner does not evaluate control flow.
     pub deferred_or_conditional: bool,
     pub specifier: Option<String>,
+    /// `specifier` is relative to this importer's directory, but runtime must
+    /// supply the absolute string derived from its unchanged __dirname.
+    #[serde(skip_serializing_if = "is_false")]
+    pub dirname_request: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commonjs_search: Option<CommonJsSearch>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -193,6 +197,10 @@ pub struct SourceEdge {
     pub resolved_url: Option<ResolutionUrl>,
     pub error: Option<ResolutionError>,
     pub mappings: Vec<Mapping>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A relocatable file URL or an absolute URL with no loader attached. File URL
@@ -610,6 +618,7 @@ fn build(
                             | LoadKind::DynamicImport
                     ),
                 specifier: load.specifier,
+                dirname_request: load.dirname_request,
                 commonjs_search,
                 import_attributes: load.import_attributes,
                 conditions,
@@ -842,6 +851,7 @@ struct Load {
     site: SourceSite,
     kind: LoadKind,
     specifier: Option<String>,
+    dirname_request: bool,
     import_attributes: ImportAttributes,
     type_only: bool,
     search_paths: Option<Vec<SearchRoot>>,
@@ -2490,6 +2500,29 @@ fn scan(
                 specifiers = request_literals(argument, text, &strings);
             }
             let mut search_paths = None;
+            let mut dirname_request = false;
+            if specifiers.is_none()
+                && !erased
+                && !lookup_paths
+                && matches!(kind, LoadKind::Require | LoadKind::RequireResolve)
+                && let Some(request) = capture_dirname_request(argument, text, &strings)
+            {
+                let stable = match directory_origin_stable {
+                    Some(stable) => stable,
+                    None => {
+                        let stable = stable_search_directory_origin(tree.root_node(), text, budget)?;
+                        directory_origin_stable = Some(stable);
+                        stable
+                    }
+                };
+                if stable {
+                    specifiers = Some(vec![request]);
+                    dirname_request = true;
+                } else {
+                    issue = Some(("MUTABLE_DIRNAME_REQUEST",
+                        "module-relative loads require the unchanged module-owned __dirname binding"));
+                }
+            }
             if kind == LoadKind::RequireResolve
                 && !lookup_paths
                 && !erased
@@ -2506,7 +2539,12 @@ fn scan(
                     captured = capture_search_options(node, text, &strings);
                 }
                 if let Some(roots) = captured {
-                    if roots.as_ref().is_some_and(|roots| roots.iter().any(|root| root.importer_relative))
+                    if dirname_request && roots.is_some() {
+                        issue = Some(("REQUIRE_RESOLVE_OPTIONS",
+                            "dirname-derived filename lookup cannot be combined with explicit search roots"));
+                        specifiers = None;
+                        dirname_request = false;
+                    } else if roots.as_ref().is_some_and(|roots| roots.iter().any(|root| root.importer_relative))
                         && !match directory_origin_stable {
                             Some(stable) => stable,
                             None => {
@@ -2563,6 +2601,7 @@ fn scan(
                         site: site.clone(),
                         kind,
                         specifier: specifier.clone(),
+                        dirname_request,
                         import_attributes: attributes.clone(),
                         type_only: erased,
                         search_paths: selected.map(<[SearchRoot]>::to_vec),
@@ -2715,6 +2754,33 @@ fn search_root(
         importer_relative: false,
         text: value.clone(),
     })
+}
+
+/// Keep the exact suffix spelling: a captured dirname request is not a grant
+/// for an equivalent ordinary relative string, nor for every absolute path to
+/// the selected module. Only bounded, immutable string suffixes are admitted.
+fn capture_dirname_request(
+    node: Node<'_>,
+    source: &str,
+    strings: &ConstStringBindings<'_>,
+) -> Option<String> {
+    let node = runtime_operand(node);
+    if node.kind() != "binary_expression"
+        || !node.child_by_field_name("operator")
+            .is_some_and(|operator| operator.utf8_text(source.as_bytes()) == Ok("+"))
+        || !node.child_by_field_name("left").is_some_and(|left| {
+            let left = runtime_operand(left);
+            left.kind() == "identifier" && left.utf8_text(source.as_bytes()) == Ok("__dirname")
+        })
+    {
+        return None;
+    }
+    let suffixes = request_literals(node.child_by_field_name("right")?, source, strings)?;
+    let [suffix] = suffixes.as_slice() else { return None; };
+    if !suffix.starts_with('/') || suffix.len() >= super::MAX_PATH {
+        return None;
+    }
+    Some(format!(".{suffix}"))
 }
 
 /// A dirname origin is trusted only if every binding/write is absent. Reject
@@ -5780,7 +5846,7 @@ module.exports={load,lookup,optional};
             "load.call(null, './dep.cjs');",
             "load.apply(null, ['./dep.cjs']);",
             "const resolve=load.resolve; resolve.call(null,'./dep.cjs');",
-            "load.resolve('./dep.cjs', {paths:['other']});",
+            "const options={paths:['other']}; load.resolve('./dep.cjs', options);",
             "load[property]('./dep.cjs');",
             "eval('require=replacement');",
             "(eval)('load=replacement');",
@@ -6623,7 +6689,7 @@ module.exports={load,lookup,optional};
             "consume(local);",
             "local.call(null, './dep.cjs');",
             "const resolve=local.resolve; resolve.call(null,'./dep.cjs');",
-            "local.resolve('./dep.cjs', {paths:['other']});",
+            "const options={paths:['other']}; local.resolve('./dep.cjs', options);",
             "function shadow(lo\\u0063al){local('./dep.cjs');}",
             "import.meta.url='file:///other.mjs';",
             "import.meta.url += '/other.mjs';",
@@ -9205,7 +9271,7 @@ require!('./dep.cjs');
             "const local=make(import.meta.url); const load=local; export {load}; load('./dep.cjs');",
             "const local=make(import.meta.url); const load=local; load.call(null,'./dep.cjs');",
             "const local=make(import.meta.url); const load=local; const resolve=load.resolve; resolve.call(null,'./dep.cjs');",
-            "const local=make(import.meta.url); const load=local; load.resolve('./dep.cjs',{paths:['other']});",
+            "const local=make(import.meta.url); const load=local; const options={paths:['other']}; load.resolve('./dep.cjs',options);",
             "const local=make(import.meta.url); const load=local; function shadow(lo\\u0061d){} load('./dep.cjs');",
             "const local=make(import.meta.url); const lo\\u0061d=local; lo\\u0061d('./dep.cjs');",
             "const local=make(import.meta.url); const load=local; eval('load=other'); load('./dep.cjs');",
