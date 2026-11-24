@@ -3871,6 +3871,8 @@ struct RunPackageManifest {
     relative_path: PathBuf,
     content_sha256: String,
     main: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_bin: Option<String>,
     package_type: Option<String>,
 }
 
@@ -3953,6 +3955,7 @@ fn read_run_package_manifest(
     project_root: &Path,
     directory: &Path,
     manifests: &mut Vec<RunPackageManifest>,
+    package_bin: Option<&str>,
 ) -> Result<Option<RunPackageManifest>, String> {
     use sha2::{Digest, Sha256};
 
@@ -4051,6 +4054,34 @@ fn read_run_package_manifest(
             ));
         }
     };
+    let selected_bin = package_bin
+        .map(|name| {
+            let selected = match object.get("bin") {
+                Some(serde_json::Value::Object(commands)) => {
+                    commands.get(name).and_then(serde_json::Value::as_str)
+                }
+                Some(serde_json::Value::String(command))
+                    if object
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|package| package.rsplit('/').next())
+                        == Some(name) =>
+                {
+                    Some(command.as_str())
+                }
+                _ => None,
+            };
+            selected
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!(
+                        "Package manifest {} has no executable bin named {name:?}",
+                        path.display()
+                    )
+                })
+        })
+        .transpose()?;
     let manifest = RunPackageManifest {
         relative_path,
         content_sha256: hex::encode(Sha256::digest(&bytes)),
@@ -4058,6 +4089,7 @@ fn read_run_package_manifest(
             .get("main")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        selected_bin,
         package_type,
     };
     manifests.push(manifest.clone());
@@ -4090,7 +4122,8 @@ fn resolve_run_entrypoint_format(
         if directory.file_name() == Some(std::ffi::OsStr::new("node_modules")) {
             return Ok(RunEntrypointFormat::CommonJs);
         }
-        if let Some(manifest) = read_run_package_manifest(project_root, directory, manifests)? {
+        if let Some(manifest) = read_run_package_manifest(project_root, directory, manifests, None)?
+        {
             return Ok(match manifest.package_type.as_deref() {
                 Some("module") => RunEntrypointFormat::EsModule,
                 Some("commonjs") => RunEntrypointFormat::CommonJs,
@@ -4167,6 +4200,8 @@ pub struct RunProjectPaths {
     entrypoint_format: RunEntrypointFormat,
     package_manifests: Vec<RunPackageManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_bin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     publisher_source: Option<RunPublisherSource>,
 }
 
@@ -4200,6 +4235,46 @@ impl RunProjectPaths {
         working_dir: &Path,
         operator_project: Option<&Path>,
     ) -> Result<Self> {
+        Self::resolve_live(app_path, working_dir, operator_project, None)
+    }
+
+    /// A signed artifact already identifies its entrypoint. Named local bins
+    /// instead retain the manifest and exact command choice in worker admission.
+    pub fn resolve_for_run(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
+        package_bin: Option<&str>,
+    ) -> Result<Self> {
+        let Some(name) = package_bin else {
+            return Self::resolve_with_registry_artifact(
+                app_path,
+                working_dir,
+                operator_project,
+                publisher_approval,
+            );
+        };
+        anyhow::ensure!(
+            publisher_approval.is_none(),
+            "--package-bin cannot replace a signed registry artifact entrypoint"
+        );
+        anyhow::ensure!(
+            !name.is_empty()
+                && !matches!(name, "." | "..")
+                && !name.contains(['/', '\\'])
+                && !name.chars().any(char::is_control),
+            "--package-bin requires a command name"
+        );
+        Self::resolve_live(app_path, working_dir, operator_project, Some(name))
+    }
+
+    fn resolve_live(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        package_bin: Option<&str>,
+    ) -> Result<Self> {
         validate_guest_source_spelling(working_dir)?;
         let invocation_root = working_dir.canonicalize().with_context(|| {
             format!("resolve run invocation directory {}", working_dir.display())
@@ -4210,8 +4285,12 @@ impl RunProjectPaths {
         }
         let requested = EngineDispatcher::lexical_execution_app_path(app_path, &invocation_root);
         validate_guest_source_spelling(&requested)?;
-        let anchored = resolve_run_target_path(app_path, &requested)
-            .with_context(|| format!("inspect run target {}", requested.display()))?;
+        let anchored = if package_bin.is_some() {
+            requested.clone()
+        } else {
+            resolve_run_target_path(app_path, &requested)
+                .with_context(|| format!("inspect run target {}", requested.display()))?
+        };
         validate_guest_source_spelling(&anchored)?;
         let target = anchored
             .canonicalize()
@@ -4228,11 +4307,18 @@ impl RunProjectPaths {
             );
         }
 
+        anyhow::ensure!(
+            package_bin.is_none() || target_metadata.is_dir(),
+            "--package-bin requires a package directory"
+        );
         let mut package_manifests = Vec::new();
         let (project_root, entrypoint) = if target_metadata.is_dir() {
-            let entrypoint =
-                EngineDispatcher::resolve_directory_entrypoint(&target, &mut package_manifests)
-                    .map_err(anyhow::Error::msg)?;
+            let entrypoint = EngineDispatcher::resolve_directory_entrypoint(
+                &target,
+                &mut package_manifests,
+                package_bin,
+            )
+            .map_err(anyhow::Error::msg)?;
             (target.clone(), entrypoint)
         } else if target_metadata.is_file() {
             // Use the selected path's parent before following the final file
@@ -4305,6 +4391,7 @@ impl RunProjectPaths {
             project_root,
             entrypoint_format,
             package_manifests,
+            package_bin: package_bin.map(str::to_owned),
             publisher_source: None,
         })
     }
@@ -4378,6 +4465,7 @@ impl RunProjectPaths {
                     // capsule during source preparation under current limits.
                     entrypoint_format: RunEntrypointFormat::Ambiguous,
                     package_manifests: Vec::new(),
+                    package_bin: None,
                     publisher_source: None,
                 }
             } else {
@@ -4446,11 +4534,12 @@ impl RunProjectPaths {
         operator_project: Option<&Path>,
         publisher_approval: Option<&PublisherSourceGraphApproval>,
     ) -> Result<()> {
-        let observed = Self::resolve_with_registry_artifact(
+        let observed = Self::resolve_for_run(
             app_path,
             working_dir,
             operator_project,
             publisher_approval,
+            self.package_bin.as_deref(),
         )?;
         if observed != *self {
             anyhow::bail!(
@@ -9816,8 +9905,33 @@ impl EngineDispatcher {
     fn resolve_directory_entrypoint(
         dir: &Path,
         manifests: &mut Vec<RunPackageManifest>,
+        package_bin: Option<&str>,
     ) -> std::result::Result<PathBuf, String> {
-        if let Some(manifest) = read_run_package_manifest(dir, dir, manifests)?
+        let manifest = read_run_package_manifest(dir, dir, manifests, package_bin)?;
+        if let Some(name) = package_bin {
+            let selected = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.selected_bin.as_deref())
+                .ok_or_else(|| {
+                    format!("No package.json bin named {name:?} in {}", dir.display())
+                })?;
+            let relative = Path::new(selected);
+            if relative.components().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            }) {
+                return Err(format!(
+                    "package.json bin {name:?} must be a relative path inside {}",
+                    dir.display()
+                ));
+            }
+            // A bin is an exact file. Never infer an extension, use main/index,
+            // invoke a shell, or resolve a command through the host PATH.
+            return Ok(dir.join(relative));
+        }
+        if let Some(manifest) = manifest
             && let Some(main) = manifest
                 .main
                 .as_deref()
@@ -22713,6 +22827,76 @@ exec "$2" pinned-worker-image"#,
     }
 
     #[test]
+    fn run_named_package_bin_uses_exact_entrypoint_and_revalidates_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let package = root_path.join("tool");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(root_path.join("tool.js"), "throw 1;").unwrap();
+        std::fs::write(package.join("index.js"), "throw 2;").unwrap();
+        std::fs::write(package.join("bin/runner"), "export {};").unwrap();
+        std::fs::write(package.join("bin/other.cjs"), "module.exports=1;").unwrap();
+        let manifest = package.join("package.json");
+        let resolve = |name| {
+            RunProjectPaths::resolve_for_run(Path::new("tool"), &root_path, None, None, Some(name))
+        };
+        for document in [
+            r#"{"name":"@scope/cli","type":"module","main":"index.js","bin":"bin/runner"}"#,
+            r#"{"type":"module","bin":{"cli":"./bin/runner","other":"bin/other.cjs"}}"#,
+        ] {
+            std::fs::write(&manifest, document).unwrap();
+            let selected = resolve("cli").unwrap();
+            assert_eq!(selected.project_root(), package);
+            assert_eq!(selected.entrypoint(), package.join("bin/runner"));
+            assert_eq!(selected.entrypoint_format, RunEntrypointFormat::EsModule);
+            assert_eq!(selected.package_manifests.len(), 1);
+            // The private worker receives the choice across a serialized frame.
+            let received: RunProjectPaths =
+                serde_json::from_slice(&serde_json::to_vec(&selected).unwrap()).unwrap();
+            received
+                .verify_target_with_operator_project(Path::new("tool"), &root_path, None, None)
+                .unwrap();
+            assert!(resolve("missing").is_err());
+            std::fs::write(&manifest, r#"{"bin":{"cli":"bin/other.cjs"}}"#).unwrap();
+            assert!(
+                received
+                    .verify_target_with_operator_project(Path::new("tool"), &root_path, None, None)
+                    .is_err()
+            );
+        }
+        std::fs::write(&manifest, r#"{"bin":{"cli":"bin/other"}}"#).unwrap();
+        assert!(
+            resolve("cli").is_err(),
+            "a missing bin cannot infer .cjs or fall back to index"
+        );
+        for path in ["../tool.js", ".franken-node/run.js"] {
+            std::fs::write(
+                &manifest,
+                serde_json::json!({"bin":{"cli":path}}).to_string(),
+            )
+            .unwrap();
+            assert!(resolve("cli").is_err());
+        }
+        assert!(
+            RunProjectPaths::resolve_for_run(
+                Path::new("tool.js"),
+                &root_path,
+                None,
+                None,
+                Some("cli")
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root_path.join("tool.js"), package.join("alias.js"))
+                .unwrap();
+            std::fs::write(&manifest, r#"{"bin":{"cli":"alias.js"}}"#).unwrap();
+            assert!(resolve("cli").is_err());
+        }
+    }
+
+    #[test]
     fn run_project_paths_inferred_js_preserves_file_authority_and_package_scope() {
         let directory = tempfile::tempdir().expect("inferred file authority directory");
         let root = directory.path().canonicalize().expect("canonical project");
@@ -28353,6 +28537,7 @@ exec "$2" pinned-worker-image"#,
                 project_root: PathBuf::from("/tmp/native-session-frame"),
                 entrypoint_format: RunEntrypointFormat::CommonJs,
                 package_manifests: Vec::new(),
+                package_bin: None,
                 publisher_source: None,
             },
             trust_requirements: RunTrustRequirements::new(

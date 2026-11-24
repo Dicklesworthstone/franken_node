@@ -47551,6 +47551,7 @@ fn main() -> Result<()> {
             }
             let cli::RunArgs {
                 app_path,
+                package_bin,
                 policy,
                 json,
                 console_only,
@@ -47687,11 +47688,12 @@ fn main() -> Result<()> {
             let project_paths = match std::env::current_dir()
                 .map_err(anyhow::Error::from)
                 .and_then(|working_dir| {
-                    RunProjectPaths::resolve_with_registry_artifact(
+                    RunProjectPaths::resolve_for_run(
                         &app_path,
                         &working_dir,
                         admitted_operator_project.as_deref(),
                         registry_artifact_approval.as_ref(),
+                        package_bin.as_deref(),
                     )
                 }) {
                 Ok(project_paths) => project_paths,
