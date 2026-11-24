@@ -4941,6 +4941,289 @@ fn trust_scan_is_idempotent() {
     assert!(stdout.contains("skipped_existing=3"));
 }
 
+#[test]
+fn trust_scan_deep_enriches_scoped_packages_and_aliases_from_captured_versions() {
+    use frankenengine_node::supply_chain::trust_card::verify_card_signature;
+
+    let workspace = config_only_workspace();
+    write_run_package_manifest(
+        workspace.path(),
+        &[
+            ("runtime-copy", "npm:@acme/shared-runtime@^1.0.0"),
+            ("@tools/direct-lib", "^2.0.0"),
+        ],
+    );
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/runtime-copy": {
+                    "name": "@acme/shared-runtime",
+                    "version": "1.2.3",
+                    "integrity": format!("sha256-{}", BASE64_STANDARD.encode([0x11_u8; 32]))
+                },
+                "node_modules/@tools/direct-lib": {
+                    "version": "2.3.4",
+                    "integrity": format!("sha256-{}", BASE64_STANDARD.encode([0x22_u8; 32]))
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let offline_dir = workspace.path().join("offline-registry");
+    fs::create_dir_all(&offline_dir).unwrap();
+    let captured = [
+        (
+            "@acme/shared-runtime",
+            "1.2.3",
+            0x11_u8,
+            "runtime-publisher",
+            2750_u64,
+        ),
+        (
+            "@tools/direct-lib",
+            "2.3.4",
+            0x22_u8,
+            "direct-publisher",
+            1250_u64,
+        ),
+    ];
+    for (package, version, pin, publisher, dependents) in captured {
+        let mut versions = serde_json::Map::new();
+        versions.insert(
+            version.to_owned(),
+            serde_json::json!({
+                "name": package,
+                "version": version,
+                "maintainers": [{"name": publisher}],
+                "dist": {"integrity": format!("sha256-{}", BASE64_STANDARD.encode([pin; 32]))}
+            }),
+        );
+        versions.insert(
+            "9.9.9".to_owned(),
+            serde_json::json!({
+                "name": package,
+                "version": "9.9.9",
+                "maintainers": [{"name": "latest-publisher"}],
+                "dist": {"integrity": format!("sha256-{}", BASE64_STANDARD.encode([0xff_u8; 32]))}
+            }),
+        );
+        fs::write(
+            offline_dir.join(format!("{}.json", package.replacen('/', "__", 1))),
+            serde_json::to_vec(&serde_json::json!({
+                "name": package,
+                "dist-tags": {"latest": "9.9.9"},
+                "maintainers": [{"name": "current-package-maintainer"}],
+                "_hermetic_dependent_count": dependents,
+                "time": {
+                    "created": "2020-01-01T00:00:00Z",
+                    "1.2.3": "2024-03-01T00:00:00Z",
+                    "2.3.4": "2024-03-01T00:00:00Z",
+                    "9.9.9": "2025-01-01T00:00:00Z"
+                },
+                "versions": versions
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "scan",
+            ".",
+            "--deep",
+            "--offline-registry-dir",
+            "offline-registry",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json_stdout(&output, "scoped deep scan");
+    assert_eq!(report["metadata_source"], "hermetic_fixture");
+    assert_eq!(report["scanned_dependencies"], 2);
+    assert_eq!(report["created_cards"], 2);
+    for (package, version, pin, publisher, dependents) in captured {
+        let extension = format!("npm:{package}");
+        let item = report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["extension_id"] == extension)
+            .expect("actual scoped package identity");
+        assert_eq!(item["dependent_count"], dependents);
+        assert_eq!(item["extension_version"], version);
+        let card = export_osv_scan_card(workspace.path(), &extension);
+        verify_card_signature(&card, FIXTURE_REGISTRY_KEY).unwrap();
+        assert_eq!(card.extension.version, version);
+        assert_eq!(
+            card.publisher.publisher_id,
+            format!("npm-maintainer:{publisher}")
+        );
+        assert_eq!(
+            card.provenance_summary.source_uri,
+            format!("pkg:npm/{package}")
+        );
+        assert_eq!(
+            card.provenance_summary.artifact_hashes,
+            vec![format!("sha256:{}", hex::encode([pin; 32]))]
+        );
+        assert!(
+            card.user_facing_risk_assessment
+                .summary
+                .contains("published_at=2024-03-01T00:00:00Z")
+        );
+        assert!(
+            card.user_facing_risk_assessment
+                .summary
+                .contains(&format!("dependents={dependents}"))
+        );
+    }
+    assert!(
+        report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["extension_id"] != "npm:runtime-copy")
+    );
+}
+
+#[test]
+fn trust_scan_deep_refuses_colliding_scopes_and_contradictory_release_identity() {
+    use frankenengine_node::supply_chain::trust_card::verify_card_signature;
+
+    let package = "@a/b__c";
+    let colliding_package = "@a__b/c";
+    let extension = "npm:@a/b__c";
+    let workspace = attributed_osv_scan_workspace(package, Some(0x33));
+    let initial = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let original = export_osv_scan_card(workspace.path(), extension);
+    let offline_dir = workspace.path().join("offline-registry");
+    fs::create_dir_all(&offline_dir).unwrap();
+    assert_eq!(
+        package.replacen('/', "__", 1),
+        colliding_package.replacen('/', "__", 1)
+    );
+    let fixture_path = offline_dir.join("@a__b__c.json");
+    let matching = serde_json::json!({
+        "name": package,
+        "dist-tags": {"latest": "1.0.0"},
+        "maintainers": [{"name": "matching-publisher"}],
+        "_hermetic_dependent_count": 1000,
+        "versions": {
+            "1.0.0": {
+                "name": package,
+                "version": "1.0.0",
+                "dist": {"integrity": format!("sha256-{}", BASE64_STANDARD.encode([0x33_u8; 32]))}
+            }
+        }
+    });
+    let mut wrong_package = matching.clone();
+    wrong_package["name"] = serde_json::json!(colliding_package);
+    let mut wrong_release_name = matching.clone();
+    wrong_release_name["versions"]["1.0.0"]["name"] = serde_json::json!(colliding_package);
+    let mut wrong_release_version = matching.clone();
+    wrong_release_version["versions"]["1.0.0"]["version"] = serde_json::json!("2.0.0");
+    let mut missing_pin = matching.clone();
+    missing_pin["dist-tags"]["latest"] = serde_json::json!("2.0.0");
+    missing_pin["versions"] = serde_json::json!({
+        "2.0.0": {"name": package, "version": "2.0.0"}
+    });
+    for (payload, diagnostic) in [
+        (wrong_package, "package name does not match"),
+        (wrong_release_name, "contradictory name"),
+        (wrong_release_version, "contradictory version"),
+        (missing_pin, "does not contain selected version 1.0.0"),
+    ] {
+        fs::write(&fixture_path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let output = run_cli_in_workspace(
+            workspace.path(),
+            &[
+                "trust",
+                "scan",
+                ".",
+                "--deep",
+                "--offline-registry-dir",
+                "offline-registry",
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = parse_json_stdout(&output, "rejected scoped metadata");
+        assert_eq!(report["refreshed_cards"], 0);
+        assert_eq!(report["skipped_existing"], 1);
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| {
+                    let warning = warning.as_str().unwrap_or_default();
+                    warning.contains("offline deep metadata unavailable")
+                        && warning.contains(diagnostic)
+                }),
+            "{report}"
+        );
+        assert_eq!(
+            export_osv_scan_card(workspace.path(), extension),
+            original,
+            "rejected metadata must not mutate the existing signed artifact"
+        );
+    }
+
+    fs::write(&fixture_path, serde_json::to_vec(&matching).unwrap()).unwrap();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "scan",
+            ".",
+            "--deep",
+            "--offline-registry-dir",
+            "offline-registry",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        parse_json_stdout(&output, "matching scoped metadata")["refreshed_cards"],
+        1
+    );
+    let accepted = export_osv_scan_card(workspace.path(), extension);
+    verify_card_signature(&accepted, FIXTURE_REGISTRY_KEY).unwrap();
+    assert_eq!(accepted.extension, original.extension);
+    assert_eq!(
+        accepted.provenance_summary.artifact_hashes,
+        original.provenance_summary.artifact_hashes
+    );
+    assert_eq!(
+        accepted.publisher.publisher_id,
+        "npm-maintainer:matching-publisher"
+    );
+}
+
 fn trust_scan_audit(workspace: &Path, osv_url: &str) -> Output {
     trust_scan_audit_with_options(workspace, osv_url, &[])
 }

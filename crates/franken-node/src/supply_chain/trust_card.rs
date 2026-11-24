@@ -1434,6 +1434,25 @@ impl std::fmt::Debug for TrustCard {
 }
 
 impl TrustCard {
+    /// Whether querying this card's exact version covers its retained OSV scope.
+    /// Legacy baselines without explicit scope belong to that card version.
+    /// Callers must separately verify the card, query completion and freshness;
+    /// a successful narrow answer does not cover other versions or unresolved
+    /// placements retained by a project audit.
+    #[must_use]
+    pub fn osv_scope_covered_by_card_version(&self) -> bool {
+        exact_dependency_version(&self.extension.version)
+            && self
+                .osv_risk_baseline
+                .as_ref()
+                .and_then(|baseline| baseline.evidence_scope.as_ref())
+                .is_none_or(|scope| {
+                    !scope.unresolved
+                        && scope.versions.len() == 1
+                        && scope.versions.contains(&self.extension.version)
+                })
+    }
+
     /// Whether a scan leaves this card's concrete artifact authority intact.
     /// An audit-only refresh may then retain independent state unchanged.
     #[must_use]
@@ -4785,6 +4804,45 @@ mod tests {
             OsvRiskRefreshOutcome::ClearanceRefused => {
                 panic!("unexpected scoped clearance refusal")
             }
+        }
+    }
+
+    #[test]
+    fn osv_card_version_coverage_requires_the_entire_retained_exact_scope() {
+        let cases: &[(&str, &[&str], bool, bool)] = &[
+            ("1.0.0", &["1.0.0"], false, true),
+            ("1.0.0", &["2.0.0"], false, false),
+            ("1.0.0", &["1.0.0", "2.0.0"], false, false),
+            ("1.0.0", &["1.0.0"], true, false),
+            ("1.0.0", &[], true, false),
+            ("multiple-or-unresolved", &["1.0.0"], false, false),
+        ];
+        for &(card_version, versions, unresolved, covered) in cases {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.extension.version = card_version.to_owned();
+            let initial = registry.create(input, 1_000, "initial").unwrap();
+            assert_eq!(
+                initial.osv_scope_covered_by_card_version(),
+                exact_dependency_version(card_version)
+            );
+            let mut card = apply_osv_scope(
+                &mut registry,
+                &osv_scope(versions, unresolved, &["OSV-SCOPED"]),
+                false,
+                1_001,
+            );
+            assert_eq!(card.osv_scope_covered_by_card_version(), covered);
+            verify_card_signature(&card, DEFAULT_REGISTRY_KEY).unwrap();
+
+            // A historical baseline without explicit scope retains the
+            // original exact-card query contract, never a nonexact one.
+            card.osv_risk_baseline.as_mut().unwrap().evidence_scope = None;
+            sign_card_in_place(&mut card, DEFAULT_REGISTRY_KEY).unwrap();
+            assert_eq!(
+                card.osv_scope_covered_by_card_version(),
+                exact_dependency_version(card_version)
+            );
         }
     }
 

@@ -736,6 +736,7 @@ struct TrustSyncAuditRefreshReport {
     vulnerabilities_found: usize,
     network_errors: usize,
     risk_lowering_rejections: usize,
+    incomplete_version_scopes: usize,
     warnings: Vec<String>,
 }
 
@@ -751,6 +752,9 @@ struct TrustSyncCliReport {
     vulnerabilities: usize,
     network_errors: usize,
     risk_lowering_rejections: usize,
+    incomplete_version_scopes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revocation_frontier_block_reason: Option<String>,
     cache_hits: usize,
     cache_misses: usize,
     stale_refreshes: usize,
@@ -20063,6 +20067,7 @@ mod trust_scan_tests {
     #[test]
     fn parse_trust_scan_npm_metadata_prefers_requested_version() {
         let payload = serde_json::json!({
+            "name": "example",
             "dist-tags": {"latest": "2.0.0"},
             "maintainers": [{"name": "maintainer", "email": "maintainer@example.com"}],
             "time": {
@@ -20079,7 +20084,8 @@ mod trust_scan_tests {
             }
         });
 
-        let metadata = parse_trust_scan_npm_metadata(&payload, "example", Some("1.5.0"));
+        let metadata = parse_trust_scan_npm_metadata(&payload, "example", Some("1.5.0"))
+            .expect("matching captured release");
         assert_eq!(metadata.resolved_version.as_deref(), Some("1.5.0"));
         assert_eq!(
             metadata.published_at.as_deref(),
@@ -20104,12 +20110,132 @@ mod trust_scan_tests {
             if let Some(malformed) = malformed {
                 versions.insert("1.5.0".to_owned(), malformed);
             }
-            let metadata =
-                parse_trust_scan_npm_metadata(&missing_preferred, "example", Some("1.5.0"));
-            assert!(metadata.resolved_version.is_none());
-            assert!(metadata.registry_integrity_hashes.is_empty());
-            assert!(metadata.published_at.is_none());
+            assert!(
+                parse_trust_scan_npm_metadata(&missing_preferred, "example", Some("1.5.0"))
+                    .is_err(),
+                "a missing or malformed pinned release must not borrow latest provenance"
+            );
         }
+    }
+
+    #[test]
+    fn parse_trust_scan_npm_metadata_binds_scoped_package_and_version_identity() {
+        let package = "@acme/runtime";
+        let payload = serde_json::json!({
+            "name": package,
+            "dist-tags": {"latest": "1.5.0"},
+            "versions": {
+                "1.5.0": {"name": package, "version": "1.5.0"}
+            }
+        });
+        assert!(parse_trust_scan_npm_metadata(&payload, package, Some("1.5.0")).is_ok());
+        for wrong_name in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(123)),
+            Some(serde_json::json!("@other/runtime")),
+        ] {
+            let mut mismatched = payload.clone();
+            mismatched.as_object_mut().unwrap().remove("name");
+            if let Some(wrong_name) = wrong_name {
+                mismatched["name"] = wrong_name;
+            }
+            assert!(parse_trust_scan_npm_metadata(&mismatched, package, Some("1.5.0")).is_err());
+        }
+        for (field, wrong_value) in [
+            ("name", serde_json::Value::Null),
+            ("name", serde_json::json!(123)),
+            ("name", serde_json::json!("@other/runtime")),
+            ("version", serde_json::Value::Null),
+            ("version", serde_json::json!(123)),
+            ("version", serde_json::json!("2.0.0")),
+        ] {
+            let mut mismatched = payload.clone();
+            mismatched["versions"]["1.5.0"][field] = wrong_value;
+            assert!(
+                parse_trust_scan_npm_metadata(&mismatched, package, Some("1.5.0")).is_err(),
+                "contradictory selected-release {field} must not provide provenance"
+            );
+        }
+        // npm packuments and the existing offline fixtures may omit repeated
+        // identity fields from a version object; the map key remains binding.
+        let mut without_repeated_identity = payload;
+        without_repeated_identity["versions"]["1.5.0"] = serde_json::json!({});
+        assert!(
+            parse_trust_scan_npm_metadata(&without_repeated_identity, package, Some("1.5.0"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn parse_trust_scan_npm_metadata_requires_an_available_selected_release() {
+        let payload = serde_json::json!({
+            "name": "@acme/runtime",
+            "dist-tags": {"latest": "1.5.0"},
+            "versions": {"1.5.0": {}}
+        });
+        let latest = parse_trust_scan_npm_metadata(&payload, "@acme/runtime", None)
+            .expect("latest resolves to a real version object");
+        assert_eq!(latest.resolved_version.as_deref(), Some("1.5.0"));
+        for malformed in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut missing_latest = payload.clone();
+            missing_latest["versions"]
+                .as_object_mut()
+                .unwrap()
+                .remove("1.5.0");
+            if let Some(malformed) = malformed {
+                missing_latest["versions"]["1.5.0"] = malformed;
+            }
+            assert!(parse_trust_scan_npm_metadata(&missing_latest, "@acme/runtime", None).is_err());
+        }
+        for invalid_version in ["^1.5.0", "1.5.0/../../other", ""] {
+            let mut invalid = payload.clone();
+            invalid["dist-tags"]["latest"] = serde_json::json!(invalid_version);
+            invalid["versions"][invalid_version] = serde_json::json!({});
+            assert!(parse_trust_scan_npm_metadata(&invalid, "@acme/runtime", None).is_err());
+            assert!(
+                parse_trust_scan_npm_metadata(&invalid, "@acme/runtime", Some(invalid_version))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn offline_trust_scan_metadata_binds_colliding_scoped_filenames() {
+        let directory = tempfile::tempdir().expect("offline packument directory");
+        let offline_dir = directory.path().canonicalize().unwrap();
+        let package = "@a__b/c";
+        let colliding_package = "@a/b__c";
+        assert_eq!(
+            package.replacen('/', "__", 1),
+            colliding_package.replacen('/', "__", 1)
+        );
+        std::fs::write(
+            offline_dir.join("@a__b__c.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": package,
+                "maintainers": [{"name": "correct-publisher"}],
+                "_hermetic_dependent_count": 42,
+                "versions": {"1.0.0": {"name": package, "version": "1.0.0"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let metadata = load_offline_trust_scan_npm_metadata(&offline_dir, package, Some("1.0.0"))
+            .expect("metadata belongs to the requested package");
+        assert_eq!(
+            metadata.publisher_id.as_deref(),
+            Some("npm-maintainer:correct-publisher")
+        );
+        assert_eq!(metadata.dependent_count, Some(42));
+        let rejected =
+            load_offline_trust_scan_npm_metadata(&offline_dir, colliding_package, Some("1.0.0"))
+                .expect_err("the same filename must not confer another scope's metadata");
+        assert!(rejected.to_string().contains("package name does not match"));
     }
 
     #[test]
@@ -20176,6 +20302,199 @@ mod trust_scan_tests {
             60,
             true
         ));
+    }
+
+    #[test]
+    fn trust_sync_frontier_admission_requires_force_and_every_coverage_gate() {
+        let complete = TrustSyncAuditRefreshReport {
+            refreshed_count: 2,
+            vulnerabilities_found: 1,
+            ..TrustSyncAuditRefreshReport::default()
+        };
+        assert!(trust_sync_frontier_block_reason(true, &complete).is_none());
+        assert!(
+            trust_sync_frontier_block_reason(false, &complete)
+                .unwrap()
+                .contains("forced network refresh")
+        );
+        for (report, reason) in [
+            (
+                TrustSyncAuditRefreshReport {
+                    network_errors: 1,
+                    ..complete.clone()
+                },
+                "network or refresh error",
+            ),
+            (
+                TrustSyncAuditRefreshReport {
+                    risk_lowering_rejections: 1,
+                    ..complete.clone()
+                },
+                "clearance rejection",
+            ),
+            (
+                TrustSyncAuditRefreshReport {
+                    incomplete_version_scopes: 1,
+                    ..complete.clone()
+                },
+                "incomplete version scope",
+            ),
+        ] {
+            assert!(
+                trust_sync_frontier_block_reason(true, &report)
+                    .unwrap()
+                    .contains(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn trust_sync_positive_narrow_queries_and_refused_clean_queries_cannot_advance_frontier() {
+        use supply_chain::trust_card::{OsvRiskEvidenceScope, OsvRiskRefreshOutcome};
+
+        let now_secs = 2_000;
+        let mut registry =
+            supply_chain::trust_card::fixture_registry(now_secs).expect("fixture trust registry");
+        let scope = OsvRiskEvidenceScope {
+            versions: BTreeSet::from(["1.4.2".to_owned(), "2.0.0".to_owned()]),
+            unresolved: false,
+            vulnerability_ids: BTreeSet::from(["OSV-WIDER-SCOPE".to_owned()]),
+        };
+        assert!(matches!(
+            registry
+                .refresh_osv_risk_with_scope(
+                    "npm:@acme/auth-guard",
+                    &scope,
+                    false,
+                    now_secs,
+                    "wide-scope"
+                )
+                .unwrap(),
+            OsvRiskRefreshOutcome::Updated(_)
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = TrustCardCliRegistryState {
+            path: directory.path().join("scoped-trust-sync.json"),
+            registry,
+            cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
+        };
+        let positive =
+            refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, version| {
+                if name == "@acme/auth-guard" {
+                    assert_eq!(version, Some("1.4.2"));
+                }
+                Ok(TrustScanAuditMetadata {
+                    vulnerability_ids: if name == "@acme/auth-guard" {
+                        vec!["OSV-NARROW-QUERY".to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                    risk_lowering_authenticated: true,
+                })
+            });
+        assert_eq!(positive.network_errors, 0);
+        assert_eq!(positive.risk_lowering_rejections, 0);
+        assert_eq!(positive.incomplete_version_scopes, 1);
+        assert_eq!(positive.vulnerabilities_found, 1);
+        assert!(positive.refreshed_count > 0);
+        assert!(
+            trust_sync_frontier_block_reason(true, &positive)
+                .unwrap()
+                .contains("incomplete version scope")
+        );
+        assert!(
+            positive
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("single-version OSV refresh does not cover"))
+        );
+        let retained = state
+            .registry
+            .read("npm:@acme/auth-guard", now_secs + 120, "read-positive")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained
+                .osv_risk_baseline
+                .as_ref()
+                .unwrap()
+                .evidence_scope
+                .as_ref()
+                .unwrap()
+                .vulnerability_ids,
+            BTreeSet::from(["OSV-WIDER-SCOPE".to_owned(), "OSV-NARROW-QUERY".to_owned()])
+        );
+        let clean = refresh_trust_sync_audit_with(&mut state, now_secs + 240, true, |_, _| {
+            Ok(TrustScanAuditMetadata {
+                vulnerability_ids: Vec::new(),
+                risk_lowering_authenticated: true,
+            })
+        });
+        assert_eq!(clean.network_errors, 0);
+        assert_eq!(clean.risk_lowering_rejections, 1);
+        assert_eq!(clean.incomplete_version_scopes, 1);
+        let reason = trust_sync_frontier_block_reason(true, &clean).unwrap();
+        assert!(reason.contains("clearance rejection"));
+        assert!(reason.contains("incomplete version scope"));
+        assert_eq!(
+            state
+                .registry
+                .read("npm:@acme/auth-guard", now_secs + 240, "read-refused")
+                .unwrap()
+                .unwrap()
+                .card_hash,
+            retained.card_hash
+        );
+    }
+
+    #[test]
+    fn trust_sync_nonexact_card_queries_cannot_certify_complete_version_coverage() {
+        let dependency = RunPackageDependency {
+            extension_id: "npm:frontier-unresolved".to_owned(),
+            dependency_name: "frontier-unresolved".to_owned(),
+            version_requirement: "^1.0.0".to_owned(),
+            section: "dependencies".to_owned(),
+            lockfile_metadata: TrustScanLockfileMetadata::default(),
+        };
+        let input = build_trust_scan_card_input(
+            &dependency,
+            None,
+            &TrustScanDeepMetadata::default(),
+            &TrustScanAuditMetadata::default(),
+            1_000,
+        );
+        let mut registry = TrustCardRegistry::default();
+        registry.create(input, 1_000, "unresolved-input").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = TrustCardCliRegistryState {
+            path: directory.path().join("unresolved-trust-sync.json"),
+            registry,
+            cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
+        };
+        let cached = refresh_trust_sync_audit_with(&mut state, 1_001, false, |_, _| {
+            panic!("fresh cached cards do not make an OSV query")
+        });
+        assert_eq!(cached.incomplete_version_scopes, 0);
+        assert!(trust_sync_frontier_block_reason(false, &cached).is_some());
+
+        let queried = refresh_trust_sync_audit_with(&mut state, 1_002, true, |_, version| {
+            assert_eq!(version, Some("^1.0.0"));
+            Ok(TrustScanAuditMetadata {
+                vulnerability_ids: Vec::new(),
+                risk_lowering_authenticated: true,
+            })
+        });
+        assert_eq!(queried.refreshed_count, 1);
+        assert_eq!(queried.network_errors, 0);
+        assert_eq!(queried.risk_lowering_rejections, 0);
+        assert_eq!(queried.incomplete_version_scopes, 1);
+        assert!(
+            trust_sync_frontier_block_reason(true, &queried)
+                .unwrap()
+                .contains("incomplete version scope")
+        );
     }
 
     #[test]
@@ -21336,23 +21655,26 @@ mod trust_command_tests {
             vulnerabilities_found: 6,
             network_errors: 7,
             risk_lowering_rejections: 0,
+            incomplete_version_scopes: 8,
             warnings: Vec::new(),
         };
 
-        let rendered = render_trust_sync_summary_from_report(&trust_sync_cli_report(
-            &cards,
-            &sync_report,
-            &audit_report,
-            true,
-        ));
+        let report = trust_sync_cli_report(&cards, &sync_report, &audit_report, true);
+        let rendered = render_trust_sync_summary_from_report(&report);
+        let json = serde_json::to_value(&report).unwrap();
 
         assert!(rendered.contains("force=true"));
         assert!(rendered.contains("refreshed=5"));
         assert!(rendered.contains("vulnerabilities=6"));
         assert!(rendered.contains("network_errors=7"));
+        assert!(rendered.contains("incomplete_version_scopes=8"));
         assert!(rendered.contains("forced_refreshes=4"));
         assert!(rendered.contains("revoked=1"));
         assert!(rendered.contains("quarantined=1"));
+        assert_eq!(json["incomplete_version_scopes"], 8);
+        let reason = json["revocation_frontier_block_reason"].as_str().unwrap();
+        assert!(reason.contains("7 network or refresh error(s)"));
+        assert!(reason.contains("8 trust card(s) have incomplete version scope"));
     }
 
     #[test]
@@ -24095,12 +24417,6 @@ fn trust_scan_user_agent() -> String {
 /// Validate that a package name is safe for URL construction.
 /// npm package names have strict format requirements that we can enforce.
 fn validate_package_name(name: &str) -> anyhow::Result<()> {
-    // npm package name validation rules:
-    // - length between 1 and 214 characters
-    // - lowercase only
-    // - can contain hyphens, dots, underscores
-    // - cannot start with . or _
-    // - no URL-unsafe characters
     if name.is_empty() || name.len() > 214 {
         anyhow::bail!(
             "Package name length must be 1-214 characters, got {}",
@@ -24108,21 +24424,33 @@ fn validate_package_name(name: &str) -> anyhow::Result<()> {
         );
     }
 
-    if name.starts_with('.') || name.starts_with('_') {
-        anyhow::bail!("Package name cannot start with '.' or '_'");
+    // A scope introduces exactly one separator. Validate both components
+    // under the same conservative policy as an unscoped package; callers
+    // still percent-encode the whole name into a single URL path component.
+    let scoped = name.starts_with('@');
+    let components: Vec<_> = name.strip_prefix('@').unwrap_or(name).split('/').collect();
+    if components.len() != if scoped { 2 } else { 1 } {
+        anyhow::bail!("Package name must be unscoped or have the form '@scope/name'");
     }
-
-    // Only allow lowercase alphanumeric, hyphens, dots, and underscores
-    // This is stricter than npm spec but safer for URL construction
-    for ch in name.chars() {
-        if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '-' && ch != '.' && ch != '_' {
-            anyhow::bail!("Package name contains invalid character: '{}'", ch);
+    for component in components {
+        if component.is_empty() || component.starts_with('.') || component.starts_with('_') {
+            anyhow::bail!(
+                "Package name components must be nonempty and cannot start with '.' or '_'"
+            );
         }
-    }
-
-    // Additional safety: reject names that could cause path traversal
-    if name.contains("..") || name.contains("//") {
-        anyhow::bail!("Package name cannot contain '..' or '//'");
+        for ch in component.chars() {
+            if !ch.is_ascii_lowercase()
+                && !ch.is_ascii_digit()
+                && ch != '-'
+                && ch != '.'
+                && ch != '_'
+            {
+                anyhow::bail!("Package name contains invalid character: '{}'", ch);
+            }
+        }
+        if component.contains("..") {
+            anyhow::bail!("Package name cannot contain '..'");
+        }
     }
 
     Ok(())
@@ -24312,25 +24640,50 @@ fn parse_trust_scan_npm_metadata(
     payload: &serde_json::Value,
     dependency_name: &str,
     preferred_version: Option<&str>,
-) -> TrustScanDeepMetadata {
+) -> Result<TrustScanDeepMetadata> {
+    anyhow::ensure!(
+        payload.is_object(),
+        "npm registry metadata for {dependency_name} must be an object"
+    );
+    anyhow::ensure!(
+        payload.get("name").and_then(serde_json::Value::as_str) == Some(dependency_name),
+        "npm registry metadata package name does not match requested package {dependency_name}"
+    );
     let versions = payload
         .get("versions")
         .and_then(serde_json::Value::as_object);
-    let resolved_version = match preferred_version {
-        Some(version) => versions
-            .and_then(|versions| versions.get(version))
-            .filter(|version_payload| version_payload.is_object())
-            .map(|_| version.to_owned()),
+    let selected_version = match preferred_version {
+        Some(version) => Some(version),
         None => payload
             .get("dist-tags")
             .and_then(serde_json::Value::as_object)
             .and_then(|tags| tags.get("latest"))
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string),
-    };
-    let version_payload = resolved_version
-        .as_deref()
-        .and_then(|version| versions.and_then(|versions| versions.get(version)));
+            .and_then(serde_json::Value::as_str),
+    }
+    .ok_or_else(|| {
+        anyhow::anyhow!("npm registry metadata for {dependency_name} has no selected version")
+    })?;
+    validate_version_string(selected_version).with_context(|| {
+        format!("invalid selected npm registry version for {dependency_name}: {selected_version}")
+    })?;
+    let selected_payload = versions
+        .and_then(|versions| versions.get(selected_version))
+        .filter(|version_payload| version_payload.is_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "npm registry metadata for {dependency_name} does not contain selected version {selected_version}; refusing to use another version's provenance"
+            )
+        })?;
+    for (field, expected) in [("name", dependency_name), ("version", selected_version)] {
+        if let Some(value) = selected_payload.get(field) {
+            anyhow::ensure!(
+                value.as_str() == Some(expected),
+                "npm registry metadata for {dependency_name}@{selected_version} has a contradictory {field} field"
+            );
+        }
+    }
+    let resolved_version = Some(selected_version.to_owned());
+    let version_payload = Some(selected_payload);
 
     let maintainer = version_payload
         .and_then(|version| {
@@ -24409,7 +24762,7 @@ fn parse_trust_scan_npm_metadata(
         .as_deref()
         .map(|version| supply_chain::release_history::release_window(payload, version))
         .unwrap_or_default();
-    TrustScanDeepMetadata {
+    Ok(TrustScanDeepMetadata {
         publisher_id: Some(publisher_id),
         publisher_display_name: Some(publisher_display_name),
         published_at,
@@ -24418,7 +24771,7 @@ fn parse_trust_scan_npm_metadata(
         registry_integrity_hashes,
         registry_signals: supply_chain::npm_registry_signals::parse_registry_signals(payload),
         release_window,
-    }
+    })
 }
 
 /// Score the releases leading up to the resolved version and, when a finding
@@ -24632,14 +24985,7 @@ fn fetch_trust_scan_npm_metadata(
     )?;
     let payload = serde_json::from_str::<serde_json::Value>(&body)
         .with_context(|| format!("invalid npm registry JSON for {dependency_name}"))?;
-    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
-    if let Some(expected_version) = preferred_version
-        && metadata.resolved_version.as_deref() != Some(expected_version)
-    {
-        anyhow::bail!(
-            "npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
-        );
-    }
+    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version)?;
     if let Some(resolved_version) = metadata.resolved_version.clone() {
         metadata.dependent_count = Some(fetch_trust_scan_dependent_count(
             dependency_name,
@@ -25380,14 +25726,7 @@ fn load_offline_trust_scan_npm_metadata(
             canonical_file.display()
         )
     })?;
-    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
-    if let Some(expected_version) = preferred_version
-        && metadata.resolved_version.as_deref() != Some(expected_version)
-    {
-        anyhow::bail!(
-            "offline npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
-        );
-    }
+    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version)?;
     metadata.dependent_count = payload
         .get("_hermetic_dependent_count")
         .and_then(serde_json::Value::as_u64);
@@ -30986,6 +31325,8 @@ fn trust_sync_cli_report(
         vulnerabilities: audit_report.vulnerabilities_found,
         network_errors: audit_report.network_errors,
         risk_lowering_rejections: audit_report.risk_lowering_rejections,
+        incomplete_version_scopes: audit_report.incomplete_version_scopes,
+        revocation_frontier_block_reason: trust_sync_frontier_block_reason(force, audit_report),
         cache_hits: sync_report.cache_hits,
         cache_misses: sync_report.cache_misses,
         stale_refreshes: sync_report.stale_refreshes,
@@ -30999,13 +31340,14 @@ fn trust_sync_cli_report(
 
 fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String {
     format!(
-        "trust sync completed: force={} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={}",
+        "trust sync completed: force={} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} incomplete_version_scopes={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={}",
         report.force,
         report.cards,
         report.refreshed,
         report.vulnerabilities,
         report.network_errors,
         report.risk_lowering_rejections,
+        report.incomplete_version_scopes,
         report.cache_hits,
         report.cache_misses,
         report.stale_refreshes,
@@ -31014,6 +31356,38 @@ fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String 
         report.quarantined,
         report.critical_risk
     )
+}
+
+/// A successful individual query proves freshness only for its complete scope.
+/// A refusal or an uncovered retained version prevents the aggregate frontier
+/// from advancing even when every HTTP request succeeded.
+fn trust_sync_frontier_block_reason(
+    force: bool,
+    report: &TrustSyncAuditRefreshReport,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if !force {
+        reasons.push("a forced network refresh is required".to_owned());
+    }
+    if report.network_errors > 0 {
+        reasons.push(format!(
+            "{} network or refresh error(s)",
+            report.network_errors
+        ));
+    }
+    if report.risk_lowering_rejections > 0 {
+        reasons.push(format!(
+            "{} OSV clearance rejection(s)",
+            report.risk_lowering_rejections
+        ));
+    }
+    if report.incomplete_version_scopes > 0 {
+        reasons.push(format!(
+            "{} trust card(s) have incomplete version scope",
+            report.incomplete_version_scopes
+        ));
+    }
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
 fn trust_sync_card_needs_network_refresh(
@@ -31069,6 +31443,13 @@ where
         };
         if !trust_sync_card_needs_network_refresh(&card, now_secs, state.cache_ttl_secs, force) {
             continue;
+        }
+        if !card.osv_scope_covered_by_card_version() {
+            report.incomplete_version_scopes = report.incomplete_version_scopes.saturating_add(1);
+            report.warnings.push(format!(
+                "{}@{}: a single-version OSV refresh does not cover the retained version scope or unresolved placements; findings are retained, but this sync cannot advance the revocation frontier",
+                package_name, card.extension.version
+            ));
         }
 
         match fetcher(package_name, Some(card.extension.version.as_str())) {
@@ -48772,16 +49153,19 @@ fn main() -> Result<()> {
                 }
                 // The revocation frontier advances only on a forced refresh in
                 // which every trust signal was fetched from the network without
-                // error; cached answers and partial failures prove nothing new
-                // about revocation freshness (bd-reality-20260923-26n9r.1).
-                if args.force && audit_report.network_errors == 0 {
+                // error and without a clearance refusal or uncovered retained
+                // version scope. Narrow answers cannot certify wider freshness
+                // (bd-reality-20260923-26n9r.1).
+                let frontier_block_reason =
+                    trust_sync_frontier_block_reason(args.force, &audit_report);
+                if frontier_block_reason.is_none() {
                     if let Err(err) =
                         supply_chain::trust_card_registry_store::record_revocation_frontier(
                             &state.path,
                             &state.trust_config,
                             now_secs,
                             &format!(
-                                "trust sync --force ({} trust card(s) refreshed from the network, 0 network errors)",
+                                "trust sync --force ({} trust card(s) refreshed from the network, 0 network errors, 0 clearance rejections, complete version scopes)",
                                 audit_report.refreshed_count
                             ),
                         )
@@ -48792,10 +49176,10 @@ fn main() -> Result<()> {
                             anyhow::anyhow!(err.to_string()),
                         );
                     }
-                } else if !args.json {
-                    eprintln!(
-                        "note: revocation frontier not advanced (requires `trust sync --force` with no network errors)"
-                    );
+                } else if !args.json
+                    && let Some(reason) = frontier_block_reason
+                {
+                    eprintln!("note: revocation frontier not advanced: {reason}");
                 }
                 for warning in &audit_report.warnings {
                     eprintln!("warning: {warning}");
@@ -52979,6 +53363,25 @@ mod run_trust_gate_tests {
             // Invalid: special characters
             assert!(validate_package_name("package@evil").is_err());
             assert!(validate_package_name("package$evil").is_err());
+            for name in [
+                "@scope",
+                "@/package",
+                "@scope/",
+                "@scope/package/extra",
+                "@scope//package",
+                "@@scope/package",
+                "@.scope/package",
+                "@scope/_package",
+                "@Scope/package",
+                "@scope/Package",
+                "@scope/package..name",
+                "@scope/package%2Fextra",
+                "@scope/package?redirect=evil",
+                "@scope/package#fragment",
+                "@scope\\package",
+            ] {
+                assert!(validate_package_name(name).is_err(), "{name}");
+            }
         }
 
         #[test]
@@ -52990,6 +53393,23 @@ mod run_trust_gate_tests {
             assert!(validate_package_name("package.name").is_ok());
             assert!(validate_package_name("package_name").is_ok());
             assert!(validate_package_name("package123").is_ok());
+            assert!(validate_package_name("@scope/package").is_ok());
+            assert!(validate_package_name("@acme-tools/shared_runtime").is_ok());
+            assert!(validate_package_name("@scope.name/package.v2").is_ok());
+        }
+
+        #[test]
+        fn scoped_package_names_are_encoded_as_one_registry_url_component() {
+            let encoded = percent_encode_path_component("@acme-tools/shared_runtime");
+            assert_eq!(encoded, "%40acme-tools%2Fshared_runtime");
+            for url in [
+                format!("{TRUST_SCAN_NPM_REGISTRY_BASE_URL}/{encoded}"),
+                format!(
+                    "{TRUST_SCAN_DEPS_DEV_BASE_URL}/systems/npm/packages/{encoded}/versions/1.2.3:dependents"
+                ),
+            ] {
+                assert!(validate_trust_scan_url(&url).is_ok(), "{url}");
+            }
         }
 
         #[test]
