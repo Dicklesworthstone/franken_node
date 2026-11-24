@@ -261,6 +261,8 @@ impl NativeSessionEffectJournalWriter {
                 File::open(protected_root)?.sync_all()?;
             }
         }
+        #[cfg(not(unix))]
+        let _ = (&directory, created_directory);
         Ok(writer)
     }
 

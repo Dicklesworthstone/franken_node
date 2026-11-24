@@ -1546,6 +1546,7 @@ fn assert_timed_out_connection_join_does_not_detach_worker_impl() {
         connection_worker_panicked: Arc::new(AtomicBool::new(false)),
         listener_handle: None,
         persistence_handle: None,
+        persistence_done: None,
     };
 
     let err = handle
@@ -2265,6 +2266,7 @@ mod tests {
             connection_worker_panicked: Arc::new(AtomicBool::new(false)),
             listener_handle: None,
             persistence_handle: Some(worker),
+            persistence_done: None,
         };
 
         let report = handle
@@ -2309,6 +2311,7 @@ mod tests {
             connection_worker_panicked: Arc::new(AtomicBool::new(false)),
             listener_handle: None,
             persistence_handle: Some(worker),
+            persistence_done: None,
         };
 
         while !handle
@@ -2372,6 +2375,7 @@ mod tests {
             connection_worker_panicked: Arc::new(AtomicBool::new(false)),
             listener_handle: Some(listener),
             persistence_handle: Some(worker),
+            persistence_done: None,
         };
 
         let err = handle
@@ -2416,6 +2420,7 @@ mod tests {
             connection_worker_panicked: Arc::new(AtomicBool::new(false)),
             listener_handle: None,
             persistence_handle: Some(worker),
+            persistence_done: None,
         };
 
         let err = handle
@@ -2533,6 +2538,7 @@ mod tests {
             connection_worker_panicked: Arc::new(AtomicBool::new(false)),
             listener_handle: None,
             persistence_handle: None,
+            persistence_done: None,
         };
 
         let err = handle

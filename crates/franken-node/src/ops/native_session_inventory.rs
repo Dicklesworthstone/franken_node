@@ -1043,6 +1043,7 @@ fn validate_outcome(
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verify_admission_capture(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -1716,6 +1717,8 @@ fn retain_admission_record_with_root(
             std::fs::File::open(protected_root)?.sync_all()?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = (created_directory, published_new);
     Ok(())
 }
 
@@ -1789,6 +1792,8 @@ fn retain_admission_receipt_with_root(
             std::fs::File::open(protected_root)?.sync_all()?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = (created_directory, published_new);
     Ok(())
 }
 
@@ -1833,12 +1838,22 @@ fn authenticate_inventory_records(
             Ok(_) => ensure_runtime_evidence_directory(&directory, true)?,
         }
     }
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
     let key = root.verifying_key();
+    let mut ensured_capture_dirs = false;
     for record in records {
-        verify_admission_capture(protected_root, &record.admission)?;
+        if record.admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
+            bail!("native-session capture is outside its protected capture directory");
+        }
+        if !ensured_capture_dirs {
+            ensure_runtime_evidence_directory(&capture_directory, true)?;
+            ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
+            ensured_capture_dirs = true;
+        }
+        verify_admission_capture_with_root(protected_root, &record.admission, &key)?;
         let admission = read_admission_receipt(protected_root, &record.admission, &key)?;
         let outcome = read_outcome_receipt(protected_root, &record.admission, &key)?;
         if admission.is_none() && outcome.is_none() {
@@ -1914,6 +1929,8 @@ fn retain_outcome_receipt(
             std::fs::File::open(protected_root)?.sync_all()?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = (created_directory, published_new);
     Ok(())
 }
 
@@ -1977,15 +1994,25 @@ fn retained_outcome_recoveries<'a>(
         Err(error) => return Err(error).context("inspect retained native-session outcomes"),
         Ok(_) => ensure_runtime_evidence_directory(&directory, true)?,
     }
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
+    let key = root.verifying_key();
+    let mut ensured_capture_dirs = false;
     let mut recoveries = Vec::new();
     for record in records.iter().filter(|record| record.outcome.is_none()) {
-        if let Some(receipt) =
-            read_outcome_receipt(protected_root, &record.admission, &root.verifying_key())?
-        {
-            verify_admission_capture(protected_root, &record.admission)?;
+        if let Some(receipt) = read_outcome_receipt(protected_root, &record.admission, &key)? {
+            if record.admission.identity_capture_path.parent() != Some(capture_directory.as_path())
+            {
+                bail!("native-session capture is outside its protected capture directory");
+            }
+            if !ensured_capture_dirs {
+                ensure_runtime_evidence_directory(&capture_directory, true)?;
+                ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
+                ensured_capture_dirs = true;
+            }
+            verify_admission_capture_with_root(protected_root, &record.admission, &key)?;
             recoveries.push((&record.admission, receipt.outcome));
         }
     }
