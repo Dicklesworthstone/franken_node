@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![cfg(any(not(test), franken_node_inline_tests))]
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub use frankenengine_node::{ActionableError, bounded_read, bounded_read_to_string, lock_utils};
 
 /// Maximum file size limits to prevent DoS via parser bombs

@@ -1662,6 +1662,7 @@ dependencies = [
  "insta",
  "lazy_static",
  "loom",
+ "mimalloc",
  "nix",
  "proptest",
  "rand 0.8.6",

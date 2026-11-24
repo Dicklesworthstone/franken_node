@@ -197,6 +197,10 @@ tree-sitter-typescript = "=0.23.2"
 blake3 = { version = "1.5", optional = true }
 lazy_static = "1.5.0"
 loom = { version = "0.7", optional = true }
+# Already resolved in Cargo.lock via frankenengine-engine; match frankenctl's
+# global allocator to reduce glibc ptmalloc2 allocation/free overhead across
+# JS object, parser, and fsqlite hot paths.
+mimalloc = { version = "0.1", default-features = false }
 # bd-reality-20260820-w0fc6.3: promoted from [dev-dependencies] to the live
 # persistence path — the durable fleet transport opens this crate directly.
 #
