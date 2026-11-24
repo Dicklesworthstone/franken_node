@@ -1229,6 +1229,12 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
 
 #[test]
 fn incident_counterfactual_json_promotes_signed_contracts() {
+    use frankenengine_verifier_sdk::counterfactual::{
+        CounterfactualIncidentError, CounterfactualIncidentTrust, CounterfactualPromotionError,
+        verify_counterfactual_promotion,
+    };
+    use sha2::{Digest, Sha256};
+
     let workspace = config_only_workspace();
     configure_replay_bundle_signing_key(workspace.path());
     let evidence_path = workspace
@@ -1258,11 +1264,20 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
     let trust_anchor_path = workspace.path().join("keys/replay-trust-anchor.pub");
     write_replay_trust_anchor(&trust_anchor_path);
     let trust_anchor_arg = trust_anchor_path.to_string_lossy().to_string();
-    let promotion_key_arg = workspace
-        .path()
-        .join("keys/receipt-signing.key")
-        .to_string_lossy()
-        .to_string();
+    // Retain the independently selected incident before receiving the report.
+    // Its exporter and the promotion operator deliberately use different keys.
+    let baseline_bytes = fs::read(workspace.path().join("INC-E2E-CF-PROMOTE-001.fnbundle"))
+        .expect("read selected baseline");
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&baseline_bytes).expect("parse selected baseline");
+    let baseline_pin = baseline["integrity_hash"].as_str().expect("baseline pin");
+    let exporter_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]).verifying_key();
+    let operator = ed25519_dalek::SigningKey::from_bytes(&[0x67; 32]);
+    let operator_key = operator.verifying_key();
+    let promotion_key_path = workspace.path().join("keys/promotion-signing.key");
+    fs::write(&promotion_key_path, hex::encode(operator.to_bytes()))
+        .expect("write independent promotion operator key");
+    let promotion_key_arg = promotion_key_path.to_string_lossy().to_string();
 
     let output = run_cli_in_workspace(
         workspace.path(),
@@ -1386,6 +1401,81 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
             .len()
             > 40
     );
+
+    // Consume the exact bytes the real operator command emitted. No SDK-side
+    // signature creation, report normalization or secret operator key is needed.
+    let trust = CounterfactualIncidentTrust {
+        expected_baseline_integrity_hash: baseline_pin,
+        trusted_counterfactual_signer: &operator_key,
+        trusted_bundle_signer: &exporter_key,
+        trusted_run_signer: None,
+        trusted_product_root: None,
+    };
+    let verified = verify_counterfactual_promotion(&baseline_bytes, &output.stdout, &trust)
+        .expect("independent SDK accepts the real product's three signed contracts");
+    assert_eq!(verified.baseline.integrity_hash, baseline_pin);
+    assert_eq!(verified.baseline.incident_id, "INC-E2E-CF-PROMOTE-001");
+    assert_eq!(verified.baseline.event_count, 6);
+    assert_eq!(
+        verified.baseline.signer_public_key_hex,
+        hex::encode(exporter_key.as_bytes())
+    );
+    assert_eq!(
+        verified.operator_public_key_hex,
+        hex::encode(operator_key.as_bytes())
+    );
+    assert_ne!(
+        verified.operator_public_key_hex,
+        verified.baseline.signer_public_key_hex
+    );
+    assert_eq!(verified.operator_id, "incident-counterfactual-e2e");
+    assert_eq!((verified.executor, verified.mode, verified.result_count), ("synthetic", "single", 1));
+    assert_eq!(verified.report_sha256, hex::encode(Sha256::digest(&output.stdout)));
+    assert_eq!(
+        verified.counterfactual_digest,
+        report["counterfactual_digest"].as_str().unwrap()
+    );
+    assert_eq!(
+        verified.promotion_contract_digest,
+        report["promotion_contract_digest"].as_str().unwrap()
+    );
+    assert_eq!(verified.expected_loss_delta, rollout["expected_loss_delta"].as_i64().unwrap());
+    assert!(verified.valid_until_epoch_ms > verified.valid_from_epoch_ms);
+    assert!(verified.run_origin.is_none() && verified.runtime_origin.is_none());
+    assert!(!verified.guest_execution_verified && !verified.rollout_authorized);
+
+    // Possession of the bundle authority must not substitute for the operator.
+    let wrong_operator = CounterfactualIncidentTrust {
+        trusted_counterfactual_signer: &exporter_key,
+        ..trust
+    };
+    assert_eq!(
+        verify_counterfactual_promotion(&baseline_bytes, &output.stdout, &wrong_operator),
+        Err(CounterfactualPromotionError::SignatureInvalid)
+    );
+    let foreign_pin = "00".repeat(32);
+    let wrong_incident = CounterfactualIncidentTrust {
+        expected_baseline_integrity_hash: &foreign_pin,
+        ..trust
+    };
+    assert_eq!(
+        verify_counterfactual_promotion(&baseline_bytes, &output.stdout, &wrong_incident),
+        Err(CounterfactualPromotionError::Incident(
+            CounterfactualIncidentError::ExpectedBaselineMismatch
+        ))
+    );
+
+    // A synthetic assessment cannot be relabeled as the production model.
+    let mut relabeled = report.clone();
+    relabeled["executor"] = json!("production");
+    assert!(matches!(
+        verify_counterfactual_promotion(
+            &baseline_bytes,
+            &serde_json::to_vec(&relabeled).unwrap(),
+            &trust
+        ),
+        Err(CounterfactualPromotionError::ContextMismatch { .. })
+    ));
 }
 
 // Boundary testing for malformed evidence packages (bd-1wdtq)

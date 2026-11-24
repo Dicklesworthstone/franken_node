@@ -21,6 +21,7 @@ const SCOPES = Object.freeze({
   "publisher-source-trust": "authenticated_publisher_source_trust",
   "counterfactual-receipt": "authenticated_counterfactual_receipt",
   "counterfactual-incident": "authenticated_counterfactual_incident",
+  "counterfactual-promotion": "authenticated_counterfactual_promotion",
   "ltv-evidence": "authenticated_ltv_anteriority",
   "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
   "fleet-epoch-commit": "authenticated_fleet_epoch_commit",
@@ -66,6 +67,9 @@ const publisherText = (value, limit) => boundedText(value) && value === value.tr
 const digest = (value) => typeof value === "string" && value.length === 71 && /^sha256:[0-9a-f]{64}$/u.test(value);
 const decimalLimit = (value, limit) => typeof value === "string" && value === value.trim() && /^[1-9][0-9]{0,19}$/u.test(value)
   && BigInt(value) <= limit;
+const signedI64Decimal = (value) => typeof value === "string" && value === value.trim()
+  && /^(0|-?[1-9][0-9]{0,18})$/u.test(value)
+  && BigInt(value) >= -9_223_372_036_854_775_808n && BigInt(value) <= 9_223_372_036_854_775_807n;
 
 // Four-digit RFC3339 years, non-leap seconds, and exact nanosecond precision.
 function instantNs(value) {
@@ -457,6 +461,32 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   if (format === "publisher-source-trust") {
     return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge);
   }
+  if (format === "counterfactual-promotion") {
+    const baselineScope = runtimeAnchor !== undefined ? "authenticated_runtime_incident"
+      : runAnchor !== undefined ? "authenticated_run_incident" : "authenticated_recorded_incident";
+    return keys(facts, ["baseline_integrity_hash", "signer_public_key_hex", "operator_id",
+      "report_sha256", "counterfactual_digest", "counterfactual_output_sha256",
+      "promotion_contract_digest", "mitigation_id", "executor", "mode", "result_count",
+      "expected_loss_delta", "valid_from_epoch_ms", "valid_until_epoch_ms",
+      "baseline_scope", "baseline", "guest_execution_verified", "rollout_authorized"])
+      && facts.signer_public_key_hex === anchor
+      && typeof expectedBaseline === "string" && facts.baseline_integrity_hash === expectedBaseline
+      && ["report_sha256", "counterfactual_output_sha256"].every((key) =>
+        typeof facts[key] === "string" && facts[key].length === 64 && /^[0-9a-f]{64}$/u.test(facts[key]))
+      && ["counterfactual_digest", "promotion_contract_digest"].every((key) => digest(facts[key]))
+      && ["operator_id", "mitigation_id"].every((key) => publisherText(facts[key], 4096))
+      && ["synthetic", "production"].includes(facts.executor)
+      && ["single", "sweep"].includes(facts.mode)
+      && count(facts.result_count) && facts.result_count >= 1 && facts.result_count <= 20
+      && (facts.mode === "sweep" || facts.result_count === 1)
+      && ["expected_loss_delta", "valid_from_epoch_ms", "valid_until_epoch_ms"].every((key) => signedI64Decimal(facts[key]))
+      && BigInt(facts.expected_loss_delta) > 0n
+      && BigInt(facts.valid_until_epoch_ms) > BigInt(facts.valid_from_epoch_ms)
+      && facts.baseline_scope === baselineScope && facts.guest_execution_verified === false
+      && facts.rollout_authorized === false && typeof incidentAnchor === "string"
+      && factsValid(facts.baseline, "incident-bundle", incidentAnchor, runAnchor, runtimeAnchor)
+      && facts.baseline.integrity_hash === expectedBaseline;
+  }
   if (format === "counterfactual-incident") {
     const baselineScope = runtimeAnchor !== undefined ? "authenticated_runtime_incident"
       : runAnchor !== undefined ? "authenticated_run_incident" : "authenticated_recorded_incident";
@@ -554,6 +584,10 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * caller-pinned raw lowercase baseline integrity hash. The primary key and
  * detached signature authenticate the receipt. Optional run/runtime keys
  * strengthen only the nested baseline origin, never certify guest execution.
+ * Counterfactual promotions authenticate the product report's embedded operator
+ * signatures with the primary key and the same independent baseline authorities.
+ * They accept no detached signature and grant no current rollout authority.
+ * Loss deltas and validity-window milliseconds remain exact signed i64 strings.
  * Native-session forensics authenticates retained supervisor observations; a pending
  * outcome stays pending, and durable journal prefixes never certify complete history.
  * Version 3 also authenticates retained source capsule content without replaying it.
@@ -609,21 +643,21 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     if (trustedFleetPolicy !== undefined) throw new VerifierError("INPUT_INVALID", "fleet policy applies only to fleet verification formats");
     if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
   }
-  if (format === "counterfactual-incident") {
+  if (["counterfactual-incident", "counterfactual-promotion"].includes(format)) {
     if (!hex(trustedIncidentPublicKeyHex, 64)) throw new VerifierError("INCIDENT_ANCHOR_INVALID", "an independent incident exporter public key is required");
     if (typeof expectedBaselineIntegrityHash !== "string" || expectedBaselineIntegrityHash.length !== 64
         || !/^[0-9a-f]{64}$/u.test(expectedBaselineIntegrityHash)) {
       throw new VerifierError("EXPECTED_BASELINE_INVALID", "an exact lowercase baseline integrity hash is required");
     }
   } else if (trustedIncidentPublicKeyHex !== undefined || expectedBaselineIntegrityHash !== undefined) {
-    throw new VerifierError("INPUT_INVALID", "incident exporter trust and baseline pins require counterfactual-incident");
+    throw new VerifierError("INPUT_INVALID", "incident exporter trust and baseline pins require a composed counterfactual format");
   }
   if (trustedRunPublicKeyHex !== undefined) {
-    if (!["incident-bundle", "counterfactual-incident"].includes(format)) throw new VerifierError("INPUT_INVALID", "original-run trust requires an incident verification format");
+    if (!["incident-bundle", "counterfactual-incident", "counterfactual-promotion"].includes(format)) throw new VerifierError("INPUT_INVALID", "original-run trust requires an incident verification format");
     if (!hex(trustedRunPublicKeyHex, 64)) throw new VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key");
   }
   if (trustedRuntimePublicKeyHex !== undefined) {
-    if (!["incident-bundle", "counterfactual-incident"].includes(format) || trustedRunPublicKeyHex === undefined) throw new VerifierError("INPUT_INVALID", "runtime trust requires incident verification and original-run trust");
+    if (!["incident-bundle", "counterfactual-incident", "counterfactual-promotion"].includes(format) || trustedRunPublicKeyHex === undefined) throw new VerifierError("INPUT_INVALID", "runtime trust requires incident verification and original-run trust");
     if (!hex(trustedRuntimePublicKeyHex, 64)) throw new VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key");
   }
   const publisherTrustOptions = [trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex,
@@ -651,7 +685,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const runtimeAnchor = trustedRuntimePublicKeyHex?.toLowerCase();
   const revocationAnchor = trustedRevocationPublicKeyHex?.toLowerCase();
   const provenanceAnchor = trustedProvenancePublicKeyHex?.toLowerCase();
-  const scope = format === "counterfactual-incident" ? SCOPES[format]
+  const scope = ["counterfactual-incident", "counterfactual-promotion"].includes(format) ? SCOPES[format]
     : runtimeAnchor !== undefined ? "authenticated_runtime_incident" : runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
   const args = ["verify", "--format", format];
   if (fleetPolicy !== undefined) args.push("--trusted-fleet-policy", fleetPolicy.path);
@@ -670,7 +704,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"].includes(format)) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
-  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual format");
+  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "this format does not accept a detached signature");
   return new Promise((resolve, reject) => {
     const child = execFile(verifier, args, {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),

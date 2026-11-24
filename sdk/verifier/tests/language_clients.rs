@@ -142,6 +142,10 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             >= 35,
         "independent coordinator authority, dual-domain commit and supervisor controls must execute",
     );
+    assert!(
+        cases.iter().filter(|case| case["format"] == "counterfactual-promotion").count() >= 30,
+        "independent signed promotion and nested contract refusal matrix must execute",
+    );
     for case in &cases {
         let mut verifier = Command::new(root.join("verifier"));
         verifier
@@ -271,6 +275,19 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                     response["facts"]["baseline"]["integrity_hash"],
                     case["cf_baseline"]
                 );
+                (
+                    &response["facts"]["baseline_scope"],
+                    &response["facts"]["baseline"],
+                )
+            } else if case["format"] == "counterfactual-promotion" {
+                assert_eq!(response["scope"], "authenticated_counterfactual_promotion");
+                for (key, expected) in case["promotion_expected"].as_object().unwrap() {
+                    assert_eq!(&response["facts"][key], expected, "promotion fact {key}");
+                }
+                assert_eq!(response["facts"]["baseline"]["integrity_hash"], case["cf_baseline"]);
+                assert_eq!(response["facts"]["baseline"]["signer_public_key_hex"], case["incident_anchor"]);
+                assert_eq!(response["facts"]["guest_execution_verified"], false);
+                assert_eq!(response["facts"]["rollout_authorized"], false);
                 (
                     &response["facts"]["baseline_scope"],
                     &response["facts"]["baseline"],

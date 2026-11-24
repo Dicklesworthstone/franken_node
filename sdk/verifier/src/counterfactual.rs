@@ -1,12 +1,14 @@
 //! Counterfactual replay receipt verification for external verifiers.
 //!
-//! The producer-side counterfactual replay tool signs the deterministic JSON
-//! emitted by `tools::counterfactual_replay::to_canonical_json`. This module
-//! mirrors that key-sorted JSON canonicalization and verifies the detached
-//! Ed25519 receipt signature without depending on franken-node internals.
+//! This module verifies detached signatures over canonical simulation output
+//! and the existing rollout/rollback/promotion receipts emitted by the product's
+//! `incident counterfactual --json --promote` command. Both paths authenticate an
+//! independently selected original incident without executing the guest or
+//! depending on franken-node internals.
 
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +38,8 @@ const MAX_COUNTERFACTUAL_OUTPUT_DEPTH: usize = 128;
 /// authority, product root and counterfactual signer have separate roles.
 pub struct CounterfactualIncidentTrust<'a> {
     pub expected_baseline_integrity_hash: &'a str,
+    /// Simulation signer for detached receipts; promotion operator when
+    /// verifying the product's embedded rollout/rollback/promotion contracts.
     pub trusted_counterfactual_signer: &'a VerifyingKey,
     pub trusted_bundle_signer: &'a VerifyingKey,
     pub trusted_run_signer: Option<&'a VerifyingKey>,
@@ -59,6 +63,94 @@ pub struct VerifiedCounterfactualIncident {
     pub mode: &'static str,
     pub result_count: usize,
     pub guest_execution_verified: bool,
+}
+
+/// Independently authenticated historical promotion contracts from the product's
+/// `franken-node/incident-counterfactual-report/v2` report.
+///
+/// The model discriminator, simulation, original incident and all three signed
+/// contracts are bound together. Expected loss remains an operator-signed model
+/// assessment. This does not execute guest code, evaluate current deployment
+/// policy, consult a clock or grant live rollout authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCounterfactualPromotion {
+    pub baseline: VerifiedIncidentBundle,
+    pub run_origin: Option<VerifiedRunOrigin>,
+    pub runtime_origin: Option<VerifiedRuntimeOrigin>,
+    pub operator_public_key_hex: String,
+    pub operator_id: String,
+    /// SHA-256 of the exact report bytes supplied to this verification.
+    pub report_sha256: String,
+    /// Domain-separated report commitment, including the signed model identity.
+    pub counterfactual_digest: String,
+    /// SHA-256 of the canonical simulation output without the report framing.
+    pub counterfactual_output_sha256: String,
+    pub promotion_contract_digest: String,
+    pub mitigation_id: String,
+    pub executor: &'static str,
+    pub mode: &'static str,
+    pub result_count: usize,
+    pub expected_loss_delta: i64,
+    pub valid_from_epoch_ms: i64,
+    pub valid_until_epoch_ms: i64,
+    pub guest_execution_verified: bool,
+    pub rollout_authorized: bool,
+}
+
+/// Privacy-safe failures for existing product promotion report verification.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CounterfactualPromotionError {
+    Incident(CounterfactualIncidentError),
+    ReportInvalid,
+    ContextMismatch { field: &'static str },
+    ReceiptInvalid,
+    SignatureInvalid,
+}
+
+impl CounterfactualPromotionError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Incident(error) => error.code(),
+            Self::ReportInvalid => "COUNTERFACTUAL_PROMOTION_REPORT_INVALID",
+            Self::ContextMismatch { .. } => "COUNTERFACTUAL_PROMOTION_CONTEXT_MISMATCH",
+            Self::ReceiptInvalid => "COUNTERFACTUAL_PROMOTION_RECEIPT_INVALID",
+            Self::SignatureInvalid => "COUNTERFACTUAL_PROMOTION_SIGNATURE_INVALID",
+        }
+    }
+}
+
+impl From<CounterfactualIncidentError> for CounterfactualPromotionError {
+    fn from(error: CounterfactualIncidentError) -> Self {
+        Self::Incident(error)
+    }
+}
+
+impl fmt::Debug for CounterfactualPromotionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl fmt::Display for CounterfactualPromotionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Incident(_) => "counterfactual promotion baseline or simulation verification failed",
+            Self::ReportInvalid => "counterfactual promotion report has an unsupported or invalid shape",
+            Self::ContextMismatch { .. } => "counterfactual promotion report or contract bindings disagree",
+            Self::ReceiptInvalid => "counterfactual promotion receipt has invalid protocol fields",
+            Self::SignatureInvalid => "counterfactual promotion operator signature verification failed",
+        })
+    }
+}
+
+impl std::error::Error for CounterfactualPromotionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Incident(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// Failures of composed baseline/receipt verification. Display and Debug never
@@ -349,6 +441,56 @@ pub fn verify_counterfactual_incident(
     signature_bytes: &[u8],
     trust: &CounterfactualIncidentTrust<'_>,
 ) -> Result<VerifiedCounterfactualIncident, CounterfactualIncidentError> {
+    let context = authenticate_counterfactual_baseline(baseline_bytes, trust)?;
+    let baseline = &context.baseline;
+
+    // Bound caller-created Values too: the Rust API must not rely on the CLI's
+    // JSON decoder to limit nesting, node count or canonicalization allocation.
+    validate_counterfactual_output_bounds(counterfactual_output)?;
+    ensure_counterfactual_references_bundle(counterfactual_output, &baseline.integrity_hash)
+        .map_err(CounterfactualIncidentError::Receipt)?;
+    let canonical = canonical_json_bytes(counterfactual_output)
+        .map_err(CounterfactualIncidentError::Receipt)?;
+    verify_ed25519_signature(
+        trust.trusted_counterfactual_signer,
+        &canonical,
+        signature_bytes,
+    )
+    .map_err(CounterfactualReceiptError::Signature)
+    .map_err(CounterfactualIncidentError::Receipt)?;
+
+    let (mode, result_count) = bind_counterfactual_population(counterfactual_output, &context)?;
+    let CounterfactualBaseline {
+        baseline,
+        run_origin,
+        runtime_origin,
+        ..
+    } = context;
+    Ok(VerifiedCounterfactualIncident {
+        baseline,
+        run_origin,
+        runtime_origin,
+        counterfactual_signer_public_key_hex: hex::encode(
+            trust.trusted_counterfactual_signer.as_bytes(),
+        ),
+        counterfactual_output_sha256: hex::encode(Sha256::digest(&canonical)),
+        mode,
+        result_count,
+        guest_execution_verified: false,
+    })
+}
+
+struct CounterfactualBaseline {
+    baseline: VerifiedIncidentBundle,
+    run_origin: Option<VerifiedRunOrigin>,
+    runtime_origin: Option<VerifiedRuntimeOrigin>,
+    document: Value,
+}
+
+fn authenticate_counterfactual_baseline(
+    baseline_bytes: &[u8],
+    trust: &CounterfactualIncidentTrust<'_>,
+) -> Result<CounterfactualBaseline, CounterfactualIncidentError> {
     validate_bundle_hash(trust.expected_baseline_integrity_hash)
         .map_err(|_| CounterfactualIncidentError::ExpectedBaselineInvalid)?;
     if trust.trusted_product_root.is_some() && trust.trusted_run_signer.is_none() {
@@ -393,24 +535,22 @@ pub fn verify_counterfactual_incident(
         return Err(CounterfactualIncidentError::ExpectedBaselineMismatch);
     }
 
-    // Bound caller-created Values too: the Rust API must not rely on the CLI's
-    // JSON decoder to limit nesting, node count or canonicalization allocation.
-    validate_counterfactual_output_bounds(counterfactual_output)?;
-    ensure_counterfactual_references_bundle(counterfactual_output, &baseline.integrity_hash)
-        .map_err(CounterfactualIncidentError::Receipt)?;
-    let canonical = canonical_json_bytes(counterfactual_output)
-        .map_err(CounterfactualIncidentError::Receipt)?;
-    verify_ed25519_signature(
-        trust.trusted_counterfactual_signer,
-        &canonical,
-        signature_bytes,
-    )
-    .map_err(CounterfactualReceiptError::Signature)
-    .map_err(CounterfactualIncidentError::Receipt)?;
-
-    let baseline_value =
+    let document =
         decode_evidence_json(baseline_bytes).map_err(CounterfactualIncidentError::Baseline)?;
-    let timeline = baseline_value["timeline"]
+    Ok(CounterfactualBaseline {
+        baseline,
+        run_origin,
+        runtime_origin,
+        document,
+    })
+}
+
+fn bind_counterfactual_population(
+    counterfactual_output: &Value,
+    context: &CounterfactualBaseline,
+) -> Result<(&'static str, usize), CounterfactualIncidentError> {
+    let baseline = &context.baseline;
+    let timeline = context.document["timeline"]
         .as_array()
         .ok_or(CounterfactualIncidentError::OutputInvalid)?;
     let (mode, result_count) = match counterfactual_output.get("results") {
@@ -432,28 +572,427 @@ pub fn verify_counterfactual_incident(
                 return Err(CounterfactualIncidentError::OutputInvalid);
             }
             for result in results {
-                bind_counterfactual_result(result, &baseline, timeline, false)?;
+                bind_counterfactual_result(result, baseline, timeline, false)?;
             }
             ("sweep", results.len())
         }
         None => {
-            bind_counterfactual_result(counterfactual_output, &baseline, timeline, true)?;
+            bind_counterfactual_result(counterfactual_output, baseline, timeline, true)?;
             ("single", 1)
         }
         Some(_) => return Err(CounterfactualIncidentError::OutputInvalid),
     };
-    Ok(VerifiedCounterfactualIncident {
+    Ok((mode, result_count))
+}
+
+/// Verify the existing signed report emitted by
+/// `incident counterfactual --json --promote`.
+///
+/// The counterfactual signer in the trust configuration is the independently
+/// trusted operator for all three promotion receipts. Their existing signatures
+/// authenticate the model-bound simulation digest and the exact rollout and
+/// rollback contracts; no separately manufactured simulation signature is
+/// required. Baseline pinning and optional original-run/runtime authorities have
+/// the same semantics as in `verify_counterfactual_incident`.
+///
+/// This is historical evidence verification. The signed validity interval is
+/// checked for coherence and returned, without reading a clock or declaring a
+/// current rollout authorized. Unsigned reports and native-branch reports do
+/// not carry this proof and are rejected.
+pub fn verify_counterfactual_promotion(
+    baseline_bytes: &[u8],
+    report_bytes: &[u8],
+    trust: &CounterfactualIncidentTrust<'_>,
+) -> Result<VerifiedCounterfactualPromotion, CounterfactualPromotionError> {
+    let context = authenticate_counterfactual_baseline(baseline_bytes, trust)?;
+    let report_value =
+        decode_evidence_json(report_bytes).map_err(|_| CounterfactualPromotionError::ReportInvalid)?;
+    validate_counterfactual_output_bounds(&report_value)?;
+    let report = promotion_object(
+        &report_value,
+        &[
+            "schema_version", "timestamp", "bundle_id", "incident_id", "bundle_created_at",
+            "bundle_integrity_hash", "policy", "original_policy", "counterfactual_policy",
+            "executor", "evidence_refs", "total_decisions", "changed_decisions", "severity_delta",
+            "decision_deltas", "counterfactual_digest", "counterfactual", "promotion_contract",
+            "promotion_contract_digest", "promotion_signature",
+        ],
+    )?;
+    if report["schema_version"].as_str() != Some("franken-node/incident-counterfactual-report/v2") {
+        return Err(CounterfactualPromotionError::ReportInvalid);
+    }
+    let executor = match report["executor"].as_str() {
+        Some("synthetic") => "synthetic",
+        Some("production") => "production",
+        _ => return Err(CounterfactualPromotionError::ReportInvalid),
+    };
+    let output = &report["counterfactual"];
+    ensure_counterfactual_references_bundle(output, &context.baseline.integrity_hash)
+        .map_err(CounterfactualIncidentError::Receipt)?;
+    let (mode, result_count) = bind_counterfactual_population(output, &context)?;
+    if output.get("mode").and_then(Value::as_str) != Some(mode) {
+        return Err(CounterfactualPromotionError::ReportInvalid);
+    }
+    let canonical = canonical_json_bytes(output).map_err(CounterfactualIncidentError::Receipt)?;
+    let mut digest = Sha256::new();
+    digest.update(b"incident-counterfactual-report/v2\nexecutor=");
+    digest.update(executor.as_bytes());
+    digest.update(b"\n");
+    digest.update(&canonical);
+    let counterfactual_digest = format!("sha256:{}", hex::encode(digest.finalize()));
+    promotion_binding(
+        report["counterfactual_digest"].as_str() == Some(counterfactual_digest.as_str()),
+        "counterfactual_digest",
+    )?;
+    bind_promotion_report_context(report, &context)?;
+    let policy = promotion_text(&report["policy"], false)?;
+    let timestamp = promotion_text(&report["timestamp"], true)?;
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| CounterfactualPromotionError::ReportInvalid)?;
+    let (total, changed, severity_delta) = promotion_summary(output)?;
+    promotion_binding(
+        report["total_decisions"].as_u64() == Some(total)
+            && report["changed_decisions"].as_u64() == Some(changed)
+            && report["severity_delta"].as_i64() == Some(severity_delta),
+        "summary_statistics",
+    )?;
+    let empty_deltas = Value::Array(Vec::new());
+    promotion_binding(
+        &report["decision_deltas"] == output.get("divergence_points").unwrap_or(&empty_deltas),
+        "decision_deltas",
+    )?;
+    let expected_loss_delta = severity_delta
+        .checked_neg()
+        .filter(|delta| *delta > 0)
+        .ok_or(CounterfactualPromotionError::ReportInvalid)?;
+    let promotion = promotion_object(
+        &report["promotion_contract"],
+        &["mitigation_id", "rollout", "rollback"],
+    )?;
+    let rollout = promotion_object(
+        &promotion["rollout"],
+        &[
+            "mitigation_id", "policy_diff", "expected_loss_delta", "operator_id",
+            "valid_from_epoch_ms", "valid_until_epoch_ms", "signature",
+        ],
+    )?;
+    let rollback = promotion_object(
+        &promotion["rollback"],
+        &["mitigation_id", "rollback_trigger", "rollback_policy", "operator_id", "signature"],
+    )?;
+    let mitigation_id = promotion_text(&promotion["mitigation_id"], true)?;
+    let expected_mitigation = format!(
+        "{}:{policy}:{}",
+        context.baseline.incident_id,
+        &counterfactual_digest["sha256:".len().."sha256:".len() + 16],
+    );
+    let operator_id = promotion_text(&rollout["operator_id"], true)?;
+    let valid_from_epoch_ms = rollout["valid_from_epoch_ms"]
+        .as_i64()
+        .ok_or(CounterfactualPromotionError::ReportInvalid)?;
+    let valid_until_epoch_ms = rollout["valid_until_epoch_ms"]
+        .as_i64()
+        .ok_or(CounterfactualPromotionError::ReportInvalid)?;
+    promotion_binding(valid_until_epoch_ms > valid_from_epoch_ms, "validity_interval")?;
+    let fallback_diff = serde_json::json!([{
+        "field": "policy",
+        "original": context.baseline.policy_version,
+        "counterfactual": policy,
+    }]);
+    let expected_diff = output.pointer("/metadata/policy_override_diff").unwrap_or(&fallback_diff);
+    promotion_binding(
+        mitigation_id == expected_mitigation
+            && rollout["mitigation_id"].as_str() == Some(mitigation_id)
+            && rollback["mitigation_id"].as_str() == Some(mitigation_id)
+            && rollback["operator_id"].as_str() == Some(operator_id)
+            && rollout["expected_loss_delta"].as_i64() == Some(expected_loss_delta)
+            && &rollout["policy_diff"] == expected_diff
+            && rollback["rollback_policy"].as_str() == Some(context.baseline.policy_version.as_str())
+            && rollback["rollback_trigger"].as_str()
+                == Some("operator_abort_or_expected_loss_delta_non_positive"),
+        "promotion_contract",
+    )?;
+
+    let rollout_digest = promotion_unsigned_contract_digest(rollout)?;
+    let rollback_digest = promotion_unsigned_contract_digest(rollback)?;
+    let promotion_contract_digest = promotion_json_digest(&report["promotion_contract"])?;
+    promotion_binding(
+        report["promotion_contract_digest"].as_str() == Some(promotion_contract_digest.as_str()),
+        "promotion_contract_digest",
+    )?;
+    let receipt_context = PromotionReceiptContext {
+        operator_id,
+        timestamp,
+        policy,
+        expected_loss_delta,
+        evidence_refs: &report["evidence_refs"],
+        input_hash: &counterfactual_digest,
+        trusted_operator: trust.trusted_counterfactual_signer,
+    };
+    let rollback_command = format!("restore_policy_version:{}", context.baseline.policy_version);
+    for (receipt, action, output_hash, rollback_command) in [
+        (
+            &rollout["signature"],
+            "incident.counterfactual.rollout",
+            rollout_digest.as_str(),
+            "operator_abort_or_expected_loss_delta_non_positive",
+        ),
+        (
+            &rollback["signature"],
+            "incident.counterfactual.rollback",
+            rollback_digest.as_str(),
+            rollback_command.as_str(),
+        ),
+        (
+            &report["promotion_signature"],
+            "incident.counterfactual.promote",
+            promotion_contract_digest.as_str(),
+            rollback_command.as_str(),
+        ),
+    ] {
+        verify_promotion_contract_receipt(
+            receipt, action, output_hash, rollback_command, &receipt_context,
+        )?;
+    }
+    let operator_id = operator_id.to_string();
+    let mitigation_id = mitigation_id.to_string();
+    let CounterfactualBaseline { baseline, run_origin, runtime_origin, .. } = context;
+    Ok(VerifiedCounterfactualPromotion {
         baseline,
         run_origin,
         runtime_origin,
-        counterfactual_signer_public_key_hex: hex::encode(
-            trust.trusted_counterfactual_signer.as_bytes(),
-        ),
+        operator_public_key_hex: hex::encode(trust.trusted_counterfactual_signer.as_bytes()),
+        operator_id,
+        report_sha256: hex::encode(Sha256::digest(report_bytes)),
+        counterfactual_digest,
         counterfactual_output_sha256: hex::encode(Sha256::digest(&canonical)),
+        promotion_contract_digest,
+        mitigation_id,
+        executor,
         mode,
         result_count,
+        expected_loss_delta,
+        valid_from_epoch_ms,
+        valid_until_epoch_ms,
         guest_execution_verified: false,
+        rollout_authorized: false,
     })
+}
+
+fn promotion_object<'a>(
+    value: &'a Value,
+    fields: &[&str],
+) -> Result<&'a serde_json::Map<String, Value>, CounterfactualPromotionError> {
+    exact_counterfactual_object(value, fields, &[])
+        .map_err(|_| CounterfactualPromotionError::ReportInvalid)
+}
+
+fn promotion_binding(
+    matches: bool,
+    field: &'static str,
+) -> Result<(), CounterfactualPromotionError> {
+    if matches {
+        Ok(())
+    } else {
+        Err(CounterfactualPromotionError::ContextMismatch { field })
+    }
+}
+
+fn promotion_text(value: &Value, trimmed: bool) -> Result<&str, CounterfactualPromotionError> {
+    value
+        .as_str()
+        .filter(|text| {
+            !text.is_empty()
+                && text.len() <= 4096
+                && !text.chars().any(char::is_control)
+                && (!trimmed || text.trim() == *text)
+        })
+        .ok_or(CounterfactualPromotionError::ReportInvalid)
+}
+
+fn bind_promotion_report_context(
+    report: &serde_json::Map<String, Value>,
+    context: &CounterfactualBaseline,
+) -> Result<(), CounterfactualPromotionError> {
+    let baseline = &context.baseline;
+    promotion_binding(
+        report["bundle_id"].as_str() == Some(baseline.bundle_id.as_str())
+            && report["incident_id"].as_str() == Some(baseline.incident_id.as_str())
+            && report["bundle_created_at"].as_str() == Some(baseline.created_at.as_str())
+            && report["bundle_integrity_hash"].as_str() == Some(baseline.integrity_hash.as_str())
+            && report["original_policy"].as_str() == Some(baseline.policy_version.as_str())
+            && report["counterfactual_policy"] == report["policy"]
+            && report.get("evidence_refs") == context.document.get("evidence_refs"),
+        "baseline",
+    )
+}
+
+fn promotion_summary(output: &Value) -> Result<(u64, u64, i64), CounterfactualPromotionError> {
+    let results: Vec<&Value> = match output.get("results") {
+        Some(Value::Array(results)) => results.iter().collect(),
+        None => vec![output],
+        _ => return Err(CounterfactualPromotionError::ReportInvalid),
+    };
+    let (mut total, mut changed, mut severity_delta) = (0_u64, 0_u64, 0_i64);
+    for result in results {
+        let statistics = &result["summary_statistics"];
+        total = total
+            .checked_add(statistics["total_decisions"].as_u64().ok_or(
+                CounterfactualPromotionError::ReportInvalid,
+            )?)
+            .ok_or(CounterfactualPromotionError::ReportInvalid)?;
+        changed = changed
+            .checked_add(statistics["changed_decisions"].as_u64().ok_or(
+                CounterfactualPromotionError::ReportInvalid,
+            )?)
+            .ok_or(CounterfactualPromotionError::ReportInvalid)?;
+        // Match the producer's bounded sweep aggregation, without interpreting
+        // a model assessment as independently measured risk reduction.
+        severity_delta = severity_delta.saturating_add(
+            statistics["severity_delta"].as_i64().ok_or(
+                CounterfactualPromotionError::ReportInvalid,
+            )?,
+        );
+    }
+    Ok((total, changed, severity_delta))
+}
+
+fn promotion_json_digest(value: &Value) -> Result<String, CounterfactualPromotionError> {
+    let canonical = canonical_json_bytes(value)
+        .map_err(|_| CounterfactualPromotionError::ReportInvalid)?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(canonical))))
+}
+
+fn promotion_unsigned_contract_digest(
+    contract: &serde_json::Map<String, Value>,
+) -> Result<String, CounterfactualPromotionError> {
+    let mut unsigned = contract.clone();
+    unsigned.remove("signature");
+    promotion_json_digest(&Value::Object(unsigned))
+}
+
+struct PromotionReceiptContext<'a> {
+    operator_id: &'a str,
+    timestamp: &'a str,
+    policy: &'a str,
+    expected_loss_delta: i64,
+    evidence_refs: &'a Value,
+    input_hash: &'a str,
+    trusted_operator: &'a VerifyingKey,
+}
+
+fn verify_promotion_contract_receipt(
+    value: &Value,
+    action: &str,
+    output_hash: &str,
+    rollback_command: &str,
+    context: &PromotionReceiptContext<'_>,
+) -> Result<(), CounterfactualPromotionError> {
+    let signed = exact_counterfactual_object(
+        value,
+        &[
+            "receipt_id", "action_name", "actor_identity", "timestamp", "signature_version",
+            "crypto_suite", "nonce", "audience", "input_hash", "output_hash", "decision",
+            "rationale", "evidence_refs", "policy_rule_chain", "confidence",
+            "rollback_command", "previous_receipt_hash", "signer_key_id", "chain_hash", "signature",
+        ],
+        &[],
+    )
+    .map_err(|_| CounterfactualPromotionError::ReceiptInvalid)?;
+    for field in [
+        "receipt_id", "action_name", "actor_identity", "timestamp", "nonce", "audience",
+        "input_hash", "output_hash", "decision", "rationale", "rollback_command",
+    ] {
+        promotion_text(&signed[field], false)
+            .map_err(|_| CounterfactualPromotionError::ReceiptInvalid)?;
+    }
+    if signed["receipt_id"].as_str().is_none_or(|id| id.len() > 128) {
+        return Err(CounterfactualPromotionError::ReceiptInvalid);
+    }
+    for field in ["evidence_refs", "policy_rule_chain"] {
+        let refs = signed[field]
+            .as_array()
+            .filter(|refs| refs.len() <= 256)
+            .ok_or(CounterfactualPromotionError::ReceiptInvalid)?;
+        for value in refs {
+            let text = value.as_str().ok_or(CounterfactualPromotionError::ReceiptInvalid)?;
+            if text.len() > 512 || text.chars().any(char::is_control) {
+                return Err(CounterfactualPromotionError::ReceiptInvalid);
+            }
+        }
+    }
+    let receipt_id = format!("{action}:{}", &output_hash["sha256:".len().."sha256:".len() + 16]);
+    let rationale = format!(
+        "signed counterfactual promotion contract for policy {}; expected_loss_delta={}",
+        context.policy, context.expected_loss_delta,
+    );
+    let rules = serde_json::json!([
+        "INV-LAB-SIGNED-ROLLOUT",
+        "INV-LAB-ROLLBACK-CONTRACT",
+        "INV-LAB-LOSS-DELTA-POSITIVE",
+    ]);
+    promotion_binding(
+        signed["timestamp"].as_str() == Some(context.timestamp),
+        "receipt_timestamp",
+    )?;
+    promotion_binding(
+        signed["signature_version"].as_str() == Some("ed25519-v1")
+            && signed["crypto_suite"].as_str() == Some("ed25519-v1")
+            && signed["receipt_id"].as_str() == Some(receipt_id.as_str())
+            && signed["action_name"].as_str() == Some(action)
+            && signed["actor_identity"].as_str() == Some(context.operator_id)
+            && signed["audience"].as_str() == Some("franken-node")
+            && signed["input_hash"].as_str() == Some(context.input_hash)
+            && signed["output_hash"].as_str() == Some(output_hash)
+            && signed["decision"].as_str() == Some("approved")
+            && signed["rationale"].as_str() == Some(rationale.as_str())
+            && &signed["evidence_refs"] == context.evidence_refs
+            && signed["policy_rule_chain"] == rules
+            && signed["confidence"].as_u64() == Some(1.0_f64.to_bits())
+            && signed["rollback_command"].as_str() == Some(rollback_command)
+            && signed["previous_receipt_hash"].is_null(),
+        "receipt",
+    )
+    .map_err(|_| CounterfactualPromotionError::ReceiptInvalid)?;
+    let mut key_digest = Sha256::new();
+    key_digest.update(b"artifact_signing_keyid_v1:");
+    key_digest.update(context.trusted_operator.as_bytes());
+    let signer_key_id = hex::encode(&key_digest.finalize()[..8]);
+    if signed["signer_key_id"].as_str() != Some(signer_key_id.as_str()) {
+        return Err(CounterfactualPromotionError::SignatureInvalid);
+    }
+    let signature = signed["signature"]
+        .as_str()
+        .ok_or(CounterfactualPromotionError::ReceiptInvalid)?;
+    let signature_bytes = STANDARD
+        .decode(signature)
+        .map_err(|_| CounterfactualPromotionError::ReceiptInvalid)?;
+    if signature_bytes.len() != 64 || STANDARD.encode(&signature_bytes) != signature {
+        return Err(CounterfactualPromotionError::ReceiptInvalid);
+    }
+    let mut unsigned = signed.clone();
+    for field in ["signer_key_id", "chain_hash", "signature"] {
+        unsigned.remove(field);
+    }
+    let canonical = canonical_json_bytes(&Value::Object(unsigned))
+        .map_err(|_| CounterfactualPromotionError::ReceiptInvalid)?;
+    verify_ed25519_signature(context.trusted_operator, &canonical, &signature_bytes)
+        .map_err(|_| CounterfactualPromotionError::SignatureInvalid)?;
+    let expected_chain_hash = promotion_receipt_chain_hash(&canonical);
+    if signed["chain_hash"].as_str() != Some(expected_chain_hash.as_str()) {
+        return Err(CounterfactualPromotionError::ReceiptInvalid);
+    }
+    Ok(())
+}
+
+fn promotion_receipt_chain_hash(canonical: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"decision_receipt_chain_v1:");
+    digest.update(7_u64.to_le_bytes());
+    digest.update(b"GENESIS");
+    digest.update(u64::try_from(canonical.len()).unwrap_or(u64::MAX).to_le_bytes());
+    digest.update(canonical);
+    hex::encode(digest.finalize())
 }
 
 fn validate_counterfactual_output_bounds(value: &Value) -> Result<(), CounterfactualIncidentError> {
@@ -1019,6 +1558,361 @@ mod tests {
         value["signature"]["signature_hex"] =
             json!(hex::encode(exporter.sign(&payload).to_bytes()));
         serde_json::to_vec(value).unwrap()
+    }
+
+    // Independently assembled signed report protocol fixtures. A separate
+    // product integration test consumes the real CLI's unmodified report.
+    fn promotion_test_receipt(
+        action: &str,
+        output_hash: &str,
+        report: &Value,
+        key: &SigningKey,
+        rollback_command: &str,
+    ) -> Value {
+        let operator = report["promotion_contract"]["rollout"]["operator_id"].as_str().unwrap();
+        let policy = report["policy"].as_str().unwrap();
+        let delta = report["severity_delta"].as_i64().unwrap().checked_neg().unwrap();
+        let payload = json!({
+            "receipt_id": format!("{action}:{}", &output_hash[7..23]),
+            "action_name": action,
+            "actor_identity": operator,
+            "timestamp": report["timestamp"],
+            "signature_version": "ed25519-v1",
+            "crypto_suite": "ed25519-v1",
+            "nonce": "019cabcdef1270008000123456789abcde",
+            "audience": "franken-node",
+            "input_hash": report["counterfactual_digest"],
+            "output_hash": output_hash,
+            "decision": "approved",
+            "rationale": format!("signed counterfactual promotion contract for policy {policy}; expected_loss_delta={delta}"),
+            "evidence_refs": report["evidence_refs"],
+            "policy_rule_chain": [
+                "INV-LAB-SIGNED-ROLLOUT",
+                "INV-LAB-ROLLBACK-CONTRACT",
+                "INV-LAB-LOSS-DELTA-POSITIVE",
+            ],
+            "confidence": 4_607_182_418_800_017_408_u64,
+            "rollback_command": rollback_command,
+            "previous_receipt_hash": null,
+        });
+        let canonical = canonical_json_bytes(&payload).unwrap();
+        let mut chain = Sha256::new();
+        chain.update(b"decision_receipt_chain_v1:");
+        chain.update(7_u64.to_le_bytes());
+        chain.update(b"GENESIS");
+        chain.update((canonical.len() as u64).to_le_bytes());
+        chain.update(&canonical);
+        let mut key_hash = Sha256::new();
+        key_hash.update(b"artifact_signing_keyid_v1:");
+        key_hash.update(key.verifying_key().as_bytes());
+        let mut signed = payload;
+        signed["signer_key_id"] = json!(hex::encode(&key_hash.finalize()[..8]));
+        signed["chain_hash"] = json!(hex::encode(chain.finalize()));
+        signed["signature"] = json!(STANDARD.encode(key.sign(&canonical).to_bytes()));
+        signed
+    }
+
+    fn sign_promotion_test_report(report: &mut Value, key: &SigningKey) {
+        let output = canonical_json_bytes(&report["counterfactual"]).unwrap();
+        let preimage = format!(
+            "incident-counterfactual-report/v2\nexecutor={}\n{}",
+            report["executor"].as_str().unwrap(),
+            std::str::from_utf8(&output).unwrap(),
+        );
+        report["counterfactual_digest"] =
+            json!(format!("sha256:{}", hex::encode(Sha256::digest(preimage.as_bytes()))));
+        let rollout_unsigned = {
+            let mut value = report["promotion_contract"]["rollout"].as_object().unwrap().clone();
+            value.remove("signature");
+            Value::Object(value)
+        };
+        let rollback_unsigned = {
+            let mut value = report["promotion_contract"]["rollback"].as_object().unwrap().clone();
+            value.remove("signature");
+            Value::Object(value)
+        };
+        let hash = |value: &Value| {
+            format!("sha256:{}", hex::encode(Sha256::digest(canonical_json_bytes(value).unwrap())))
+        };
+        let rollout = promotion_test_receipt(
+            "incident.counterfactual.rollout",
+            &hash(&rollout_unsigned),
+            report,
+            key,
+            "operator_abort_or_expected_loss_delta_non_positive",
+        );
+        report["promotion_contract"]["rollout"]["signature"] = rollout;
+        let rollback_command = format!("restore_policy_version:{}", report["original_policy"].as_str().unwrap());
+        let rollback = promotion_test_receipt(
+            "incident.counterfactual.rollback",
+            &hash(&rollback_unsigned),
+            report,
+            key,
+            &rollback_command,
+        );
+        report["promotion_contract"]["rollback"]["signature"] = rollback;
+        let promotion_hash = hash(&report["promotion_contract"]);
+        let promotion = promotion_test_receipt(
+            "incident.counterfactual.promote",
+            &promotion_hash,
+            report,
+            key,
+            &rollback_command,
+        );
+        report["promotion_contract_digest"] = json!(promotion_hash);
+        report["promotion_signature"] = promotion;
+    }
+
+    fn promotion_test_report(baseline_bytes: &[u8], key: &SigningKey, sweep: bool) -> Value {
+        let baseline: Value = serde_json::from_slice(baseline_bytes).unwrap();
+        let mut output = incident_output(baseline_bytes);
+        output["original_outcomes"][0]["expected_loss"] = json!(7);
+        output["summary_statistics"]["severity_delta"] = json!(-7);
+        if sweep {
+            output.as_object_mut().unwrap().remove("mode");
+            output = json!({
+                "mode": "sweep", "parameter": "observe_threshold",
+                "results": [output.clone(), output],
+            });
+        }
+        let output_canonical = canonical_json_bytes(&output).unwrap();
+        let digest_preimage = format!(
+            "incident-counterfactual-report/v2\nexecutor=synthetic\n{}",
+            std::str::from_utf8(&output_canonical).unwrap(),
+        );
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(digest_preimage.as_bytes())));
+        let policy = if sweep { "sweep:observe_threshold=10,20" } else { baseline["policy_version"].as_str().unwrap() };
+        let mitigation = format!("{}:{policy}:{}", baseline["incident_id"].as_str().unwrap(), &digest[7..23]);
+        let (total, changed, severity) = promotion_summary(&output).unwrap();
+        let policy_diff = if sweep {
+            json!([{"field":"policy", "original":baseline["policy_version"], "counterfactual":policy}])
+        } else {
+            output["metadata"]["policy_override_diff"].clone()
+        };
+        let timestamp = baseline["created_at"].clone();
+        let start = chrono::DateTime::parse_from_rfc3339(timestamp.as_str().unwrap()).unwrap().timestamp_millis();
+        let mut report = json!({
+            "schema_version": "franken-node/incident-counterfactual-report/v2",
+            "timestamp": timestamp,
+            "bundle_id": baseline["bundle_id"],
+            "incident_id": baseline["incident_id"],
+            "bundle_created_at": baseline["created_at"],
+            "bundle_integrity_hash": baseline["integrity_hash"],
+            "policy": policy,
+            "original_policy": baseline["policy_version"],
+            "counterfactual_policy": policy,
+            "executor": "synthetic",
+            "evidence_refs": baseline["evidence_refs"],
+            "total_decisions": total,
+            "changed_decisions": changed,
+            "severity_delta": severity,
+            "decision_deltas": [],
+            "counterfactual_digest": digest,
+            "counterfactual": output,
+            "promotion_contract": {
+                "mitigation_id": mitigation,
+                "rollout": {
+                    "mitigation_id": mitigation,
+                    "policy_diff": policy_diff,
+                    "expected_loss_delta": severity.checked_neg().unwrap(),
+                    "operator_id": "operator://independent-test",
+                    "valid_from_epoch_ms": start,
+                    "valid_until_epoch_ms": start + 86_400_000,
+                    "signature": null,
+                },
+                "rollback": {
+                    "mitigation_id": mitigation,
+                    "rollback_trigger": "operator_abort_or_expected_loss_delta_non_positive",
+                    "rollback_policy": baseline["policy_version"],
+                    "operator_id": "operator://independent-test",
+                    "signature": null,
+                },
+            },
+            "promotion_contract_digest": "",
+            "promotion_signature": null,
+        });
+        sign_promotion_test_report(&mut report, key);
+        report
+    }
+
+    #[test]
+    fn counterfactual_promotion_authenticates_existing_contract_protocol_and_historical_scope() {
+        let operator = SigningKey::from_bytes(&[0x59; 32]);
+        let operator_key = operator.verifying_key();
+        let exporter = incident_key();
+        for sweep in [false, true] {
+            let report = promotion_test_report(INCIDENT_FIXTURE, &operator, sweep);
+            let bytes = serde_json::to_vec(&report).unwrap();
+            let pin = report["bundle_integrity_hash"].as_str().unwrap();
+            let verified = verify_counterfactual_promotion(
+                INCIDENT_FIXTURE, &bytes, &incident_trust(pin, &operator_key, &exporter),
+            ).unwrap();
+            assert_eq!(verified.baseline.incident_id, "INC-SDK-FIXTURE-1");
+            assert_eq!(verified.executor, "synthetic");
+            assert_eq!(verified.mode, if sweep { "sweep" } else { "single" });
+            assert_eq!(verified.result_count, if sweep { 2 } else { 1 });
+            assert_eq!(verified.expected_loss_delta, if sweep { 14 } else { 7 });
+            assert_eq!(verified.operator_id, "operator://independent-test");
+            assert_eq!(verified.report_sha256, hex::encode(Sha256::digest(&bytes)));
+            assert_eq!(verified.operator_public_key_hex, hex::encode(operator_key.as_bytes()));
+            assert_eq!(verified.valid_until_epoch_ms - verified.valid_from_epoch_ms, 86_400_000);
+            assert!(!verified.guest_execution_verified && !verified.rollout_authorized);
+        }
+    }
+
+    #[test]
+    fn counterfactual_promotion_anchors_operator_exporter_and_selected_incident_separately() {
+        let operator = SigningKey::from_bytes(&[0x5a; 32]);
+        let operator_key = operator.verifying_key();
+        let exporter = incident_key();
+        let foreign = SigningKey::from_bytes(&[0x5b; 32]).verifying_key();
+        let report = promotion_test_report(INCIDENT_FIXTURE, &operator, false);
+        let pin = report["bundle_integrity_hash"].as_str().unwrap();
+        let bytes = serde_json::to_vec(&report).unwrap();
+        assert_eq!(
+            verify_counterfactual_promotion(INCIDENT_FIXTURE, &bytes, &incident_trust(pin, &foreign, &exporter)),
+            Err(CounterfactualPromotionError::SignatureInvalid),
+        );
+        assert!(matches!(
+            verify_counterfactual_promotion(INCIDENT_FIXTURE, &bytes, &incident_trust(pin, &operator_key, &foreign)),
+            Err(CounterfactualPromotionError::Incident(CounterfactualIncidentError::Baseline(_))),
+        ));
+        let mut replacement: Value = serde_json::from_slice(INCIDENT_FIXTURE).unwrap();
+        replacement["evidence_refs"] = json!(["another-signed-incident"]);
+        let replacement_bytes = reseal_incident_for_substitution(&mut replacement);
+        let replacement_report = promotion_test_report(&replacement_bytes, &operator, false);
+        assert_eq!(
+            verify_counterfactual_promotion(
+                &replacement_bytes, &serde_json::to_vec(&replacement_report).unwrap(),
+                &incident_trust(pin, &operator_key, &exporter),
+            ),
+            Err(CounterfactualPromotionError::Incident(CounterfactualIncidentError::ExpectedBaselineMismatch)),
+        );
+        let run_report = promotion_test_report(RUN_INCIDENT_FIXTURE, &operator, false);
+        let run_key = SigningKey::from_bytes(&[0x41; 32]).verifying_key();
+        let mut trust = incident_trust(run_report["bundle_integrity_hash"].as_str().unwrap(), &operator_key, &exporter);
+        trust.trusted_run_signer = Some(&run_key);
+        let verified = verify_counterfactual_promotion(
+            RUN_INCIDENT_FIXTURE, &serde_json::to_vec(&run_report).unwrap(), &trust,
+        ).unwrap();
+        assert!(verified.run_origin.is_some());
+        trust.trusted_product_root = Some(&foreign);
+        assert!(matches!(
+            verify_counterfactual_promotion(RUN_INCIDENT_FIXTURE, &serde_json::to_vec(&run_report).unwrap(), &trust),
+            Err(CounterfactualPromotionError::Incident(CounterfactualIncidentError::Baseline(_))),
+        ));
+    }
+
+    #[test]
+    fn counterfactual_promotion_requires_all_three_operator_signatures_and_chain_hashes() {
+        let operator = SigningKey::from_bytes(&[0x5c; 32]);
+        let operator_key = operator.verifying_key();
+        let exporter = incident_key();
+        let report = promotion_test_report(INCIDENT_FIXTURE, &operator, false);
+        let pin = report["bundle_integrity_hash"].as_str().unwrap();
+        for pointer in [
+            "/promotion_contract/rollout/signature",
+            "/promotion_contract/rollback/signature",
+            "/promotion_signature",
+        ] {
+            let mut changed = report.clone();
+            changed.pointer_mut(pointer).unwrap()["signature"] = json!(STANDARD.encode([0_u8; 64]));
+            // Recompute the outer unsigned digest to isolate the inner
+            // signature check; the mutation still must not authenticate.
+            if pointer != "/promotion_signature" {
+                let contract_hash = promotion_json_digest(&changed["promotion_contract"]).unwrap();
+                changed["promotion_contract_digest"] = json!(contract_hash);
+                let rollback_command = format!("restore_policy_version:{}", changed["original_policy"].as_str().unwrap());
+                changed["promotion_signature"] = promotion_test_receipt(
+                    "incident.counterfactual.promote",
+                    changed["promotion_contract_digest"].as_str().unwrap(),
+                    &changed,
+                    &operator,
+                    &rollback_command,
+                );
+            }
+            assert_eq!(
+                verify_counterfactual_promotion(INCIDENT_FIXTURE, &serde_json::to_vec(&changed).unwrap(), &incident_trust(pin, &operator_key, &exporter)),
+                Err(CounterfactualPromotionError::SignatureInvalid),
+                "{pointer}",
+            );
+        }
+        let mut changed = report.clone();
+        changed["promotion_signature"]["chain_hash"] = json!("00".repeat(32));
+        assert_eq!(
+            verify_counterfactual_promotion(INCIDENT_FIXTURE, &serde_json::to_vec(&changed).unwrap(), &incident_trust(pin, &operator_key, &exporter)),
+            Err(CounterfactualPromotionError::ReceiptInvalid),
+        );
+    }
+
+    #[test]
+    fn counterfactual_promotion_rejects_resigned_context_and_contract_substitutions() {
+        let operator = SigningKey::from_bytes(&[0x5d; 32]);
+        let operator_key = operator.verifying_key();
+        let exporter = incident_key();
+        let original = promotion_test_report(INCIDENT_FIXTURE, &operator, false);
+        let pin = original["bundle_integrity_hash"].as_str().unwrap();
+        for mutation in [
+            "event-order", "capture-time", "policy", "summary", "rollout-delta",
+            "rollback-policy", "policy-diff", "operator", "validity",
+        ] {
+            let mut changed = original.clone();
+            match mutation {
+                "event-order" => changed["counterfactual"]["original_outcomes"].as_array_mut().unwrap().reverse(),
+                "capture-time" => changed["counterfactual"]["metadata"]["replay_timestamp"] = json!("2000-01-01T00:00:00Z"),
+                "policy" => changed["counterfactual_policy"] = json!("PRIVATE-other-policy"),
+                "summary" => changed["changed_decisions"] = json!(1),
+                "rollout-delta" => changed["promotion_contract"]["rollout"]["expected_loss_delta"] = json!(999),
+                "rollback-policy" => changed["promotion_contract"]["rollback"]["rollback_policy"] = json!("PRIVATE-other-policy"),
+                "policy-diff" => changed["promotion_contract"]["rollout"]["policy_diff"] = json!([{"field":"policy","original":"different","counterfactual":"different"}]),
+                "operator" => changed["promotion_contract"]["rollback"]["operator_id"] = json!("different-operator"),
+                "validity" => {
+                    let start = changed["promotion_contract"]["rollout"]["valid_from_epoch_ms"].clone();
+                    changed["promotion_contract"]["rollout"]["valid_until_epoch_ms"] = start;
+                }
+                _ => unreachable!(),
+            }
+            sign_promotion_test_report(&mut changed, &operator);
+            let error = verify_counterfactual_promotion(
+                INCIDENT_FIXTURE, &serde_json::to_vec(&changed).unwrap(), &incident_trust(pin, &operator_key, &exporter),
+            ).unwrap_err();
+            assert!(!format!("{error:?} {error}").contains("PRIVATE-"), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn counterfactual_promotion_refuses_model_relabeling_unsigned_reports_and_ambiguous_json() {
+        let operator = SigningKey::from_bytes(&[0x5e; 32]);
+        let operator_key = operator.verifying_key();
+        let exporter = incident_key();
+        let original = promotion_test_report(INCIDENT_FIXTURE, &operator, false);
+        let pin = original["bundle_integrity_hash"].as_str().unwrap();
+        for (field, replacement) in [
+            ("executor", json!("production")),
+            ("executor", json!("native")),
+            ("promotion_signature", Value::Null),
+            ("promotion_contract", Value::Null),
+            ("schema_version", json!("franken-node/incident-native-counterfactual/v1")),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = replacement;
+            assert!(verify_counterfactual_promotion(
+                INCIDENT_FIXTURE, &serde_json::to_vec(&changed).unwrap(), &incident_trust(pin, &operator_key, &exporter),
+            ).is_err(), "{field}");
+        }
+        let mut duplicate = serde_json::to_string(&original).unwrap();
+        duplicate.pop();
+        duplicate.push_str(",\"executor\":\"synthetic\"}");
+        assert_eq!(
+            verify_counterfactual_promotion(INCIDENT_FIXTURE, duplicate.as_bytes(), &incident_trust(pin, &operator_key, &exporter)),
+            Err(CounterfactualPromotionError::ReportInvalid),
+        );
+        let mut changed = original.clone();
+        changed["promotion_signature"]["signature"] = json!("not-base64");
+        assert_eq!(
+            verify_counterfactual_promotion(INCIDENT_FIXTURE, &serde_json::to_vec(&changed).unwrap(), &incident_trust(pin, &operator_key, &exporter)),
+            Err(CounterfactualPromotionError::ReceiptInvalid),
+        );
     }
 
     #[test]

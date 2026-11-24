@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts, CounterfactualPromotionFacts } from "./franken_verifier.mjs";
 
 type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   incident_anchor?: string; expected_baseline_integrity_hash?: string;
+  promotion_expected?: Partial<CounterfactualPromotionFacts>;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
@@ -150,6 +152,57 @@ for (const source of cases.filter((item) => item.format === "counterfactual-inci
   }
 }
 assert(cfIncidentPositive >= 5 && cfIncidentNegative >= 20, "counterfactual incident matrix missing");
+let promotionPositive = 0;
+let promotionNegative = 0;
+for (const source of cases.filter((item) => item.format === "counterfactual-promotion")) {
+  try {
+    const data = Buffer.from(source.input_hex, "hex");
+    const verified = await verifyArtifact(data, source.anchor, {
+      verifier: resolve("verifier"), format: "counterfactual-promotion",
+      trustedIncidentPublicKeyHex: source.incident_anchor!,
+      expectedBaselineIntegrityHash: source.expected_baseline_integrity_hash!,
+      trustedRunPublicKeyHex: source.run_anchor, trustedRuntimePublicKeyHex: source.runtime_anchor,
+    });
+    if (source.expected !== "verified" || verified.format !== "counterfactual-promotion"
+        || verified.scope !== "authenticated_counterfactual_promotion") {
+      throw new Error("TypeScript promotion contracts mismatch: " + source.name);
+    }
+    const facts = verified.facts;
+    for (const [key, expected] of Object.entries(source.promotion_expected ?? {})) {
+      assert.deepEqual(facts[key as keyof typeof facts], expected, source.name + ": " + key);
+    }
+    const executed: false = facts.guest_execution_verified;
+    const authorized: false = facts.rollout_authorized;
+    const delta: string = facts.expected_loss_delta;
+    const from: string = facts.valid_from_epoch_ms;
+    const until: string = facts.valid_until_epoch_ms;
+    const executor: "synthetic" | "production" = facts.executor;
+    assert.equal(executed, false);
+    assert.equal(authorized, false);
+    assert(["synthetic", "production"].includes(executor));
+    assert(BigInt(delta) > 0n && BigInt(until) > BigInt(from));
+    assert.equal(facts.baseline_integrity_hash, source.expected_baseline_integrity_hash);
+    assert.equal(facts.baseline.integrity_hash, source.expected_baseline_integrity_hash);
+    assert.equal(facts.signer_public_key_hex, source.anchor.toLowerCase());
+    assert.equal(facts.baseline.signer_public_key_hex, source.incident_anchor!.toLowerCase());
+    const report = Buffer.from(JSON.parse(data.toString("utf8")).report_base64, "base64");
+    assert.equal(facts.report_sha256, createHash("sha256").update(report).digest("hex"));
+    if (facts.baseline_scope === "authenticated_runtime_incident") {
+      const epoch: string = facts.baseline.runtime_origin.signed_epoch;
+      assert.equal(epoch, "18446744073709551615");
+      assert.equal(facts.baseline.run_origin.signer_public_key_hex, source.run_anchor);
+      assert.equal(facts.baseline.runtime_origin.product_root_key_id, `ed25519:${source.runtime_anchor}`);
+    } else if (facts.baseline_scope === "authenticated_run_incident") {
+      assert.equal(facts.baseline.run_origin.signer_public_key_hex, source.run_anchor);
+    }
+    promotionPositive += 1;
+  } catch (error: unknown) {
+    if (source.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== source.expected) throw error;
+    promotionNegative += 1;
+  }
+}
+assert(promotionPositive >= 5 && promotionNegative >= 20, "counterfactual promotion matrix missing");
 let identityPositive = 0;
 let identityNegative = 0;
 for (const source of cases.filter((item) => item.format === "publisher-source" && item.expected_manifest_sha256 !== undefined)) {

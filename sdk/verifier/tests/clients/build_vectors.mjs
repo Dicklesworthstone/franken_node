@@ -968,6 +968,255 @@ addCfIncident("counterfactual_incident_duplicate_member", "JSON_INVALID", {
   encode: (transport) => JSON.stringify(transport).slice(0, -1) + ',"baseline_bundle_base64":""}',
 });
 
+
+// Authenticate the EXISTING incident-counterfactual-report/v2 promotion
+// protocol. Independent Node crypto signs the same three receipt wire formats;
+// these synthetic assessments establish protocol conformance, not guest work.
+const promotionKey = seedKey(0x76);
+const promotionAnchor = publicBytes(promotionKey).toString("hex");
+const promotionOperator = "operator://independent-counterfactual-fixture";
+const promotionTimestamp = "2026-11-23T12:00:00Z";
+const promotionRules = [
+  "INV-LAB-SIGNED-ROLLOUT", "INV-LAB-ROLLBACK-CONTRACT", "INV-LAB-LOSS-DELTA-POSITIVE",
+];
+const promotionTrigger = "operator_abort_or_expected_loss_delta_non_positive";
+const promotionDigest = (value) => "sha256:" + hash(canonical(value));
+function promotionResult(baseline, loss = 40n, policy = "strict") {
+  const result = cfIncidentResult(baseline, policy);
+  assert(result.original_outcomes.length > 0);
+  result.original_outcomes[0].expected_loss = loss + 5n;
+  result.counterfactual_outcomes[0].expected_loss = 5n;
+  result.counterfactual_outcomes[0].decision = "quarantine";
+  result.divergence_points = [{
+    sequence_number: result.original_outcomes[0].sequence_number,
+    original_decision: "allow", counterfactual_decision: "quarantine",
+    original_rationale: result.original_outcomes[0].rationale,
+    counterfactual_rationale: result.counterfactual_outcomes[0].rationale,
+    impact_estimate: "high",
+  }];
+  result.summary_statistics.changed_decisions = 1;
+  result.summary_statistics.severity_delta = -loss;
+  return result;
+}
+function sealPromotionReceipt(receipt, signingKey = promotionKey) {
+  const unsigned = clone(receipt);
+  delete unsigned.signer_key_id;
+  delete unsigned.chain_hash;
+  delete unsigned.signature;
+  const payload = Buffer.from(canonical(unsigned));
+  const prior = unsigned.previous_receipt_hash ?? "GENESIS";
+  return {
+    ...unsigned,
+    signer_key_id: hash(Buffer.concat([Buffer.from("artifact_signing_keyid_v1:"), publicBytes(signingKey)])).slice(0, 16),
+    chain_hash: hash(Buffer.concat([Buffer.from("decision_receipt_chain_v1:"), lp(prior), u64(payload.length), payload])),
+    signature: sign(null, payload, signingKey).toString("base64"),
+  };
+}
+function promotionReceipt(action, report, outputHash, expectedLossDelta, rollbackCommand) {
+  const actionName = "incident.counterfactual." + action;
+  return sealPromotionReceipt({
+    receipt_id: actionName + ":" + outputHash.slice("sha256:".length, "sha256:".length + 16),
+    action_name: actionName, actor_identity: promotionOperator, timestamp: report.timestamp,
+    signature_version: "ed25519-v1", crypto_suite: "ed25519-v1",
+    nonce: ({ rollout: "a", rollback: "b", promote: "c" })[action].repeat(32),
+    audience: "franken-node", input_hash: report.counterfactual_digest, output_hash: outputHash,
+    decision: "approved",
+    rationale: "signed counterfactual promotion contract for policy " + report.policy
+      + "; expected_loss_delta=" + expectedLossDelta,
+    evidence_refs: report.evidence_refs, policy_rule_chain: promotionRules,
+    confidence: 4607182418800017408n, rollback_command: rollbackCommand,
+    previous_receipt_hash: null,
+  });
+}
+function promotedReport(baseline, options = {}) {
+  const output = options.output ?? {
+    mode: "single", ...promotionResult(baseline, options.loss ?? 40n),
+  };
+  const results = output.results ?? [output];
+  const total = results.reduce((n, result) => n + result.summary_statistics.total_decisions, 0);
+  const changed = results.reduce((n, result) => n + result.summary_statistics.changed_decisions, 0);
+  const severity = results.reduce((n, result) => n + BigInt(result.summary_statistics.severity_delta), 0n);
+  const executor = options.executor ?? "synthetic";
+  const policy = options.policy ?? "strict";
+  const report = {
+    schema_version: "franken-node/incident-counterfactual-report/v2",
+    timestamp: promotionTimestamp, bundle_id: baseline.bundle_id, incident_id: baseline.incident_id,
+    bundle_created_at: baseline.created_at, bundle_integrity_hash: baseline.integrity_hash,
+    policy, original_policy: baseline.policy_version, counterfactual_policy: policy, executor,
+    evidence_refs: baseline.evidence_refs, total_decisions: total, changed_decisions: changed,
+    severity_delta: severity, decision_deltas: output.divergence_points ?? [],
+    counterfactual_digest: "sha256:" + hash("incident-counterfactual-report/v2\nexecutor=" + executor + "\n" + canonical(output)),
+    counterfactual: output,
+  };
+  const mitigationId = baseline.incident_id + ":" + policy + ":" + report.counterfactual_digest.slice(7, 23);
+  const rollout = {
+    mitigation_id: mitigationId,
+    policy_diff: output.metadata?.policy_override_diff
+      ?? [{ field: "policy", original: baseline.policy_version, counterfactual: policy }],
+    expected_loss_delta: -severity, operator_id: promotionOperator,
+    valid_from_epoch_ms: options.validFrom ?? BigInt(Date.parse(promotionTimestamp)) + 1n,
+    valid_until_epoch_ms: options.validUntil ?? BigInt(Date.parse(promotionTimestamp)) + 86_400_001n,
+  };
+  const rollback = {
+    mitigation_id: mitigationId, rollback_trigger: promotionTrigger,
+    rollback_policy: baseline.policy_version, operator_id: promotionOperator,
+  };
+  const rollbackCommand = "restore_policy_version:" + baseline.policy_version;
+  rollout.signature = promotionReceipt("rollout", report, promotionDigest(rollout), -severity, promotionTrigger);
+  rollback.signature = promotionReceipt("rollback", report, promotionDigest(rollback), -severity, rollbackCommand);
+  report.promotion_contract = { mitigation_id: mitigationId, rollout, rollback };
+  report.promotion_contract_digest = promotionDigest(report.promotion_contract);
+  report.promotion_signature = promotionReceipt("promote", report, report.promotion_contract_digest, -severity, rollbackCommand);
+  return report;
+}
+// An outer trusted signature cannot repair a foreign or mismatched inner
+// contract. Re-signing the outer envelope isolates each nested control.
+function resealPromotionEnvelope(report) {
+  report.promotion_contract_digest = promotionDigest(report.promotion_contract);
+  report.promotion_signature.output_hash = report.promotion_contract_digest;
+  report.promotion_signature.receipt_id = "incident.counterfactual.promote:" + report.promotion_contract_digest.slice(7, 23);
+  report.promotion_signature = sealPromotionReceipt(report.promotion_signature);
+}
+function addPromotion(name, expected = "verified", options = {}) {
+  const baselineBytes = Buffer.from(options.baselineBytes ?? incidentBytes);
+  const baseline = JSON.parse(baselineBytes);
+  const report = promotedReport(baseline, options);
+  options.mutateReport?.(report);
+  const reportBytes = Buffer.from(options.encodeReport?.(report) ?? canonical(report));
+  const transport = {
+    schema_version: "franken-verifier/counterfactual-promotion-input/v1",
+    baseline_bundle_base64: baselineBytes.toString("base64"),
+    report_base64: reportBytes.toString("base64"),
+  };
+  options.mutateTransport?.(transport);
+  const rollout = report.promotion_contract?.rollout;
+  add(name, "counterfactual-promotion", options.encodeTransport?.(transport) ?? JSON.stringify(transport), expected, {
+    anchor: promotionAnchor, incident_anchor: anchor,
+    expected_baseline_integrity_hash: baseline.integrity_hash,
+    cf_mode: report.counterfactual?.mode, cf_count: report.counterfactual?.results?.length ?? 1,
+    cf_baseline: baseline.integrity_hash, cf_output_hash: hash(canonical(report.counterfactual)),
+    ...(expected === "verified" ? { promotion_expected: {
+      baseline_integrity_hash: baseline.integrity_hash, signer_public_key_hex: promotionAnchor,
+      operator_id: promotionOperator, report_sha256: hash(reportBytes),
+      counterfactual_digest: report.counterfactual_digest,
+      counterfactual_output_sha256: hash(canonical(report.counterfactual)),
+      promotion_contract_digest: report.promotion_contract_digest,
+      mitigation_id: report.promotion_contract.mitigation_id, executor: report.executor,
+      mode: report.counterfactual.mode, result_count: report.counterfactual.results?.length ?? 1,
+      expected_loss_delta: String(rollout.expected_loss_delta),
+      valid_from_epoch_ms: String(rollout.valid_from_epoch_ms),
+      valid_until_epoch_ms: String(rollout.valid_until_epoch_ms),
+      guest_execution_verified: false, rollout_authorized: false,
+    } } : {}),
+    ...options.metadata,
+  });
+}
+addPromotion("counterfactual_promotion_synthetic");
+addPromotion("counterfactual_promotion_production", "verified", { executor: "production" });
+addPromotion("counterfactual_promotion_sweep", "verified", {
+  policy: "sweep:quarantine_threshold=70,80",
+  output: { mode: "sweep", parameter: "quarantine_threshold",
+    results: [promotionResult(incident, 30n), promotionResult(incident, 50n)] },
+});
+addPromotion("counterfactual_promotion_original_run", "verified", {
+  baselineBytes: originalRunBytes, metadata: { incident_anchor: exporterAnchor, run_anchor: runAnchor },
+});
+addPromotion("counterfactual_promotion_runtime_origin", "verified", {
+  baselineBytes: runtimeWire, metadata: { run_anchor: runAnchor, runtime_anchor: runtimeAnchor },
+});
+addPromotion("counterfactual_promotion_exact_i64_loss", "verified", { loss: 9_223_372_036_854_775_807n });
+addPromotion("counterfactual_promotion_exact_i64_window", "verified", {
+  validFrom: 9_223_372_036_768_375_807n, validUntil: 9_223_372_036_854_775_807n,
+});
+addPromotion("counterfactual_promotion_negative_epoch", "verified", { validFrom: -86_400_000n, validUntil: -1n });
+addPromotion("counterfactual_promotion_beyond_number_precision", "verified", {
+  loss: 9_007_199_254_740_993n, validFrom: 9_007_199_254_740_993n, validUntil: 9_007_199_254_741_993n,
+});
+addPromotion("counterfactual_promotion_foreign_operator", "COUNTERFACTUAL_PROMOTION_SIGNATURE_INVALID", { metadata: { anchor: foreign } });
+addPromotion("counterfactual_promotion_foreign_exporter", "COUNTERFACTUAL_BASELINE_INVALID", { metadata: { incident_anchor: foreign } });
+addPromotion("counterfactual_promotion_baseline_pin", "COUNTERFACTUAL_BASELINE_PIN_MISMATCH", {
+  metadata: { expected_baseline_integrity_hash: hash("different expected incident") },
+});
+addPromotion("counterfactual_promotion_signed_other_incident", "COUNTERFACTUAL_BASELINE_PIN_MISMATCH", {
+  baselineBytes: resealIncident(clone(substitutedBaseline)),
+  metadata: { expected_baseline_integrity_hash: incident.integrity_hash },
+});
+addPromotion("counterfactual_promotion_tampered_baseline", "COUNTERFACTUAL_BASELINE_INVALID", { baselineBytes: canonical(tampered) });
+for (const [name, mutateReport] of [
+  ["bundle_id", (report) => { report.bundle_id = "PRIVATE-other-bundle"; }],
+  ["incident_id", (report) => { report.incident_id = "PRIVATE-other-incident"; }],
+  ["bundle_time", (report) => { report.bundle_created_at = promotionTimestamp; }],
+  ["original_policy", (report) => { report.original_policy = "PRIVATE-other-policy"; }],
+  ["evidence_population", (report) => { report.evidence_refs = []; }],
+  ["total", (report) => { report.total_decisions += 1; }],
+  ["changed", (report) => { report.changed_decisions += 1; }],
+  ["loss", (report) => { report.severity_delta -= 1n; }],
+  ["decision_deltas", (report) => { report.decision_deltas = []; }],
+  ["executor", (report) => { report.executor = "production"; }],
+  ["policy", (report) => { report.policy = "permissive"; }],
+  ["counterfactual_policy", (report) => { report.counterfactual_policy = "permissive"; }],
+  ["report_time", (report) => { report.timestamp = "2026-11-23T12:00:01Z"; }],
+]) addPromotion("counterfactual_promotion_changed_" + name, "COUNTERFACTUAL_PROMOTION_CONTEXT_MISMATCH", { mutateReport });
+for (const which of ["rollout", "rollback", "promotion"]) {
+  addPromotion("counterfactual_promotion_bad_" + which + "_signature", "COUNTERFACTUAL_PROMOTION_SIGNATURE_INVALID", {
+    mutateReport: (report) => {
+      const receipt = which === "promotion" ? report.promotion_signature : report.promotion_contract[which].signature;
+      receipt.signature = Buffer.alloc(64).toString("base64");
+      if (which !== "promotion") resealPromotionEnvelope(report);
+    },
+  });
+}
+for (const [name, mutateReceipt] of [
+  ["audience", (receipt) => { receipt.audience = "other-product"; }],
+  ["action", (receipt) => { receipt.action_name = "incident.counterfactual.rollback"; }],
+  ["actor", (receipt) => { receipt.actor_identity = "operator://other"; }],
+  ["output", (receipt) => { receipt.output_hash = "sha256:" + hash("other rollout"); }],
+  ["input", (receipt) => { receipt.input_hash = "sha256:" + hash("other simulation"); }],
+  ["rules", (receipt) => { receipt.policy_rule_chain = []; }],
+  ["rollback_command", (receipt) => { receipt.rollback_command = "PRIVATE-unrelated-action"; }],
+  ["chain", (receipt) => { receipt.previous_receipt_hash = "a".repeat(64); }],
+]) addPromotion("counterfactual_promotion_resigned_" + name, "COUNTERFACTUAL_PROMOTION_RECEIPT_INVALID", {
+  mutateReport: (report) => {
+    const receipt = report.promotion_contract.rollout.signature;
+    mutateReceipt(receipt);
+    report.promotion_contract.rollout.signature = sealPromotionReceipt(receipt);
+    resealPromotionEnvelope(report);
+  },
+});
+addPromotion("counterfactual_promotion_foreign_nested_operator", "COUNTERFACTUAL_PROMOTION_SIGNATURE_INVALID", {
+  mutateReport: (report) => {
+    report.promotion_contract.rollback.signature = sealPromotionReceipt(report.promotion_contract.rollback.signature, seedKey(0x77));
+    resealPromotionEnvelope(report);
+  },
+});
+for (const [name, mutateReport] of [
+  ["nonpromoted", (report) => { report.promotion_contract = null; report.promotion_contract_digest = null; report.promotion_signature = null; }],
+  ["missing_rollout", (report) => { delete report.promotion_contract.rollout.signature; resealPromotionEnvelope(report); }],
+  ["missing_rollback", (report) => { delete report.promotion_contract.rollback.signature; resealPromotionEnvelope(report); }],
+  ["native_report", (report) => { report.schema_version = "franken-node/incident-native-counterfactual/v1"; }],
+  ["unknown_executor", (report) => { report.executor = "native"; }],
+  ["unknown_field", (report) => { report.replay_certified = true; }],
+]) addPromotion("counterfactual_promotion_" + name, "COUNTERFACTUAL_PROMOTION_REPORT_INVALID", { mutateReport });
+for (const [name, validFrom, validUntil] of [
+  ["empty_window", 100n, 100n], ["inverted_window", 101n, 100n],
+]) addPromotion("counterfactual_promotion_" + name, "COUNTERFACTUAL_PROMOTION_CONTEXT_MISMATCH", { validFrom, validUntil });
+addPromotion("counterfactual_promotion_missing_run", "COUNTERFACTUAL_BASELINE_INVALID", { metadata: { run_anchor: runAnchor } });
+addPromotion("counterfactual_promotion_wrong_runtime", "COUNTERFACTUAL_BASELINE_INVALID", {
+  baselineBytes: runtimeWire, metadata: { run_anchor: runAnchor, runtime_anchor: foreign },
+});
+addPromotion("counterfactual_promotion_duplicate_report_field", "COUNTERFACTUAL_PROMOTION_REPORT_INVALID", {
+  encodeReport: (report) => canonical(report).slice(0, -1) + ',"executor":"production"}',
+});
+addPromotion("counterfactual_promotion_noncanonical_report_encoding", "EVIDENCE_INVALID", {
+  mutateTransport: (transport) => { transport.report_base64 += "\n"; },
+});
+addPromotion("counterfactual_promotion_unknown_transport_field", "EVIDENCE_INVALID", {
+  mutateTransport: (transport) => { transport.trusted_key = promotionAnchor; },
+});
+addPromotion("counterfactual_promotion_duplicate_transport_field", "JSON_INVALID", {
+  encodeTransport: (transport) => JSON.stringify(transport).slice(0, -1) + ',"report_base64":""}',
+});
+
 // Native-session receipt and durable-journal protocols are encoded independently
 // with Node crypto. These signed fixtures model supervisor observations; they
 // do not claim that the test guest ran, that history is complete, or cleanup.

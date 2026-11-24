@@ -31,7 +31,8 @@ MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
-    "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident", "ltv-evidence",
+    "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident",
+    "counterfactual-promotion", "ltv-evidence",
     "fleet-quiescence-observations", "fleet-epoch-commit",
 ]
 _SCOPES = {
@@ -45,6 +46,7 @@ _SCOPES = {
     "publisher-source-trust": "authenticated_publisher_source_trust",
     "counterfactual-receipt": "authenticated_counterfactual_receipt",
     "counterfactual-incident": "authenticated_counterfactual_incident",
+    "counterfactual-promotion": "authenticated_counterfactual_promotion",
     "ltv-evidence": "authenticated_ltv_anteriority",
     "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
     "fleet-epoch-commit": "authenticated_fleet_epoch_commit",
@@ -62,6 +64,7 @@ class Verification(TypedDict):
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
                    "authenticated_counterfactual_receipt", "authenticated_counterfactual_incident",
+                   "authenticated_counterfactual_promotion",
                    "authenticated_ltv_anteriority",
                    "authenticated_fleet_supervisor_observations", "authenticated_fleet_epoch_commit"]
     artifact_sha256: str
@@ -182,6 +185,21 @@ class CounterfactualIncidentFacts(TypedDict):
                             "authenticated_runtime_incident"]
     baseline: IncidentFacts | RunIncidentFacts | RuntimeIncidentFacts
     guest_execution_verified: Literal[False]
+
+
+class CounterfactualPromotionFacts(CounterfactualIncidentFacts):
+    """Authenticated existing promotion contracts; no current rollout authority."""
+
+    operator_id: str
+    report_sha256: str
+    counterfactual_digest: str
+    promotion_contract_digest: str
+    mitigation_id: str
+    executor: Literal["synthetic", "production"]
+    expected_loss_delta: str
+    valid_from_epoch_ms: str
+    valid_until_epoch_ms: str
+    rollout_authorized: Literal[False]
 
 
 class NativeSessionEffectJournalFacts(TypedDict):
@@ -404,6 +422,12 @@ def _bounded_text(value: Any) -> bool:
         return len(value.encode("utf-8")) <= 4096
     except UnicodeEncodeError:
         return False
+
+
+def _signed_i64_decimal(value: Any) -> bool:
+    return (isinstance(value, str)
+            and re.fullmatch(r"0|-?[1-9][0-9]{0,18}", value) is not None
+            and -(2**63) <= int(value) <= 2**63 - 1)
 
 
 def _run_origin_valid(origin: Any, anchor: str) -> bool:
@@ -895,6 +919,42 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         return _publisher_source_trust_valid(
             facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
         )
+    if format == "counterfactual-promotion":
+        baseline_scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
+                          "authenticated_run_incident" if run_anchor is not None else
+                          "authenticated_recorded_incident")
+        return (
+            isinstance(facts, dict)
+            and set(facts) == {"baseline_integrity_hash", "signer_public_key_hex", "operator_id",
+                               "report_sha256", "counterfactual_digest", "counterfactual_output_sha256",
+                               "promotion_contract_digest", "mitigation_id", "executor", "mode",
+                               "result_count", "expected_loss_delta", "valid_from_epoch_ms",
+                               "valid_until_epoch_ms", "baseline_scope", "baseline",
+                               "guest_execution_verified", "rollout_authorized"}
+            and facts["signer_public_key_hex"] == anchor
+            and isinstance(expected_baseline, str)
+            and facts["baseline_integrity_hash"] == expected_baseline
+            and all(isinstance(facts[key], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", facts[key]) is not None
+                    for key in ("report_sha256", "counterfactual_output_sha256"))
+            and all(_digest(facts[key]) for key in ("counterfactual_digest", "promotion_contract_digest"))
+            and all(_publisher_text(facts[key], 4096) for key in ("operator_id", "mitigation_id"))
+            and facts["executor"] in ("synthetic", "production")
+            and facts["mode"] in ("single", "sweep")
+            and type(facts["result_count"]) is int and 1 <= facts["result_count"] <= 20
+            and (facts["mode"] == "sweep" or facts["result_count"] == 1)
+            and all(_signed_i64_decimal(facts[key]) for key in (
+                "expected_loss_delta", "valid_from_epoch_ms", "valid_until_epoch_ms"))
+            and int(facts["expected_loss_delta"]) > 0
+            and int(facts["valid_until_epoch_ms"]) > int(facts["valid_from_epoch_ms"])
+            and facts["baseline_scope"] == baseline_scope
+            and facts["guest_execution_verified"] is False
+            and facts["rollout_authorized"] is False
+            and isinstance(incident_anchor, str)
+            and _facts_valid(facts["baseline"], "incident-bundle", incident_anchor,
+                             run_anchor, runtime_anchor)
+            and facts["baseline"]["integrity_hash"] == expected_baseline
+        )
     if format == "counterfactual-incident":
         baseline_scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
                           "authenticated_run_incident" if run_anchor is not None else
@@ -1075,6 +1135,10 @@ def verify_artifact(
     detached signature authenticate the counterfactual receipt; optional run
     and runtime keys strengthen the nested baseline's origin evidence only.
     The binding never claims that the guest was independently re-executed.
+    Counterfactual promotions authenticate the product report's embedded operator
+    signatures with the primary key and the same independent baseline authorities.
+    They accept no detached signature and grant no current rollout authority.
+    Loss deltas and validity-window milliseconds remain exact signed i64 strings.
     Native-session forensics authenticates retained supervisor observations.
     A pending outcome and a retained journal prefix never certify complete history.
     Version 3 authenticates retained source capsule content without replaying it.
@@ -1128,21 +1192,21 @@ def verify_artifact(
             raise VerifierError("INPUT_INVALID", "fleet policy applies only to fleet verification formats")
         if not _hex(trusted_public_key_hex, 64):
             raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
-    if format == "counterfactual-incident":
+    if format in ("counterfactual-incident", "counterfactual-promotion"):
         if not _hex(trusted_incident_public_key_hex, 64):
             raise VerifierError("INCIDENT_ANCHOR_INVALID", "an independent incident exporter public key is required")
         if (not isinstance(expected_baseline_integrity_hash, str)
                 or re.fullmatch(r"[0-9a-f]{64}", expected_baseline_integrity_hash) is None):
             raise VerifierError("EXPECTED_BASELINE_INVALID", "an exact lowercase baseline integrity hash is required")
     elif trusted_incident_public_key_hex is not None or expected_baseline_integrity_hash is not None:
-        raise VerifierError("INPUT_INVALID", "incident exporter trust and baseline pins require counterfactual-incident")
+        raise VerifierError("INPUT_INVALID", "incident exporter trust and baseline pins require a composed counterfactual format")
     if trusted_run_public_key_hex is not None:
-        if format not in ("incident-bundle", "counterfactual-incident"):
+        if format not in ("incident-bundle", "counterfactual-incident", "counterfactual-promotion"):
             raise VerifierError("INPUT_INVALID", "original-run trust requires an incident verification format")
         if not _hex(trusted_run_public_key_hex, 64):
             raise VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key")
     if trusted_runtime_public_key_hex is not None:
-        if format not in ("incident-bundle", "counterfactual-incident") or trusted_run_public_key_hex is None:
+        if format not in ("incident-bundle", "counterfactual-incident", "counterfactual-promotion") or trusted_run_public_key_hex is None:
             raise VerifierError("INPUT_INVALID", "runtime trust requires incident verification and original-run trust")
         if not _hex(trusted_runtime_public_key_hex, 64):
             raise VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key")
@@ -1182,7 +1246,7 @@ def verify_artifact(
     runtime_anchor = trusted_runtime_public_key_hex.lower() if trusted_runtime_public_key_hex is not None else None
     revocation_anchor = trusted_revocation_public_key_hex.lower() if trusted_revocation_public_key_hex is not None else None
     provenance_anchor = trusted_provenance_public_key_hex.lower() if trusted_provenance_public_key_hex is not None else None
-    scope = (_SCOPES[format] if format == "counterfactual-incident" else
+    scope = (_SCOPES[format] if format in ("counterfactual-incident", "counterfactual-promotion") else
              "authenticated_runtime_incident" if runtime_anchor is not None else
              "authenticated_run_incident" if run_anchor is not None else _SCOPES[format])
     args = [executable, "verify", "--format", format]
@@ -1215,7 +1279,7 @@ def verify_artifact(
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
-        raise VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual format")
+        raise VerifierError("INPUT_INVALID", "this format does not accept a detached signature")
     try:
         process = _run_bounded(args, data, timeout)
     except OSError as error:

@@ -1,4 +1,5 @@
 """Real isolated consumer: production bindings + trusted executable only."""
+import base64
 import hashlib
 import json
 import os
@@ -175,6 +176,34 @@ for case in cases:
                 assert facts["baseline"]["runtime_origin"]["product_root_key_id"] == "ed25519:" + case["runtime_anchor"]
                 assert facts["baseline"]["runtime_origin"]["signed_epoch"] == "18446744073709551615"
             assert facts["baseline_scope"] == expected_scope
+        if case["format"] == "counterfactual-promotion":
+            assert result["scope"] == "authenticated_counterfactual_promotion"
+            facts = result["facts"]
+            for key, expected in case.get("promotion_expected", {}).items():
+                assert facts[key] == expected, (case["name"], key, facts[key], expected)
+            assert facts["baseline_integrity_hash"] == case["expected_baseline_integrity_hash"]
+            assert facts["baseline"]["integrity_hash"] == case["expected_baseline_integrity_hash"]
+            assert facts["signer_public_key_hex"] == case["anchor"].lower()
+            assert facts["baseline"]["signer_public_key_hex"] == case["incident_anchor"].lower()
+            report_bytes = base64.b64decode(json.loads(data)["report_base64"], validate=True)
+            assert facts["report_sha256"] == hashlib.sha256(report_bytes).hexdigest()
+            assert facts["guest_execution_verified"] is False
+            assert facts["rollout_authorized"] is False
+            assert facts["executor"] in ("synthetic", "production")
+            assert facts["mode"] in ("single", "sweep")
+            assert 1 <= facts["result_count"] <= 20
+            assert all(isinstance(facts[key], str) for key in (
+                "expected_loss_delta", "valid_from_epoch_ms", "valid_until_epoch_ms"))
+            assert int(facts["expected_loss_delta"]) > 0
+            assert int(facts["valid_until_epoch_ms"]) > int(facts["valid_from_epoch_ms"])
+            expected_scope = ("authenticated_runtime_incident" if case.get("runtime_anchor") else
+                              "authenticated_run_incident" if case.get("run_anchor") else
+                              "authenticated_recorded_incident")
+            assert facts["baseline_scope"] == expected_scope
+            if case.get("run_anchor"):
+                assert facts["baseline"]["run_origin"]["signer_public_key_hex"] == case["run_anchor"].lower()
+            if case.get("runtime_anchor"):
+                assert facts["baseline"]["runtime_origin"]["product_root_key_id"] == "ed25519:" + case["runtime_anchor"].lower()
         if case["format"] == "ltv-evidence":
             assert result["scope"] == "authenticated_ltv_anteriority"
             assert result["facts"] == case["ltv_facts"], case["name"]
@@ -230,6 +259,71 @@ cf_incident_protocol = verify_artifact(json.dumps({"protocol_control": "cf_incid
 assert cf_incident_protocol["facts"]["baseline_scope"] == "authenticated_runtime_incident"
 assert cf_incident_protocol["facts"]["guest_execution_verified"] is False
 print(json.dumps({"case": "protocol_cf_incident_valid", "result": "verified"}), flush=True)
+
+promotion_cases = [case for case in cases if case["format"] == "counterfactual-promotion"]
+assert sum(case["expected"] == "verified" for case in promotion_cases) >= 5
+assert sum(case["expected"] != "verified" for case in promotion_cases) >= 20
+promotion_case = next(case for case in promotion_cases if case["expected"] == "verified" and case.get("runtime_anchor"))
+promotion_options = {
+    "verifier": str(root / "fake_verifier"), "format": "counterfactual-promotion",
+    "trusted_incident_public_key_hex": promotion_case["incident_anchor"],
+    "expected_baseline_integrity_hash": promotion_case["expected_baseline_integrity_hash"],
+    "trusted_run_public_key_hex": promotion_case["run_anchor"],
+    "trusted_runtime_public_key_hex": promotion_case["runtime_anchor"],
+}
+promotion_controls = [
+    "cf_promotion_wrong_scope", "cf_promotion_wrong_format", "cf_promotion_wrong_signer",
+    "cf_promotion_wrong_pin", "cf_promotion_wrong_nested_pin", "cf_promotion_wrong_exporter",
+    "cf_promotion_wrong_run_signer", "cf_promotion_wrong_runtime_key", "cf_promotion_missing_run_origin",
+    "cf_promotion_missing_runtime_origin", "cf_promotion_downgraded_baseline", "cf_promotion_missing_field",
+    "cf_promotion_extra_field", "cf_promotion_bad_report_hash", "cf_promotion_bad_output_hash",
+    "cf_promotion_bad_counterfactual_digest", "cf_promotion_bad_contract_digest", "cf_promotion_empty_operator",
+    "cf_promotion_operator_whitespace", "cf_promotion_operator_control", "cf_promotion_operator_oversize",
+    "cf_promotion_operator_surrogate", "cf_promotion_empty_mitigation", "cf_promotion_mitigation_whitespace",
+    "cf_promotion_mitigation_control", "cf_promotion_invalid_executor", "cf_promotion_invalid_mode",
+    "cf_promotion_zero_count", "cf_promotion_boolean_count", "cf_promotion_single_count_mismatch",
+    "cf_promotion_excessive_count", "cf_promotion_numeric_delta", "cf_promotion_overflow_delta",
+    "cf_promotion_zero_delta", "cf_promotion_negative_delta", "cf_promotion_noncanonical_delta",
+    "cf_promotion_numeric_from", "cf_promotion_underflow_from", "cf_promotion_plus_from",
+    "cf_promotion_negative_zero_from", "cf_promotion_numeric_until", "cf_promotion_overflow_until",
+    "cf_promotion_newline_until", "cf_promotion_empty_window", "cf_promotion_reversed_window",
+    "cf_promotion_guest_execution_claim", "cf_promotion_rollout_claim", "cf_promotion_boolean_number",
+]
+for mode in promotion_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), promotion_case["anchor"],
+                        **promotion_options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+for mode in ("cf_promotion_valid", "cf_promotion_valid_sweep"):
+    promoted = verify_artifact(json.dumps({"protocol_control": mode}).encode(), promotion_case["anchor"],
+                               **promotion_options)
+    assert promoted["facts"]["rollout_authorized"] is False
+    assert promoted["facts"]["guest_execution_verified"] is False
+    assert promoted["facts"]["expected_loss_delta"] == (
+        "9223372036854775807" if mode.endswith("_sweep") else "9007199254740993")
+    assert promoted["facts"]["valid_from_epoch_ms"] == ("0" if mode.endswith("_sweep") else "-9223372036854775808")
+    print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
+promotion_inputs = [
+    ("promotion_missing_exporter", {"trusted_incident_public_key_hex": None}, "INCIDENT_ANCHOR_INVALID"),
+    ("promotion_bad_exporter", {"trusted_incident_public_key_hex": "bad-key"}, "INCIDENT_ANCHOR_INVALID"),
+    ("promotion_missing_pin", {"expected_baseline_integrity_hash": None}, "EXPECTED_BASELINE_INVALID"),
+    ("promotion_noncanonical_pin", {"expected_baseline_integrity_hash": "A" * 64}, "EXPECTED_BASELINE_INVALID"),
+    ("promotion_prefixed_pin", {"expected_baseline_integrity_hash": "sha256:" + "a" * 64}, "EXPECTED_BASELINE_INVALID"),
+    ("promotion_detached_signature", {"signature_hex": "00" * 64}, "INPUT_INVALID"),
+    ("promotion_runtime_requires_run", {"trusted_run_public_key_hex": None}, "INPUT_INVALID"),
+]
+for name, overrides, code in promotion_inputs:
+    try:
+        verify_artifact(b"{}", promotion_case["anchor"], **{**promotion_options, **overrides})
+    except VerifierError as error:
+        assert error.code == code, (name, error.code, code)
+        print(json.dumps({"case": name, "result": code}), flush=True)
+    else:
+        raise AssertionError(name)
 
 fleet_case = next(case for case in cases if case["name"] == "fleet_independent_http_observations")
 epoch_case = next(case for case in cases if case["name"] == "epoch_independent_http_commit")
@@ -728,9 +822,9 @@ for mode in ltv_controls:
         raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
                   "transport_cases": check_bounded_transport(),
-                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases,
+                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases + len(promotion_inputs),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)
                   + len(publisher_trust_controls) + len(publisher_trust_positives) + identity_protocol_cases
-                  + len(counterfactual_controls) + len(ltv_controls)
+                  + len(counterfactual_controls) + len(ltv_controls) + len(promotion_controls) + 2
                   + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)
