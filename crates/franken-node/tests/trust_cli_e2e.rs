@@ -1021,6 +1021,155 @@ fn run_missing_registry_suggests_init_scan() {
 }
 
 #[test]
+fn lost_or_corrupt_trust_authority_blocks_preflight_in_every_profile() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_authority_path, durable_store_path, registry_snapshot_path,
+    };
+
+    for loss in ["missing", "empty", "corrupt"] {
+        let workspace = seeded_fixture_trust_workspace();
+        write_run_package_manifest(workspace.path(), &[("@acme/auth-guard", "^1.4.2")]);
+        let revoked = run_cli_in_workspace(
+            workspace.path(),
+            &["trust", "revoke", "npm:@acme/auth-guard", "--json"],
+        );
+        assert!(
+            revoked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&revoked.stderr)
+        );
+
+        let snapshot = registry_snapshot_path(workspace.path());
+        let database = durable_store_path(&snapshot);
+        let authority = durable_store_authority_path(&snapshot);
+        assert!(
+            authority.is_file(),
+            "durable trust must retain its takeover marker"
+        );
+        fs::rename(&database, database.with_extension("db.retained"))
+            .expect("retain the revoked authority while simulating database loss");
+        // A retained WAL may legitimately recover committed rows. Move the
+        // complete old database aside so empty/corrupt fixtures test actual
+        // authority loss rather than a valid recovery.
+        for suffix in ["wal", "shm", "journal"] {
+            let sidecar = PathBuf::from(format!("{}-{suffix}", database.display()));
+            if sidecar.exists() {
+                fs::rename(
+                    &sidecar,
+                    PathBuf::from(format!("{}.retained", sidecar.display())),
+                )
+                .expect("retain database sidecar");
+            }
+        }
+        match loss {
+            "missing" => {}
+            "empty" => fs::write(&database, b"").expect("simulate incomplete database"),
+            "corrupt" => fs::write(&database, b"unreadable trust authority")
+                .expect("simulate corrupt database"),
+            _ => unreachable!(),
+        }
+
+        for profile in ["strict", "balanced", "legacy-risky"] {
+            let output = run_cli_in_workspace(
+                workspace.path(),
+                &["run", "--policy", profile, "--json", "."],
+            );
+            assert!(
+                !output.status.success(),
+                "{profile} must refuse {loss} established authority: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let report = parse_json_stdout(&output, "unavailable trust authority");
+            assert_eq!(report["verdict"]["status"], "blocked", "{report:#}");
+            assert_eq!(report["receipt"]["decision"], "denied", "{report:#}");
+            assert!(
+                report["verdict"]["violations"]
+                    .as_array()
+                    .expect("violations")
+                    .iter()
+                    .any(|violation| violation["kind"] == "registry_corrupt"),
+                "{profile} must not reclassify {loss} authority as a new project: {report:#}"
+            );
+            assert!(
+                report.get("dispatch").is_none(),
+                "guest must not dispatch: {report:#}"
+            );
+        }
+        if loss == "missing" {
+            assert!(
+                !database.exists(),
+                "failed reads must not recreate the database"
+            );
+        }
+    }
+}
+
+#[test]
+fn init_and_scan_cannot_rebootstrap_lost_trust_authority() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_authority_path, durable_store_path, registry_snapshot_path,
+    };
+
+    let workspace = seeded_fixture_trust_workspace();
+    write_run_package_manifest(workspace.path(), &[("@acme/auth-guard", "^1.4.2")]);
+    let revoked = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/auth-guard", "--json"],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+
+    let snapshot = registry_snapshot_path(workspace.path());
+    let database = durable_store_path(&snapshot);
+    let retained = database.with_extension("db.retained");
+    let authority = durable_store_authority_path(&snapshot);
+    let marker = fs::read(&authority).expect("read durable takeover marker");
+    fs::rename(&database, &retained).expect("retain database during simulated loss");
+
+    for args in [
+        vec!["init", "--out-dir", ".", "--backup-existing", "--json"],
+        vec!["trust", "scan", ".", "--json"],
+        vec!["trust", "list", "--json"],
+    ] {
+        let output = run_cli_in_workspace(workspace.path(), &args);
+        assert!(
+            !output.status.success(),
+            "{} must refuse unavailable established authority: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report = parse_json_stdout(&output, "lost trust authority cannot be bootstrapped");
+        assert!(
+            report["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("authority")),
+            "the error must identify the unavailable authority: {report:#}"
+        );
+        assert!(
+            !database.exists(),
+            "a refusal must not create replacement trust state"
+        );
+        assert_eq!(fs::read(&authority).expect("retained marker"), marker);
+    }
+
+    fs::rename(&retained, &database).expect("restore the original durable authority");
+    let restored = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+    );
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let card = parse_json_stdout(&restored, "restored trust authority");
+    assert_eq!(card["revocation_status"]["status"], "revoked");
+}
+
+#[test]
 fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
     let workspace = seeded_fixture_trust_workspace();
     write_run_package_manifest(workspace.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);
@@ -1234,13 +1383,10 @@ fn execution_trust_admission_rechecks_a_legacy_skipped_registry_when_it_appears(
     let registry_path = registry_snapshot_path(workspace.path());
     fs::create_dir_all(registry_path.parent().expect("registry parent")).expect("state directory");
     fs::write(&registry_path, b"corrupt registry").expect("existing unreadable preflight input");
-    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now + 1)
-        .expect("legacy-risky retains its explicit corrupt-registry behavior");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("unreadable"))
-    );
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 1)
+        .expect_err("existing unreadable authority cannot erase possible revocations")
+        .to_string();
+    assert!(error.contains("Trust registry validation failed"), "{error}");
     fixture_registry(now)
         .expect("replacement signed registry")
         .persist_authoritative_state(&registry_path)
@@ -1250,6 +1396,110 @@ fn execution_trust_admission_rechecks_a_legacy_skipped_registry_when_it_appears(
         .to_string();
     assert!(error.contains("publisher key compromised"), "{error}");
 }
+
+#[test]
+fn execution_trust_database_loss_cannot_restore_skipped_legacy_admission() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_authority_path, durable_store_path, registry_snapshot_path,
+    };
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
+    let snapshot = registry_snapshot_path(workspace.path());
+    let database = durable_store_path(&snapshot);
+    let authority = durable_store_authority_path(&snapshot);
+    assert!(database.is_file(), "fixture committed durable authority");
+    assert!(authority.is_file(), "commit retained the authority marker");
+    assert!(!snapshot.exists(), "fixture has no legacy fallback");
+    fs::rename(&database, database.with_extension("displaced-db"))
+        .expect("preserve committed authority while simulating its loss");
+
+    // Admission predates registry initialization. Its optional-registry flag
+    // cannot override evidence that the project subsequently committed one.
+    let requirements =
+        RunTrustRequirements::new(&["npm:@beta/telemetry-bridge".to_string()], &[], false)
+            .expect("retained skipped-preflight requirements");
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        config.profile = profile;
+        let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
+            .expect_err("lost established authority must block every execution profile");
+        assert!(
+            error
+                .to_string()
+                .contains("Trust registry validation failed at execution time"),
+            "{profile}: {error:#}"
+        );
+        assert!(
+            !database.exists(),
+            "execution admission must not recreate lost authority"
+        );
+    }
+}
+
+#[test]
+fn execution_trust_unreadable_authority_never_retains_legacy_skip() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_path, registry_snapshot_path,
+    };
+
+    for state in [
+        "malformed_snapshot",
+        "orphan_high_water",
+        "database_directory",
+    ] {
+        let workspace = config_only_workspace();
+        let snapshot = registry_snapshot_path(workspace.path());
+        fs::create_dir_all(snapshot.parent().expect("registry parent"))
+            .expect("create authority directory");
+        match state {
+            "malformed_snapshot" => {
+                fs::write(&snapshot, b"not an authenticated registry")
+                    .expect("write malformed authority");
+            }
+            "orphan_high_water" => {
+                fs::write(
+                    snapshot.with_file_name("trust-card-registry.v1.json.high-water.json"),
+                    b"retained high-water without its snapshot",
+                )
+                .expect("write orphaned authority");
+            }
+            "database_directory" => {
+                fs::create_dir(durable_store_path(&snapshot))
+                    .expect("replace database surface with a directory");
+            }
+            _ => unreachable!("known damage fixture"),
+        }
+        let mut config = Config::resolve_with_env(
+            Some(&workspace.path().join("franken_node.toml")),
+            CliOverrides::default(),
+            &|_| None,
+        )
+        .expect("resolve signed-registry configuration")
+        .config;
+        let requirements =
+            RunTrustRequirements::new(&["npm:@beta/telemetry-bridge".to_string()], &[], false)
+                .expect("retained skipped-preflight requirements");
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            config.profile = profile;
+            let error = validate_execution_trust(workspace.path(), &config, &requirements, 1)
+                .expect_err("unreadable authority is never a legacy allowance");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Trust registry validation failed at execution time"),
+                "{state}/{profile}: {error:#}"
+            );
+        }
+    }
+}
+
 
 #[test]
 fn execution_trust_admission_rechecks_risk_escalation_with_current_profile() {

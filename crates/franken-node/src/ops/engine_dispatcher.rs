@@ -5189,7 +5189,7 @@ pub fn validate_execution_trust(
 ) -> Result<Vec<String>> {
     use crate::supply_chain::trust_card::{RevocationStatus, RiskLevel};
     use crate::supply_chain::trust_card_registry_store::{
-        durable_store_path, registry_snapshot_path,
+        authority_state_present, durable_store_path, registry_snapshot_path,
     };
 
     requirements.validate()?;
@@ -5206,7 +5206,7 @@ pub fn validate_execution_trust(
     let registry_required = requirements.registry_required || publisher_identity.is_some();
     let authoritative_registry = registry_snapshot_path(project_root);
     let durable_authoritative = durable_store_path(&authoritative_registry);
-    if !durable_authoritative.is_file() && !authoritative_registry.is_file() {
+    if !authority_state_present(&authoritative_registry) {
         if !registry_required && config.profile == Profile::LegacyRisky {
             return Ok(vec![
                 "authoritative trust registry remains unavailable at execution admission; legacy-risky policy retains the skipped preflight".to_string(),
@@ -5223,22 +5223,16 @@ pub fn validate_execution_trust(
         )
         .into());
     }
-    let mut registry = match TrustCardRegistry::load_authoritative_state_from_config(
+    // A skipped preflight only permits a genuinely uninitialized project.
+    // Once authority is present, loss or corruption must not erase revocations
+    // even if the retained requirements predate that authority.
+    let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
         &authoritative_registry,
         &config.trust,
         now_secs,
         SnapshotSourceContext::TrustedFile,
-    ) {
-        Ok(registry) => registry,
-        Err(error) if !registry_required && config.profile == Profile::LegacyRisky => {
-            return Ok(vec![format!(
-                "authoritative trust registry remains unreadable at execution admission; legacy-risky policy retains the skipped preflight: {error}"
-            )]);
-        }
-        Err(error) => {
-            return Err(error).context("Trust registry validation failed at execution time");
-        }
-    };
+    )
+    .context("Trust registry validation failed at execution time")?;
     if let Some(identity) = publisher_identity
         && let Some(revocation) = registry
             .execution_authority_revocation(&identity.publisher_key_id, &identity.artifact_sha256)

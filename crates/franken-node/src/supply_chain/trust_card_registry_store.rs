@@ -19,12 +19,21 @@
 //! * cross-process writer serialization comes from SQLite locking plus a busy
 //!   timeout instead of the ad-hoc flock sidecar file;
 //! * the legacy JSON pair remains readable exactly once as a one-time import
-//!   source (`import_legacy_state`); deleting the database rolls back to it.
-//!   The import-once decision is made inside the transaction that would seed
+//!   source (`import_legacy_state`). A durable authority marker is published
+//!   before the first snapshot transaction commits. Once marked, a missing or
+//!   incomplete database is unavailable authority, never permission to import
+//!   an older retained JSON pair or initialize a new registry;
+//! * the import-once decision is made inside the transaction that would seed
 //!   the store, and the import only ever INSERTs: it can never overwrite a
 //!   snapshot or high-water row that a concurrent first load (or any later
 //!   revoke/quarantine) already committed (franken_node#4).
+//!
+//! The marker records takeover, not a backup or an authenticated snapshot.
+//! Recovery restores the committed database and its WAL. Removing both the
+//! database and marker, or rolling both back together, requires an external
+//! authority to detect and is outside this local durability boundary.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -49,6 +58,7 @@ const META_KEY_LEGACY_JSON_IMPORT: &str = "legacy_json_import";
 pub(crate) const SLOT_SNAPSHOT: &str = "snapshot";
 pub(crate) const SLOT_HIGH_WATER: &str = "high_water";
 const BUSY_TIMEOUT_MILLIS: u64 = 5_000;
+const REGISTRY_AUTHORITY_MARKER: &str = "franken-node/trust-card-registry-authority/v1\n";
 
 /// Path of the durable database backing the snapshot file at `snapshot_path`.
 ///
@@ -58,6 +68,73 @@ const BUSY_TIMEOUT_MILLIS: u64 = 5_000;
 #[must_use]
 pub fn durable_store_path(snapshot_path: &Path) -> PathBuf {
     snapshot_path.with_extension("db")
+}
+
+/// Durable record that the database has taken over from the legacy JSON pair.
+/// This file is retained when authority is unavailable; it is never a reset flag.
+#[must_use]
+pub fn durable_store_authority_path(snapshot_path: &Path) -> PathBuf {
+    snapshot_path.with_extension("db.authority")
+}
+
+/// Whether any registry authority artifact exists or cannot be inspected.
+///
+/// Callers may treat only a genuinely absent registry as uninitialized. This
+/// conservative probe includes incomplete, nonregular and inaccessible state;
+/// the authoritative loader decides whether that state is valid.
+#[must_use]
+pub fn authority_state_present(snapshot_path: &Path) -> bool {
+    let parent = snapshot_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = snapshot_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("trust-card-registry-state");
+    [
+        snapshot_path.to_path_buf(),
+        parent.join(format!("{file_name}.high-water.json")),
+        durable_store_path(snapshot_path),
+        durable_store_authority_path(snapshot_path),
+    ]
+    .iter()
+    .any(|path| match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        _ => true,
+    })
+}
+
+fn authority_error(path: &Path, detail: impl Into<String>) -> TrustCardError {
+    TrustCardError::SnapshotRead {
+        path: path.to_path_buf(),
+        detail: format!(
+            "trust-card registry authority is unavailable: {}",
+            detail.into()
+        ),
+    }
+}
+
+fn regular_authority_file_exists(path: &Path) -> Result<bool, TrustCardError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(authority_error(path, "expected a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(authority_error(path, format!("inspect file: {error}"))),
+    }
+}
+
+fn authority_marker_present(path: &Path) -> Result<bool, TrustCardError> {
+    if !regular_authority_file_exists(path)? {
+        return Ok(false);
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| authority_error(path, format!("open takeover marker: {error}")))?;
+    let mut bytes = Vec::new();
+    file.take((REGISTRY_AUTHORITY_MARKER.len() + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| authority_error(path, format!("read takeover marker: {error}")))?;
+    if bytes != REGISTRY_AUTHORITY_MARKER.as_bytes() {
+        return Err(authority_error(path, "invalid durable takeover marker"));
+    }
+    Ok(true)
 }
 
 /// The trust-card registry snapshot path of the project rooted at
@@ -188,10 +265,14 @@ pub fn read_revocation_frontier(
     snapshot_path: &Path,
     trust_config: &TrustConfig,
 ) -> Result<Option<RevocationFrontier>, TrustCardError> {
-    if !durable_store_path(snapshot_path).is_file() {
+    if !regular_authority_file_exists(&durable_store_path(snapshot_path))?
+        && !authority_marker_present(&durable_store_authority_path(snapshot_path))?
+    {
         return Ok(None);
     }
     let store = TrustCardRegistryStore::open(snapshot_path)?;
+    // A frontier cannot make an incomplete initialized registry usable.
+    store.load_state()?;
     let encoded = store.with_connection(|connection| {
         let table = connection
             .query_with_params(
@@ -366,6 +447,9 @@ pub enum LegacyImportOutcome {
 /// Durable WAL-backed store for the trust-card registry state.
 pub struct TrustCardRegistryStore {
     db_path: PathBuf,
+    authority_path: PathBuf,
+    #[cfg(unix)]
+    db_identity: (u64, u64),
     connection: Mutex<Option<Connection>>,
 }
 
@@ -378,6 +462,15 @@ impl TrustCardRegistryStore {
     /// the database cannot be opened with the Tier-1 durability pragmas.
     pub fn open(snapshot_path: &Path) -> Result<Self, TrustCardError> {
         let db_path = durable_store_path(snapshot_path);
+        let authority_path = durable_store_authority_path(snapshot_path);
+        let marked = authority_marker_present(&authority_path)?;
+        let database_exists = regular_authority_file_exists(&db_path)?;
+        if marked && !database_exists {
+            return Err(authority_error(
+                &db_path,
+                "durable takeover marker remains but the database is missing; restore committed state",
+            ));
+        }
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| TrustCardError::SnapshotWrite {
                 path: db_path.clone(),
@@ -402,8 +495,25 @@ impl TrustCardRegistryStore {
                     detail: format!("pragma {pragma}: {err}"),
                 })?;
         }
+        #[cfg(unix)]
+        let db_identity = {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::symlink_metadata(&db_path).map_err(|error| {
+                authority_error(&db_path, format!("inspect opened database: {error}"))
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(authority_error(
+                    &db_path,
+                    "opened database is not a regular file",
+                ));
+            }
+            (metadata.dev(), metadata.ino())
+        };
         Ok(Self {
             db_path,
+            authority_path,
+            #[cfg(unix)]
+            db_identity,
             connection: Mutex::new(Some(connection)),
         })
     }
@@ -420,25 +530,130 @@ impl TrustCardRegistryStore {
     ///
     /// Returns [`TrustCardError::SnapshotRead`] when the store cannot be read.
     pub fn load_state(&self) -> Result<Option<(String, Option<String>)>, TrustCardError> {
-        self.with_connection(|connection| {
-            let table = connection
-                .query_with_params(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'registry_state';",
-                    &[],
-                )
-                .map_err(|err| TrustCardError::SnapshotRead {
-                    path: self.db_path.clone(),
-                    detail: err.to_string(),
-                })?;
-            if table.is_empty() {
-                return Ok(None);
+        self.with_connection(|connection| self.read_guarded_state(connection))
+    }
+
+    /// Adopt a pre-marker database after the caller authenticates its state.
+    /// First import and normal writes also seal a complete pair before commit.
+    pub(crate) fn seal_authority(&self) -> Result<(), TrustCardError> {
+        if authority_marker_present(&self.authority_path)? {
+            self.load_state()?;
+            return Ok(());
+        }
+        self.with_immediate_transaction(|connection, _tx| {
+            if !matches!(self.read_guarded_state(connection)?, Some((_, Some(_)))) {
+                return Err(authority_error(
+                    &self.db_path,
+                    "cannot seal a database without its snapshot and high-water pair",
+                ));
             }
-            let Some(snapshot) = read_slot(connection, SLOT_SNAPSHOT)? else {
-                return Ok(None);
-            };
-            let high_water = read_slot(connection, SLOT_HIGH_WATER)?;
-            Ok(Some((snapshot, high_water)))
+            Ok(())
         })
+    }
+
+    fn ensure_database_available(&self) -> Result<(), TrustCardError> {
+        let metadata = std::fs::symlink_metadata(&self.db_path).map_err(|error| {
+            authority_error(&self.db_path, format!("inspect open authority: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(authority_error(
+                &self.db_path,
+                "database is not a regular file",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if (metadata.dev(), metadata.ino()) != self.db_identity {
+                return Err(authority_error(
+                    &self.db_path,
+                    "database was replaced while this authority handle was open",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn read_guarded_state(
+        &self,
+        connection: &Connection,
+    ) -> Result<Option<(String, Option<String>)>, TrustCardError> {
+        self.ensure_database_available()?;
+        let marked = authority_marker_present(&self.authority_path)?;
+        let state_table = table_exists(connection, "registry_state", &self.db_path)?;
+        let snapshot = if state_table {
+            read_slot(connection, SLOT_SNAPSHOT)?
+        } else {
+            None
+        };
+        let high_water = if state_table {
+            read_slot(connection, SLOT_HIGH_WATER)?
+        } else {
+            None
+        };
+        let imported = table_exists(connection, "registry_meta", &self.db_path)?
+            && legacy_import_recorded(connection)?;
+        if snapshot.is_none() && (marked || high_water.is_some() || imported) {
+            return Err(authority_error(
+                &self.db_path,
+                "snapshot is missing after durable authority was established; restore committed state",
+            ));
+        }
+        if marked && high_water.is_none() {
+            return Err(authority_error(
+                &self.db_path,
+                "signed high-water row is missing from initialized durable authority",
+            ));
+        }
+        Ok(snapshot.map(|snapshot| (snapshot, high_water)))
+    }
+
+    fn publish_authority_marker(&self, allow_existing: bool) -> Result<(), TrustCardError> {
+        let write_error = |detail: String| TrustCardError::SnapshotWrite {
+            path: self.authority_path.clone(),
+            detail: format!("trust-card registry authority takeover: {detail}"),
+        };
+        let parent = self
+            .authority_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // Persist any newly created containing directories before publishing
+        // the guard. A successful first commit must not lose its entire state
+        // directory, including the guard, after a filesystem crash.
+        #[cfg(unix)]
+        for ancestor in self.authority_path.ancestors().skip(1) {
+            let directory = if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            };
+            std::fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| write_error(format!("sync authority directory: {error}")))?;
+        }
+        let mut staged = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| write_error(format!("stage takeover marker: {error}")))?;
+        staged
+            .write_all(REGISTRY_AUTHORITY_MARKER.as_bytes())
+            .and_then(|()| staged.as_file().sync_all())
+            .map_err(|error| write_error(format!("sync takeover marker: {error}")))?;
+        match staged.persist_noclobber(&self.authority_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !allow_existing || !authority_marker_present(&self.authority_path)? {
+                    return Err(write_error(
+                        "another initializer established authority; reload committed state".to_string(),
+                    ));
+                }
+            }
+            Err(error) => return Err(write_error(format!("publish takeover marker: {error}"))),
+        }
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| write_error(format!("sync takeover directory: {error}")))?;
+        Ok(())
     }
 
     /// Run `operation` inside one exclusive committed transaction.
@@ -464,8 +679,38 @@ impl TrustCardRegistryStore {
                     path: self.db_path.clone(),
                     detail: format!("begin transaction: {err}"),
                 })?;
+            // Inspect before schema creation: an initialized authority may
+            // never be silently recreated by a stale in-memory writer.
+            let marked_before = authority_marker_present(&self.authority_path)?;
+            let previous_state = self.read_guarded_state(connection)?;
+            let had_snapshot = previous_state.is_some();
             ensure_schema(&tx)?;
             let outcome = operation(connection, &tx)?;
+            let state = self.read_guarded_state(connection)?;
+            if had_snapshot && state.is_none() {
+                return Err(authority_error(
+                    &self.db_path,
+                    "a transaction cannot remove established snapshot authority",
+                ));
+            }
+            if let Some((snapshot, None)) = state.as_ref() {
+                let preserves_legacy_snapshot =
+                    previous_state.as_ref().is_some_and(|(previous, high_water)| {
+                        high_water.is_none() && previous == snapshot
+                    });
+                if !preserves_legacy_snapshot {
+                    return Err(authority_error(
+                        &self.db_path,
+                        "a new snapshot must commit with its signed high-water row",
+                    ));
+                }
+            }
+            if matches!(state, Some((_, Some(_)))) && !marked_before {
+                // Publication precedes commit deliberately. An interrupted
+                // first write leaves unavailable authority, not legacy fallback.
+                self.publish_authority_marker(had_snapshot)?;
+            }
+            self.ensure_database_available()?;
             tx.commit().map_err(|err| TrustCardError::SnapshotWrite {
                 path: self.db_path.clone(),
                 detail: format!("commit: {err}"),
@@ -537,8 +782,19 @@ impl TrustCardRegistryStore {
             path: self.db_path.clone(),
             detail: "durable registry connection closed".to_string(),
         })?;
+        self.ensure_database_available()?;
         operation(connection)
     }
+}
+
+fn table_exists(connection: &Connection, name: &str, path: &Path) -> Result<bool, TrustCardError> {
+    let rows = connection
+        .query_with_params(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1;",
+            &[SqliteValue::Text(name.into())],
+        )
+        .map_err(|error| authority_error(path, format!("inspect durable schema: {error}")))?;
+    Ok(!rows.is_empty())
 }
 
 fn ensure_schema(tx: &fsqlite::compat::Transaction<'_>) -> Result<(), TrustCardError> {
@@ -711,15 +967,30 @@ mod tests {
         assert_eq!(high_water.as_deref(), Some("{\"hw\":2}"));
     }
 
-    /// State written by the normal persist path (no import marker) also
-    /// blocks the import, and so does the marker alone.
+    /// Existing rows block import; an orphan import marker is unavailable
+    /// authority rather than permission to seed missing rows again.
     #[test]
-    fn import_is_skipped_when_rows_or_the_marker_exist() {
+    fn import_preserves_existing_rows_and_rejects_orphan_import_marker() {
         let (_dir, path) = temp_snapshot_path("seeded");
         let store = TrustCardRegistryStore::open(&path).expect("open");
+        assert!(store.import_legacy_state("{\"epoch\":5}", None).is_err());
+        assert!(
+            store
+                .load_state()
+                .expect("rolled back incomplete import")
+                .is_none()
+        );
+        // Only old on-disk state may lack high-water; new writes cannot
+        // introduce that condition. Model the old state outside the writer.
         store
-            .overwrite_slot_for_tests(SLOT_SNAPSHOT, "{\"epoch\":5}")
-            .expect("seed snapshot");
+            .with_connection(|connection| {
+                let mut tx = connection.transaction().expect("legacy fixture transaction");
+                ensure_schema(&tx)?;
+                upsert_slot(&tx, SLOT_SNAPSHOT, "{\"epoch\":5}")?;
+                tx.commit().expect("commit old snapshot-only state");
+                Ok(())
+            })
+            .expect("old snapshot-only fixture");
         assert_eq!(
             store
                 .import_legacy_state("{\"epoch\":1}", Some("{\"hw\":1}"))
@@ -729,19 +1000,42 @@ mod tests {
         let (snapshot, high_water) = store.load_state().expect("reload").expect("rows exist");
         assert_eq!(snapshot, "{\"epoch\":5}");
         assert_eq!(high_water, None);
+        assert!(
+            store
+                .overwrite_slot_for_tests(SLOT_SNAPSHOT, "{\"epoch\":1}")
+                .is_err(),
+            "an older incomplete snapshot cannot replace pre-upgrade authority"
+        );
+        assert!(
+            store
+                .with_immediate_transaction(|_, tx| {
+                    tx.execute_batch("DELETE FROM registry_state;")
+                        .map_err(|error| authority_error(store.db_path(), error.to_string()))?;
+                    Ok(())
+                })
+                .is_err(),
+            "a pre-upgrade writer cannot erase authority and reopen legacy import"
+        );
+        let (snapshot, high_water) = store
+            .load_state()
+            .expect("read after rejected writes")
+            .expect("old authority retained");
+        assert_eq!(snapshot, "{\"epoch\":5}");
+        assert_eq!(high_water, None);
 
         let (_dir, path) = temp_snapshot_path("marker");
         let store = TrustCardRegistryStore::open(&path).expect("open");
         store
-            .with_immediate_transaction(|_connection, tx| mark_legacy_import(tx, "earlier"))
-            .expect("mark");
-        assert_eq!(
-            store
-                .import_legacy_state("{\"epoch\":1}", None)
-                .expect("import"),
-            LegacyImportOutcome::AlreadySeeded
-        );
-        assert!(store.load_state().expect("reload").is_none());
+            .with_connection(|connection| {
+                let mut tx = connection.transaction().expect("fault transaction");
+                ensure_schema(&tx)?;
+                mark_legacy_import(&tx, "earlier")?;
+                tx.commit().expect("commit orphan import marker");
+                Ok(())
+            })
+            .expect("inject missing snapshot");
+        assert!(store.import_legacy_state("{\"epoch\":1}", None).is_err());
+        assert!(store.load_state().is_err());
     }
 
     fn frontier_trust_config(key_byte: u8) -> TrustConfig {

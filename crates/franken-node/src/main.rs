@@ -11752,12 +11752,19 @@ fn bootstrap_state_directory(
     // is guaranteed to be present here (synthesized by the bootstrap-aware
     // config resolver when absent).
     let registry_path = dot_dir.join("state/trust-card-registry.v1.json");
-    // The durable frankensqlite store is the authority; the legacy JSON pair
-    // is only a one-time import source, so either surface means "already
-    // bootstrapped".
+    // A retained takeover marker also means this project has trust authority.
+    // Validate existing state before reporting success: init must not replace
+    // a lost registry with an empty authority that forgets prior revocations.
     let registry_store_path =
         supply_chain::trust_card_registry_store::durable_store_path(&registry_path);
-    if registry_path.is_file() || registry_store_path.is_file() {
+    if supply_chain::trust_card_registry_store::authority_state_present(&registry_path) {
+        TrustCardRegistry::load_authoritative_state_from_config(
+            &registry_path,
+            trust_config,
+            now_unix_secs(),
+            SnapshotSourceContext::TrustedFile,
+        )
+        .map_err(|err| anyhow::anyhow!("failed loading existing trust-card authority: {err}"))?;
         actions.push(InitFileAction {
             path: registry_store_path.display().to_string(),
             action: InitFileActionKind::SkippedExisting,
@@ -15978,12 +15985,9 @@ fn quarantine_trusted_run_dependencies(
 ) -> Result<Vec<String>> {
     let registry_path =
         supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
-    // The durable store is the authority (the legacy JSON is a one-time import
-    // source): keying this on the JSON alone silently disabled auto-quarantine
-    // for every durably persisted registry (bd-reality-20260923-26n9r.1).
-    if !registry_path.is_file()
-        && !supply_chain::trust_card_registry_store::durable_store_path(&registry_path).is_file()
-    {
+    // Existing but unavailable authority must reach the guarded loader.
+    // Only a project with no retained trust state may skip this mutation.
+    if !supply_chain::trust_card_registry_store::authority_state_present(&registry_path) {
         tracing::warn!(
             registry_path = %registry_path.display(),
             "skipping automatic run quarantine because trust registry is unavailable"
@@ -19485,7 +19489,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
     // (bd-reality-20260923-26n9r.1). Emitted only where a registry exists.
     if let Some(root) = trust_freshness_root {
         let registry_path = supply_chain::trust_card_registry_store::registry_snapshot_path(&root);
-        if supply_chain::trust_card_registry_store::durable_store_path(&registry_path).is_file() {
+        if supply_chain::trust_card_registry_store::authority_state_present(&registry_path) {
             let declares_dependencies = collect_run_package_dependencies(&root)
                 .ok()
                 .flatten()
@@ -24919,10 +24923,10 @@ fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
     // the cwd as the project root: this is where the operator expects the
     // registry to be, and matches `trust scan`'s behavior on the same path.
     let path = supply_chain::trust_card_registry_store::registry_snapshot_path(&cwd);
-    // The durable frankensqlite store is the authority; the legacy JSON pair
-    // is only a one-time import source. Either surface counts as initialized.
+    // A takeover marker or retained high-water state also counts as authority;
+    // the loader decides whether it is complete and authentic.
     let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
-    if !path.is_file() && !registry_store_path.is_file() {
+    if !supply_chain::trust_card_registry_store::authority_state_present(&path) {
         anyhow::bail!(
             "authoritative trust-card registry not initialized at {}; bootstrap or import trust state before using trust commands (run `franken-node init --out-dir .` here, or invoke trust commands from the project root that owns the registry)",
             registry_store_path.display()
@@ -25398,8 +25402,7 @@ fn trust_scan_registry_state(
 ) -> Result<TrustCardCliRegistryState> {
     ensure_state_dir(project_root)?;
     let path = supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
-    let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
-    let registry = if path.is_file() || registry_store_path.is_file() {
+    let registry = if supply_chain::trust_card_registry_store::authority_state_present(&path) {
         TrustCardRegistry::load_authoritative_state_from_config(
             &path,
             trust_config,
@@ -27225,14 +27228,12 @@ fn evaluate_run_trust_preflight(
                 supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
             registry_path = Some(authoritative_registry.clone());
 
-            // The durable frankensqlite store is the authority; either surface
-            // counts as initialized.
-            let registry_store_exists =
-                supply_chain::trust_card_registry_store::durable_store_path(
-                    &authoritative_registry,
-                )
-                .is_file();
-            if !authoritative_registry.is_file() && !registry_store_exists {
+            // Only genuinely absent authority retains the legacy-risky
+            // bootstrap allowance. A takeover marker without its database is
+            // unavailable established authority and must reach the loader.
+            if !supply_chain::trust_card_registry_store::authority_state_present(
+                &authoritative_registry,
+            ) {
                 let reason = missing_trust_registry_message(&authoritative_registry, policy_mode);
                 if policy_mode == Profile::LegacyRisky {
                     PreFlightVerdict::Skipped { reason }
@@ -27527,21 +27528,20 @@ fn evaluate_run_trust_preflight(
                             "failed loading authoritative trust registry {}: {err}",
                             authoritative_registry.display()
                         );
-                        if policy_mode == Profile::LegacyRisky {
-                            PreFlightVerdict::Skipped { reason: detail }
-                        } else {
-                            PreFlightVerdict::Blocked {
-                                reason: "authoritative trust registry is unreadable or corrupt"
-                                    .to_string(),
-                                warnings: Vec::new(),
-                                violations: vec![TrustViolation {
-                                    dependency_name: None,
-                                    extension_id: None,
-                                    kind: TrustViolationKind::RegistryCorrupt,
-                                    detail,
-                                }],
-                                results: Vec::new(),
-                            }
+                        // Established authority may contain permanent
+                        // revocations. No profile can infer permission from
+                        // losing the ability to authenticate those decisions.
+                        PreFlightVerdict::Blocked {
+                            reason: "authoritative trust registry is unreadable or corrupt"
+                                .to_string(),
+                            warnings: Vec::new(),
+                            violations: vec![TrustViolation {
+                                dependency_name: None,
+                                extension_id: None,
+                                kind: TrustViolationKind::RegistryCorrupt,
+                                detail,
+                            }],
+                            results: Vec::new(),
                         }
                     }
                 }

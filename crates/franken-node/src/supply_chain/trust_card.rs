@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
 use super::trust_card_registry_store::{
     LegacyImportOutcome, SLOT_HIGH_WATER, SLOT_SNAPSHOT, TrustCardRegistryStore,
-    durable_store_path, read_slot, upsert_slot,
+    durable_store_authority_path, durable_store_path, read_slot, upsert_slot,
 };
 use crate::connector::canonical_serializer::canonical_bytes;
 use crate::push_bounded;
@@ -2023,7 +2023,7 @@ impl TrustCardRegistry {
     ///    it holds a snapshot — the authoritative surface;
     /// 2. a one-time import of the legacy JSON pair (`path` plus its
     ///    `.high-water.json` sidecar), which seeds the store; the files are
-    ///    then only a rollback source (deleting the database re-imports).
+    ///    retained for inspection, never a fallback after durable takeover.
     ///
     /// The import never moves durable state backwards (franken_node#4): the
     /// legacy pair is read and validated outside any transaction, so another
@@ -2031,9 +2031,11 @@ impl TrustCardRegistry {
     /// writes. The import-once decision is therefore made inside the seeding
     /// transaction, it only inserts, and every importer (winner or loser)
     /// returns the registry re-loaded and re-validated from the durable store,
-    /// never the in-memory legacy registry it built earlier. A store file
-    /// without a snapshot row (a first import still in flight elsewhere, or
-    /// one that crashed before committing) falls through to the import.
+    /// never the in-memory legacy registry it built earlier. Only an unmarked
+    /// store that has never held authority may fall through to import. A
+    /// durable takeover marker survives loss of the database or its rows and
+    /// requires recovery of committed state, including after an interrupted
+    /// first commit.
     ///
     /// # Errors
     ///
@@ -2048,7 +2050,14 @@ impl TrustCardRegistry {
         source_context: SnapshotSourceContext,
     ) -> Result<Self, TrustCardError> {
         let db_path = durable_store_path(path);
-        if db_path.is_file() {
+        let authority_path = durable_store_authority_path(path);
+        let durable_present = [&db_path, &authority_path].iter().any(|candidate| {
+            !matches!(
+                std::fs::symlink_metadata(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        });
+        if durable_present {
             let store = TrustCardRegistryStore::open(path)?;
             if !path.is_file() || store.load_state()?.is_some() {
                 return load_registry_from_durable_store(
@@ -4615,6 +4624,11 @@ fn load_registry_from_durable_store(
         registry_key,
     )
     .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+    // Pre-marker installations adopt the takeover guard only after their
+    // snapshot, high-water and registry authentication have succeeded.
+    store
+        .seal_authority()
+        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
     Ok(registry)
 }
 

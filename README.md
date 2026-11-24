@@ -2906,6 +2906,7 @@ bootstrap layout is:
 | `.franken-node/state/registry/archive/` | Archived artifacts retained after `registry gc` |
 | `.franken-node/state/migrations/` | Migration audit, rewrite, and validate outputs |
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
+| `.franken-node/state/trust-card-registry.v1.db.authority` | Durable takeover marker: retained separately from the database so database loss cannot re-enable legacy JSON import |
 | `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller; an active scope blocks new runs and interrupts running native sessions with admitted entrypoints in this directory or its descendants. `--state-dir` can address a standalone controller; only the conventional ancestor paths govern `run`. |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
 | `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, captured incident sources, run-ledger records, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
@@ -2919,6 +2920,15 @@ Additional subtrees are materialized lazily by individual subsystems
 snapshots, evidence ledger, validation-broker receipt files, cleanup
 audit) as those subsystems are exercised; the bootstrap above is the
 minimum layout that `franken-node init` creates up-front.
+
+An initialized trust registry must remain readable and authentic. If its
+database disappears, loses its signed snapshot/high-water rows, or becomes
+corrupt, trust commands and dependency execution refuse to proceed, including
+under `legacy-risky`. `init` and `trust scan` do not replace that lost authority
+with an empty registry or reimport the retained legacy JSON. Restore the
+original durable authority from a consistent backup; keep the takeover marker
+with the database. The legacy-risky missing-registry allowance applies only
+when no prior authority remains at the project path.
 
 ### Guest access to operator files
 
