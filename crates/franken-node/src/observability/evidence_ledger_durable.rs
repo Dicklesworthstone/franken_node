@@ -227,6 +227,18 @@ impl DurableEvidenceLedger {
                 .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
                 tx.commit()
                     .map_err(|err| io::Error::other(format!("commit entry: {err}")))?;
+                drop(tx);
+                // Keep the WAL bounded so subsequent opens do not replay
+                // hundreds of frames on every `franken-node run`. `TRUNCATE`
+                // resets `-wal` to 0 bytes when idle and returns `busy=1`
+                // non-blockingly under fsqlite if another transaction is open.
+                const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
+                let wal_path = state_dir.join(format!("{EVIDENCE_DB_FILE}-wal"));
+                if std::fs::metadata(&wal_path)
+                    .is_ok_and(|meta| meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
+                {
+                    let _ = connection.query("PRAGMA wal_checkpoint(TRUNCATE);");
+                }
                 return Ok(entry);
             }
         }

@@ -1004,12 +1004,14 @@ pub(super) fn prepare_runtime_evidence_directories(
 ) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let state_home = runtime_evidence_user_state_home()?;
     validate_runtime_evidence_state_outside_guest(&state_home, guest_project_root)?;
-    std::fs::create_dir_all(&state_home).with_context(|| {
-        format!(
-            "create runtime evidence user state home {}",
-            state_home.display()
-        )
-    })?;
+    if !state_home.is_dir() {
+        std::fs::create_dir_all(&state_home).with_context(|| {
+            format!(
+                "create runtime evidence user state home {}",
+                state_home.display()
+            )
+        })?;
+    }
     ensure_runtime_evidence_directory(&state_home, false)?;
     let state_home = state_home.canonicalize().with_context(|| {
         format!(
@@ -12495,8 +12497,13 @@ impl EngineDispatcher {
         };
 
         let mut poll_sleep = std::time::Duration::from_micros(100);
+        let mut response_stream_closed = false;
+        let mut pending_durable_failure = None;
         let status = loop {
-            if let Ok(error) = durable_failures.try_recv() {
+            if let Some(error) = pending_durable_failure
+                .take()
+                .or_else(|| durable_failures.try_recv().ok())
+            {
                 let cleanup = native_session_cleanup_failure(
                     kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     Some(receive_native_session_request_writer(request_writer, true)),
@@ -12522,8 +12529,30 @@ impl EngineDispatcher {
                     break status;
                 }
                 Ok(NativeSessionPoll::Running) => {
-                    thread::sleep(poll_sleep);
-                    poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                    if response_stream_closed {
+                        // The response pipe already reached EOF; start with a
+                        // short reap interval and back off if the worker stays
+                        // alive after closing stdout.
+                        thread::sleep(poll_sleep);
+                        poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                    } else {
+                        // Wait on the response reader's failure channel so
+                        // either worker stdout EOF (channel disconnect) or a
+                        // durable-journal error wakes the supervisor immediately
+                        // instead of burning up to 2ms in blind sleep.
+                        match durable_failures.recv_timeout(poll_sleep) {
+                            Ok(error) => {
+                                pending_durable_failure = Some(error);
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                response_stream_closed = true;
+                                poll_sleep = std::time::Duration::from_micros(100);
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                            }
+                        }
+                    }
                 }
                 Ok(NativeSessionPoll::Interrupted {
                     control_trigger,

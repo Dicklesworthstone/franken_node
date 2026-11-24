@@ -2513,6 +2513,19 @@ impl NativeSessionInventoryGuard {
             write_observed_outcome(&mut tx, &self.admission, outcome)?;
             check_bounds(&tx)?;
             tx.commit()?;
+            drop(tx);
+            // Keep the WAL bounded so subsequent opens do not replay hundreds
+            // of frames on every `franken-node run`. `TRUNCATE` folds and
+            // resets the WAL to 0 bytes when idle (preventing re-triggering on
+            // every subsequent run), and returns `busy=1` non-blockingly under
+            // fsqlite if another connection holds an active transaction.
+            const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
+            let wal_path = self.protected_root.join(format!("{INVENTORY_FILE}-wal"));
+            if std::fs::metadata(&wal_path)
+                .is_ok_and(|meta| meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
+            {
+                let _ = active_conn.query("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
             protect_sidecars(&self.protected_root)?;
             Ok(())
         })

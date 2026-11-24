@@ -13660,11 +13660,10 @@ fn archive_excess_run_receipts(receipts_root: &Path, max_receipts: usize) -> Res
     Ok(())
 }
 
-fn persist_run_execution_receipt(
+fn prepare_run_execution_receipt_target(
     project_root: &Path,
     receipt: &RunExecutionReceipt,
-    max_receipts: usize,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let receipts_root = run_execution_receipts_root(project_root)?;
     let ended_at = DateTime::parse_from_rfc3339(&receipt.core.end_time_utc)
         .context("run receipt end_time_utc was not valid RFC3339")?;
@@ -13673,8 +13672,17 @@ fn persist_run_execution_receipt(
         std::fs::create_dir_all(&day_dir)
             .with_context(|| format!("failed creating {}", day_dir.display()))?;
     }
-
     let final_path = day_dir.join(format!("{}.json", receipt.core.receipt_id));
+    Ok((receipts_root, day_dir, final_path))
+}
+
+fn persist_run_execution_receipt_at(
+    receipts_root: &Path,
+    day_dir: &Path,
+    final_path: &Path,
+    receipt: &RunExecutionReceipt,
+    max_receipts: usize,
+) -> Result<PathBuf> {
     let temp_path = day_dir.join(format!(
         "{}.json.tmp-{}",
         receipt.core.receipt_id,
@@ -13695,7 +13703,7 @@ fn persist_run_execution_receipt(
             .and_then(|()| temp_file.sync_all())
             .with_context(|| format!("failed writing {}", temp_path.display()))?;
     }
-    std::fs::rename(&temp_path, &final_path).with_context(|| {
+    std::fs::rename(&temp_path, final_path).with_context(|| {
         format!(
             "failed promoting run execution receipt {} -> {}",
             temp_path.display(),
@@ -13703,10 +13711,21 @@ fn persist_run_execution_receipt(
         )
     })?;
     temp_guard.defuse();
-    sync_directory(&day_dir)?;
+    sync_directory(day_dir)?;
 
-    archive_excess_run_receipts(&receipts_root, max_receipts)?;
-    Ok(final_path)
+    archive_excess_run_receipts(receipts_root, max_receipts)?;
+    Ok(final_path.to_path_buf())
+}
+
+#[allow(dead_code)]
+fn persist_run_execution_receipt(
+    project_root: &Path,
+    receipt: &RunExecutionReceipt,
+    max_receipts: usize,
+) -> Result<PathBuf> {
+    let (receipts_root, day_dir, final_path) =
+        prepare_run_execution_receipt_target(project_root, receipt)?;
+    persist_run_execution_receipt_at(&receipts_root, &day_dir, &final_path, receipt, max_receipts)
 }
 
 /// Automatic incident capture (bd-reality-20260923-26n9r.8).
@@ -48106,30 +48125,68 @@ fn main() -> Result<()> {
                     receipt.core.incident_capture = Some(capture);
                     receipt.receipt_hash = compute_run_execution_receipt_hash(&receipt.core)?;
                 }
-                let receipt_path = persist_run_execution_receipt(
-                    &project_root,
-                    &receipt,
-                    configured_run_receipt_limit(&resolved.config),
-                )?;
+                let (receipts_root, receipt_day_dir, expected_receipt_path) =
+                    prepare_run_execution_receipt_target(&project_root, &receipt)?;
                 let receipt_signing = load_receipt_signing_material(None);
+                let max_receipts = configured_run_receipt_limit(&resolved.config);
+                // Persist the three independent post-worker durability sinks
+                // (execution receipt, signed run host-effect ledger, and
+                // hash-chained durable evidence ledger) concurrently and join
+                // all fsync/WAL barriers before emitting output or exiting.
+                let (receipt_result, persisted_ledger, evidence_append_result) =
+                    std::thread::scope(|scope| {
+                        let evidence_handle = scope.spawn(|| match &receipt_signing {
+                            Ok(signing) => append_run_evidence_entry_with_signing(
+                                &project_root,
+                                &receipt,
+                                &expected_receipt_path,
+                                &dispatch,
+                                &trace_id,
+                                signing.as_ref(),
+                            ),
+                            Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                        });
+                        let ledger_handle = dispatch.host_effect_ledger.as_ref().map(|_| {
+                            scope.spawn(|| match &receipt_signing {
+                                Ok(signing) => persist_run_host_effect_ledger_with_signing(
+                                    &project_root,
+                                    &policy,
+                                    &receipt,
+                                    &expected_receipt_path,
+                                    &dispatch,
+                                    &trace_id,
+                                    signing.as_ref(),
+                                ),
+                                Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                            })
+                        });
+                        let receipt_result = persist_run_execution_receipt_at(
+                            &receipts_root,
+                            &receipt_day_dir,
+                            &expected_receipt_path,
+                            &receipt,
+                            max_receipts,
+                        );
+                        let persisted_ledger = match ledger_handle {
+                            Some(handle) => match handle.join() {
+                                Ok(result) => result,
+                                Err(_) => Err(anyhow::anyhow!(
+                                    "run host-effect ledger persistence thread panicked"
+                                )),
+                            },
+                            None => Ok(None),
+                        };
+                        let evidence_append_result = match evidence_handle.join() {
+                            Ok(result) => result,
+                            Err(_) => {
+                                Err(anyhow::anyhow!("evidence ledger append thread panicked"))
+                            }
+                        };
+                        (receipt_result, persisted_ledger, evidence_append_result)
+                    });
+                let receipt_path = receipt_result?;
                 // Explicit replay capture and publisher-approved source must
                 // be durably bound to a signed record before command success.
-                let persisted_ledger = if dispatch.host_effect_ledger.is_none() {
-                    Ok(None)
-                } else {
-                    match &receipt_signing {
-                        Ok(signing) => persist_run_host_effect_ledger_with_signing(
-                            &project_root,
-                            &policy,
-                            &receipt,
-                            &receipt_path,
-                            &dispatch,
-                            &trace_id,
-                            signing.as_ref(),
-                        ),
-                        Err(err) => Err(anyhow::anyhow!("{err:#}")),
-                    }
-                };
                 if dispatch.native_replay.is_some() {
                     persisted_ledger
                         .context("failed persisting requested native replay capture")?
@@ -48166,17 +48223,6 @@ fn main() -> Result<()> {
                     }
                 };
                 // Likewise a ledger append failure is reported, not fatal.
-                let evidence_append_result = match &receipt_signing {
-                    Ok(signing) => append_run_evidence_entry_with_signing(
-                        &project_root,
-                        &receipt,
-                        &receipt_path,
-                        &dispatch,
-                        &trace_id,
-                        signing.as_ref(),
-                    ),
-                    Err(err) => Err(anyhow::anyhow!("{err:#}")),
-                };
                 if let Err(err) = evidence_append_result
                     && !structured_logs_jsonl
                 {
