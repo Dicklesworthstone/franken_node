@@ -699,7 +699,11 @@ fn verify_observation_response(
         policy.evaluation_time,
         policy.max_observation_age_secs,
     )?;
-    let heartbeat_window = chrono::Duration::seconds(evidence.stale_after.secs as i64)
+    // The producer's declared window constrains both transport liveness and
+    // the signed supervisor observation at certification time. A fresh
+    // heartbeat cannot renew an older observation, even when the caller's
+    // separate verification policy permits a longer historical lookback.
+    let observation_window = chrono::Duration::seconds(evidence.stale_after.secs as i64)
         + chrono::Duration::nanoseconds(i64::from(evidence.stale_after.nanos));
     let mut admitted = 0_u64;
     let mut terminal = 0_u64;
@@ -733,7 +737,7 @@ fn verify_observation_response(
         let last_seen = node
             .last_seen
             .ok_or(FleetQuiescenceError::ObservationInvalid)?;
-        fresh_for(last_seen, evidence.observed_at, heartbeat_window)?;
+        fresh_for(last_seen, evidence.observed_at, observation_window)?;
         fresh(
             last_seen,
             policy.evaluation_time,
@@ -782,10 +786,10 @@ fn verify_observation_response(
         if !ct_equal(&attestation.checkpoint_sha256, &checkpoint_digest(drain)?) {
             return Err(FleetQuiescenceError::ObservationInvalid);
         }
-        fresh(
+        fresh_for(
             attestation.observed_at,
             evidence.observed_at,
-            policy.max_observation_age_secs,
+            observation_window,
         )?;
         fresh(
             attestation.observed_at,
@@ -1285,6 +1289,9 @@ mod tests {
         policy.evaluation_time = "2026-11-23T01:01:03Z".parse().unwrap();
         policy.max_observation_age_secs = 120;
         let mut response = response;
+        // This population remains valid under the timestamp-shape test's
+        // explicit 120-second bound; freshness limits are tested separately.
+        response["evidence"]["stale_after"] = json!({"secs": 120, "nanos": 0});
         response["evidence"]["observed_at"] = json!("2026-11-23T01:01:02Z");
         response["certificate"]["certified_at"] = json!("2026-11-23T01:01:02Z");
         for node in response["evidence"]["nodes"].as_array_mut().unwrap() {
@@ -1512,6 +1519,20 @@ mod tests {
     #[test]
     fn fractional_heartbeat_windows_preserve_the_exact_expiry_boundary() {
         let (mut response, policy) = fixture();
+        // Keep signed observations as recent as their heartbeats so this
+        // test isolates the transport timestamp's fractional expiry bound.
+        // The immutable fixture's original, older signatures remain covered
+        // by the separate supervisor-freshness regression below.
+        for index in 0..2 {
+            let last_seen = response["evidence"]["nodes"][index]["last_seen"].clone();
+            let drain = &mut response["evidence"]["nodes"][index]["native_session_drain"];
+            drain["supervisor_attestation"]["observed_at"] = last_seen;
+            resign(
+                &mut response,
+                index,
+                &SigningKey::from_bytes(&[41 + index as u8; 32]),
+            );
+        }
         response["evidence"]["stale_after"] = json!({"secs": 1, "nanos": 1});
         assert!(verify(&response, &policy).is_ok());
         response["evidence"]["stale_after"] = json!({"secs": 1, "nanos": 0});
@@ -1523,6 +1544,47 @@ mod tests {
         assert_eq!(
             verify(&response, &policy),
             Err(FleetQuiescenceError::ContextMismatch)
+        );
+    }
+
+    #[test]
+    fn signed_observations_obey_the_declared_fractional_freshness_window() {
+        let (mut response, policy) = fixture();
+        // The independently signed observations are at :03; the certificate
+        // is at :05. Fresh transport observations do not change those
+        // signatures or the caller's longer 30-second verification bound.
+        for node in response["evidence"]["nodes"].as_array_mut().unwrap() {
+            node["last_seen"] = json!("2026-11-23T01:00:05Z");
+        }
+        response["evidence"]["stale_after"] = json!({"secs": 2, "nanos": 1});
+        let facts = verify(&response, &policy).unwrap();
+        assert!(facts.supervisor_signatures_verified);
+        assert!(!facts.current_quiescence_proven);
+
+        response["evidence"]["stale_after"] = json!({"secs": 2, "nanos": 0});
+        assert_eq!(
+            verify(&response, &policy),
+            Err(FleetQuiescenceError::ObservationStale)
+        );
+    }
+
+    #[test]
+    fn coordinator_signatures_cannot_override_the_declared_supervisor_window() {
+        let (mut response, mut policy, trust, _) = epoch_fixture();
+        policy.max_observation_age_secs = MAX_AGE_SECONDS;
+        for node in response["evidence"]["nodes"].as_array_mut().unwrap() {
+            node["last_seen"] = json!("2026-11-23T01:00:05Z");
+        }
+        let coordinator = SigningKey::from_bytes(&[43; 32]);
+        response["evidence"]["stale_after"] = json!({"secs": 2, "nanos": 1});
+        resign_epoch(&mut response, &coordinator);
+        assert!(verify_epoch(&response, &policy, &trust).is_ok());
+
+        response["evidence"]["stale_after"] = json!({"secs": 2, "nanos": 0});
+        resign_epoch(&mut response, &coordinator);
+        assert_eq!(
+            verify_epoch(&response, &policy, &trust),
+            Err(FleetQuiescenceError::ObservationStale)
         );
     }
 
