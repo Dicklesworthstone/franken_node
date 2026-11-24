@@ -551,18 +551,27 @@ Each claim entry uses this structure:
   30-run + 5-warmup randomized interleaved triad report); `perf/budgets.toml`
 - **Verification command**:
   `python3 scripts/bench_runtime_vs_node.py --bin target/release/franken-node --require-bun --runs 30 --warmup 5 --json`
-- **Last verified**: 2026-11-18T10:54:47Z (release binary `sha256:e27676b859fc13ccb66562dc1014c13f07b56df03a42c57eebd7e1cb113fb8c6`, `franken_node` `de5420dce`, `franken_engine` `61685ec62`, `node v26.3.0`, `bun 1.4.4`)
-- **Status**: pending (measured RED on HC-003: `verdict=FAIL`, `ratio_ceiling=1.10` untouched; `ci_dev <= 200.0 ms` cold-start budget `PASS` at `hello` `p50=179.063 ms`, `p99=221.428 ms`, `rss_p50=57402 KiB`)
+- **Last verified**: 2026-11-24T06:09:03Z (release binary `sha256:3ccb93081e810b18ff9b90624b09cb6286fd034173e0d00c8246df1afbfa58ee`, `franken_node` `eb0367859`, `franken_engine` `0793adbdc`, `node v26.3.0`, `bun 1.4.5`)
+- **Status**: pending (measured RED on HC-003: `verdict=FAIL`, `ratio_ceiling=1.10` untouched; `ci_dev <= 200.0 ms` cold-start budget `PASS` with `early_warning=false` at `hello` `p50=53.884 ms`, `p99=70.034 ms`, `cold_first=57.764 ms`, `rss_p50=43564 KiB` vs Node `44950 KiB`)
 - **Notes**: Measured in a single randomized interleaved invocation across all
   6 workloads (`hello`, `json_roundtrip`, `compute_loop`, `fs_read`,
   `require_pkg`, `loopback_http`, all 6 passing byte-identical stdout equality
-  across `node`, `bun`, and `franken-node`): `hello` 4.71× node (`179.1 ms` vs
-  `38.0 ms`, `bun` `27.5 ms`), `loopback_http` 3.51× (`214.0 ms` vs `60.9 ms`),
-  `require_pkg` 4.95× (`227.6 ms` vs `45.9 ms`), `compute_loop` 12.56×
-  (`702.7 ms` vs `56.0 ms`), `json_roundtrip` 14.09× (`1125.3 ms` vs `79.9 ms`),
-  `fs_read` 16.98× (`806.2 ms` vs `47.5 ms`), with exact binomial
-  order-statistic 95% CIs on `p50`/`p95`/`p99` and `os.wait4` `ru_maxrss` KiB.
-  Tracked by `bd-reality-20260923-26n9r.10` / `.36` / `.37`.
+  across `node`, `bun`, and `franken-node`; ThinLTO + `mimalloc` `no_thp` +
+  `PRAGMA wal_checkpoint(TRUNCATE)` + instant supervisor wakeup + syscall/SQLite
+  trimming vs `de5420dce` baseline): `hello` 1.91× node (`53.9 ms` vs `28.2 ms`,
+  `bun` `18.3 ms`; down `3.32×` from `179.1 ms`), `loopback_http` 1.57×
+  (`61.4 ms` vs `39.0 ms`, `bun` `40.5 ms`; down `3.49×` from `214.0 ms`),
+  `require_pkg` 2.30× (`73.9 ms` vs `32.1 ms`, `bun` `24.0 ms`; down `3.08×`
+  from `227.6 ms`), `compute_loop` 4.97× (`311.5 ms` vs `62.6 ms`, `bun`
+  `55.1 ms`; down `2.26×` from `702.7 ms`), `fs_read` 15.02× (`492.1 ms` vs
+  `32.8 ms`, `bun` `29.0 ms`; down `1.64×` from `806.2 ms`), `json_roundtrip`
+  15.14× (`957.2 ms` vs `63.2 ms`, `bun` `43.0 ms`; down `1.18×` from
+  `1125.3 ms`), with exact binomial order-statistic 95% CIs on
+  `p50`/`p95`/`p99` and `os.wait4` `ru_maxrss` KiB (lower RSS than Node on
+  `hello`, `loopback_http`, `require_pkg`, and `compute_loop`). Remaining
+  compute/JSON/FS gap is sibling `franken_engine` interpreter dispatch +
+  `bd-sq3lm` (`CellAliasGraph::reachable_for_mutation`). Tracked by
+  `bd-reality-20260923-26n9r.10` / `.36` / `.37` / `bd-sq3lm`.
 
 ## Update Cadence
 
