@@ -25,7 +25,9 @@ use std::sync::{
 };
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(test, not(target_os = "linux")))]
+use std::time::Instant;
 
 use crate::push_bounded;
 

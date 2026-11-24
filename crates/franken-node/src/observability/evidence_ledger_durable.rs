@@ -141,7 +141,9 @@ impl DurableEvidenceLedger {
     /// with the Tier-1 durability pragmas.
     pub fn open(state_dir: impl Into<PathBuf>) -> io::Result<Self> {
         let state_dir = state_dir.into();
-        std::fs::create_dir_all(&state_dir)?;
+        if !state_dir.is_dir() {
+            std::fs::create_dir_all(&state_dir)?;
+        }
         let db_path = durable_store_path(&state_dir);
         let connection = open_tier1_connection(&db_path)?;
         ensure_schema(&connection)?;
@@ -150,6 +152,91 @@ impl DurableEvidenceLedger {
             state_dir,
             connection: Mutex::new(Some(connection)),
         })
+    }
+
+    /// Open `state_dir`'s durable evidence ledger and append one signed,
+    /// hash-chained entry in a single transaction on already-initialized
+    /// stores, avoiding separate pre-transaction schema probe round-trips on
+    /// every `franken-node run`. Falls back to [`ensure_schema`] when the
+    /// database is new or missing a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the directory or database cannot be opened,
+    /// the newest stored row is not an evidence entry, or the transaction fails.
+    pub fn append_signed_chained_in(
+        state_dir: impl Into<PathBuf>,
+        mut entry: EvidenceEntry,
+        signing_key: &SigningKey,
+    ) -> io::Result<EvidenceEntry> {
+        let state_dir = state_dir.into();
+        if !state_dir.is_dir() {
+            std::fs::create_dir_all(&state_dir)?;
+        }
+        let db_path = durable_store_path(&state_dir);
+        let connection = open_tier1_connection(&db_path)?;
+        {
+            let mut tx = connection
+                .transaction()
+                .map_err(|err| io::Error::other(format!("begin entry transaction: {err}")))?;
+            let schema_current = tx
+                .query_with_params(
+                    "SELECT value FROM evidence_meta WHERE key = ?1;",
+                    &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
+                )
+                .is_ok_and(|rows| {
+                    matches!(
+                        rows.first().and_then(|row| row.values().first()),
+                        Some(SqliteValue::Text(version))
+                            if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
+                    )
+                });
+            if schema_current
+                && let Ok(rows) =
+                    tx.query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
+            {
+                entry.prev_entry_hash = match rows.first().map(|row| row.values().first()) {
+                    Some(Some(SqliteValue::Text(previous_json))) => {
+                        let previous: EvidenceEntry = serde_json::from_str(previous_json.as_ref())
+                            .map_err(|err| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("newest stored row is not an evidence entry: {err}"),
+                                )
+                            })?;
+                        evidence_entry_hash_hex(&previous)
+                    }
+                    None => String::new(),
+                    Some(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "newest stored row is not a text evidence entry; refusing to reset the chain",
+                        ));
+                    }
+                };
+                sign_chained_evidence_entry(&mut entry, signing_key);
+                let entry_json = serde_json::to_string(&entry)
+                    .map_err(|err| io::Error::other(format!("encode entry: {err}")))?;
+                tx.execute_with_params(
+                    "INSERT INTO evidence_entries(recorded_at, entry_json) VALUES (?1, ?2);",
+                    &[
+                        SqliteValue::Text(chrono::Utc::now().to_rfc3339().into()),
+                        SqliteValue::Text(entry_json.into()),
+                    ],
+                )
+                .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
+                tx.commit()
+                    .map_err(|err| io::Error::other(format!("commit entry: {err}")))?;
+                return Ok(entry);
+            }
+        }
+        ensure_schema(&connection)?;
+        let ledger = Self {
+            db_path,
+            state_dir,
+            connection: Mutex::new(Some(connection)),
+        };
+        ledger.append_signed_chained(entry, signing_key)
     }
 
     /// Conventional project location `.franken-node/state/` under `project_root`.

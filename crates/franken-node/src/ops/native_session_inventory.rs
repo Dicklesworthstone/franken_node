@@ -493,7 +493,17 @@ impl NativeSessionAdmissionReceipt {
         Ok(preimage)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn issue(admission: &NativeSessionAdmission, root: &ed25519_dalek::SigningKey) -> Result<Self> {
+        let verifying_key = root.verifying_key();
+        Self::issue_with_verifying_key(admission, root, &verifying_key)
+    }
+
+    fn issue_with_verifying_key(
+        admission: &NativeSessionAdmission,
+        root: &ed25519_dalek::SigningKey,
+        verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self> {
         use ed25519_dalek::Signer as _;
         validate_admission(admission)?;
         let mut receipt = Self {
@@ -504,7 +514,7 @@ impl NativeSessionAdmissionReceipt {
             signature_hex: String::new(),
         };
         receipt.signature_hex = hex::encode(root.sign(&receipt.preimage()?).to_bytes());
-        receipt.verify(admission, &root.verifying_key())?;
+        receipt.verify(admission, verifying_key)?;
         Ok(receipt)
     }
 
@@ -570,10 +580,21 @@ impl NativeSessionOutcomeReceipt {
         Ok(preimage)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn issue(
         admission: &NativeSessionAdmission,
         outcome: &NativeSessionOutcome,
         root: &ed25519_dalek::SigningKey,
+    ) -> Result<Self> {
+        let verifying_key = root.verifying_key();
+        Self::issue_with_verifying_key(admission, outcome, root, &verifying_key)
+    }
+
+    fn issue_with_verifying_key(
+        admission: &NativeSessionAdmission,
+        outcome: &NativeSessionOutcome,
+        root: &ed25519_dalek::SigningKey,
+        verifying_key: &ed25519_dalek::VerifyingKey,
     ) -> Result<Self> {
         use ed25519_dalek::Signer as _;
 
@@ -588,7 +609,7 @@ impl NativeSessionOutcomeReceipt {
             signature_hex: String::new(),
         };
         receipt.signature_hex = hex::encode(root.sign(&receipt.preimage()?).to_bytes());
-        receipt.verify(admission, &root.verifying_key())?;
+        receipt.verify(admission, verifying_key)?;
         Ok(receipt)
     }
 
@@ -1444,6 +1465,37 @@ fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connecti
     open_inventory_unlocked(protected_root, create)
 }
 
+#[cfg(unix)]
+fn path_file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn path_file_identity(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+fn inventory_schema_is_current_in_tx(tx: &Transaction<'_>) -> bool {
+    tx.query(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN (
+               'native_sessions',
+               'native_session_drains',
+               'native_session_admission_serialization'
+           );",
+    )
+    .is_ok_and(|rows| {
+        matches!(
+            rows.as_slice(),
+            [row] if matches!(row.values(), [SqliteValue::Integer(3)])
+        )
+    })
+}
+
 fn inventory_schema_is_current(connection: &Connection) -> bool {
     connection
         .query(
@@ -1461,6 +1513,36 @@ fn inventory_schema_is_current(connection: &Connection) -> bool {
                 [row] if matches!(row.values(), [SqliteValue::Integer(3)])
             )
         })
+}
+
+fn ensure_inventory_schema(connection: &Connection) -> Result<()> {
+    if !inventory_schema_is_current(connection) {
+        let mut tx = connection.transaction()?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS native_sessions (
+                session_nonce TEXT PRIMARY KEY NOT NULL,
+                admission_json TEXT NOT NULL,
+                outcome_json TEXT
+            );",
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS native_session_drains (
+                drain_id TEXT PRIMARY KEY NOT NULL,
+                project_root TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state_json TEXT NOT NULL,
+                UNIQUE(project_root, generation)
+            );",
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS native_session_admission_serialization (
+                project_root TEXT PRIMARY KEY NOT NULL,
+                transaction_nonce TEXT NOT NULL
+            );",
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 fn open_inventory_unlocked(protected_root: &Path, create: bool) -> Result<Option<Connection>> {
@@ -1488,31 +1570,8 @@ fn open_inventory_unlocked(protected_root: &Path, create: bool) -> Result<Option
                 .query(pragma)
                 .context("configure native-session inventory durability")?;
         }
-        if create && !inventory_schema_is_current(&connection) {
-            let mut tx = connection.transaction()?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS native_sessions (
-                    session_nonce TEXT PRIMARY KEY NOT NULL,
-                    admission_json TEXT NOT NULL,
-                    outcome_json TEXT
-                );",
-            )?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS native_session_drains (
-                    drain_id TEXT PRIMARY KEY NOT NULL,
-                    project_root TEXT NOT NULL,
-                    generation INTEGER NOT NULL,
-                    state_json TEXT NOT NULL,
-                    UNIQUE(project_root, generation)
-                );",
-            )?;
-            tx.execute(
-                "CREATE TABLE IF NOT EXISTS native_session_admission_serialization (
-                    project_root TEXT PRIMARY KEY NOT NULL,
-                    transaction_nonce TEXT NOT NULL
-                );",
-            )?;
-            tx.commit()?;
+        if create {
+            ensure_inventory_schema(&connection)?;
         }
         protect_sidecars(protected_root)?;
         Ok(connection)
@@ -1765,7 +1824,8 @@ fn retain_admission_receipt_with_root(
 ) -> Result<()> {
     use std::io::Write as _;
 
-    let receipt = NativeSessionAdmissionReceipt::issue(admission, root)?;
+    let receipt =
+        NativeSessionAdmissionReceipt::issue_with_verifying_key(admission, root, verifying_key)?;
     let bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
     let directory = protected_root.join(ADMISSION_RECEIPT_DIRECTORY);
     let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
@@ -1898,7 +1958,8 @@ fn retain_outcome_receipt(
     )?;
     let key = root.verifying_key();
     verify_admission_capture_with_root(protected_root, admission, &key)?;
-    let receipt = NativeSessionOutcomeReceipt::issue(admission, outcome, &root)?;
+    let receipt =
+        NativeSessionOutcomeReceipt::issue_with_verifying_key(admission, outcome, &root, &key)?;
     let bytes = bounded_json(&receipt, MAX_OUTCOME_RECEIPT_BYTES)?;
     let directory = protected_root.join(OUTCOME_RECEIPT_DIRECTORY);
     let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
@@ -2096,12 +2157,64 @@ pub(crate) struct NativeSessionInventoryGuard {
     finished: bool,
 }
 
+pub(crate) struct NativeSessionAdmissionTicket {
+    generation: u64,
+    protected_root: Option<PathBuf>,
+    database_identity: Option<(u64, u64)>,
+    connection: Option<Connection>,
+    schema_verified: bool,
+}
+
+impl NativeSessionAdmissionTicket {
+    fn bare(generation: u64) -> Self {
+        Self {
+            generation,
+            protected_root: None,
+            database_identity: None,
+            connection: None,
+            schema_verified: false,
+        }
+    }
+
+    fn take_reusable_connection(
+        &mut self,
+        protected_root: &Path,
+        database_identity: Option<(u64, u64)>,
+    ) -> Option<(Connection, bool)> {
+        if database_identity.is_none()
+            || self.database_identity != database_identity
+            || self.protected_root.as_deref() != Some(protected_root)
+        {
+            return None;
+        }
+        self.connection
+            .take()
+            .map(|connection| (connection, self.schema_verified))
+    }
+}
+
 impl NativeSessionInventoryGuard {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn admit(
         protected_root: &Path,
         admission: NativeSessionAdmission,
         expected_generation: u64,
     ) -> Result<Self> {
+        Self::admit_with_context(
+            protected_root,
+            admission,
+            NativeSessionAdmissionTicket::bare(expected_generation),
+            None,
+        )
+    }
+
+    pub(crate) fn admit_with_context(
+        protected_root: &Path,
+        admission: NativeSessionAdmission,
+        mut ticket: NativeSessionAdmissionTicket,
+        preloaded_root: Option<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey)>,
+    ) -> Result<Self> {
+        let expected_generation = ticket.generation;
         ensure_runtime_evidence_directory(protected_root, true)?;
         validate_admission(&admission)?;
         let scopes = admission.control_scopes.as_ref().context(
@@ -2122,18 +2235,34 @@ impl NativeSessionInventoryGuard {
         }
         ensure_runtime_evidence_directory(&capture_directory, true)?;
         ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
-        let product_root = load_runtime_evidence_product_root(
-            &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
-        )?;
-        let verifying_key = product_root.verifying_key();
+        let (product_root, verifying_key) = match preloaded_root {
+            Some(pair) => pair,
+            None => {
+                let root = load_runtime_evidence_product_root(
+                    &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+                )?;
+                let key = root.verifying_key();
+                (root, key)
+            }
+        };
         verify_admission_capture_with_root(protected_root, &admission, &verifying_key)?;
         read_retained_native_session_source_capsule(protected_root, &admission)
             .context("native-session sources must be retained before admission")?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let write_lock = lock_inventory_file(protected_root, true)?;
         let database_identity = lock_file_identity(write_lock.as_ref());
-        let connection = retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
-            .context("native-session inventory was not created")?;
+        let mut connection = Some(
+            match ticket.take_reusable_connection(protected_root, database_identity) {
+                Some((connection, schema_verified)) => {
+                    if !schema_verified {
+                        retry_snapshot_conflict(|| ensure_inventory_schema(&connection))?;
+                    }
+                    connection
+                }
+                None => retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
+                    .context("native-session inventory was not created")?,
+            },
+        );
         retain_admission_receipt_with_root(
             protected_root,
             &admission,
@@ -2153,8 +2282,20 @@ impl NativeSessionInventoryGuard {
         // insertion commits, so a duplicate/losing admission cannot create a
         // false never-spawned receipt for an already running worker.
         let mut refused_outcome = None;
+        let mut commit_attempt = 0_u32;
         let (admitted, recovered_sessions) = retry_snapshot_conflict(|| {
-            let mut tx = connection.transaction()?;
+            if commit_attempt > 0 {
+                connection = None;
+                connection = Some(
+                    open_inventory_unlocked(protected_root, true)?
+                        .context("native-session inventory was not created")?,
+                );
+            }
+            commit_attempt = commit_attempt.saturating_add(1);
+            let active_connection = connection
+                .as_ref()
+                .context("native-session inventory connection missing")?;
+            let mut tx = active_connection.transaction()?;
             // Every enclosing owner participates in the same conflict point.
             // Deduplicate shared ancestors of the release and operator roots;
             // a parent cannot seal a census concurrently with child admission.
@@ -2239,7 +2380,7 @@ impl NativeSessionInventoryGuard {
             );
         }
         Ok(Self {
-            connection,
+            connection: connection.context("native-session inventory connection missing")?,
             database_identity,
             protected_root: protected_root.to_path_buf(),
             session_nonce: admission.session_nonce.clone(),
@@ -2706,20 +2847,46 @@ fn check_retained_drain_byte_budget(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
+    admission_ticket_with_connection_at(protected_root, project_root)
+        .map(|ticket| ticket.generation)
+}
+
+fn admission_ticket_with_connection_at(
+    protected_root: &Path,
+    project_root: &Path,
+) -> Result<NativeSessionAdmissionTicket> {
     project_key(project_root)?;
+    let database_path = protected_root.join(INVENTORY_FILE);
     retry_snapshot_conflict(|| {
+        let before_identity = path_file_identity(&database_path);
         let Some(connection) = open_inventory(protected_root, false)? else {
-            return Ok(0);
+            return Ok(NativeSessionAdmissionTicket::bare(0));
         };
-        let mut tx = connection.transaction()?;
-        let (generation, held_fence) = admission_scope_state(&tx, project_root)?;
-        tx.commit()?;
+        let (generation, held_fence, schema_verified) = {
+            let mut tx = connection.transaction()?;
+            let (generation, held_fence) = admission_scope_state(&tx, project_root)?;
+            let schema_verified = inventory_schema_is_current_in_tx(&tx);
+            tx.commit()?;
+            (generation, held_fence, schema_verified)
+        };
         protect_sidecars(protected_root)?;
         if let Some(drain_id) = held_fence {
             bail!("native-session admission is fenced by local fleet drain {drain_id}");
         }
-        generation.context("native-session enclosing admission revision exhausted")
+        let generation =
+            generation.context("native-session enclosing admission revision exhausted")?;
+        let after_identity = path_file_identity(&database_path);
+        let reusable_identity =
+            before_identity.filter(|before| after_identity.as_ref() == Some(before));
+        Ok(NativeSessionAdmissionTicket {
+            generation,
+            protected_root: reusable_identity.map(|_| protected_root.to_path_buf()),
+            database_identity: reusable_identity,
+            connection: reusable_identity.map(|_| connection),
+            schema_verified,
+        })
     })
 }
 
@@ -2739,11 +2906,20 @@ fn existing_admission_root() -> Result<Option<PathBuf>> {
 /// enclosing revision in the same transaction that records the worker obligation.
 /// An active ancestor fence also makes the live observer cancel old workers.
 pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
+    native_session_admission_ticket_with_connection(project_root).map(|ticket| ticket.generation)
+}
+
+/// Same contract as [`native_session_admission_ticket`], retaining the opened
+/// inventory handle so immediate admission on the same database inode can reuse
+/// the already-configured WAL connection instead of opening a second one.
+pub(crate) fn native_session_admission_ticket_with_connection(
+    project_root: &Path,
+) -> Result<NativeSessionAdmissionTicket> {
     project_key(project_root)?;
     let Some(root) = existing_admission_root()? else {
-        return Ok(0);
+        return Ok(NativeSessionAdmissionTicket::bare(0));
     };
-    admission_ticket_at(&root, project_root)
+    admission_ticket_with_connection_at(&root, project_root)
 }
 
 /// Reference runtimes execute outside the native worker inventory, but they

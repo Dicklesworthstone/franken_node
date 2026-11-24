@@ -13593,11 +13593,43 @@ fn list_active_run_receipts(receipts_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn archive_excess_run_receipts(receipts_root: &Path, max_receipts: usize) -> Result<()> {
-    let receipts = list_active_run_receipts(receipts_root)?;
+    if !receipts_root.is_dir() {
+        return Ok(());
+    }
+    let mut receipts = Vec::new();
+    for entry in std::fs::read_dir(receipts_root)
+        .with_context(|| format!("failed listing {}", receipts_root.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed reading {}", receipts_root.display()))?;
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed reading file type for {}", path.display()))?
+            .is_dir()
+            || entry.file_name() == "archive"
+        {
+            continue;
+        }
+        for file in std::fs::read_dir(&path)
+            .with_context(|| format!("failed listing {}", path.display()))?
+        {
+            let file = file.with_context(|| format!("failed reading {}", path.display()))?;
+            let file_path = file.path();
+            if file
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", file_path.display()))?
+                .is_file()
+                && file_path.extension().and_then(|ext| ext.to_str()) == Some("json")
+            {
+                receipts.push(file_path);
+            }
+        }
+    }
     let overflow = receipts.len().saturating_sub(max_receipts);
     if overflow == 0 {
         return Ok(());
     }
+    receipts.sort();
 
     let archive_root = receipts_root.join("archive");
     for path in receipts.into_iter().take(overflow) {
@@ -13634,8 +13666,10 @@ fn persist_run_execution_receipt(
     let ended_at = DateTime::parse_from_rfc3339(&receipt.core.end_time_utc)
         .context("run receipt end_time_utc was not valid RFC3339")?;
     let day_dir = receipts_root.join(ended_at.format("%Y-%m-%d").to_string());
-    std::fs::create_dir_all(&day_dir)
-        .with_context(|| format!("failed creating {}", day_dir.display()))?;
+    if !day_dir.is_dir() {
+        std::fs::create_dir_all(&day_dir)
+            .with_context(|| format!("failed creating {}", day_dir.display()))?;
+    }
 
     let final_path = day_dir.join(format!("{}.json", receipt.core.receipt_id));
     let temp_path = day_dir.join(format!(
@@ -13704,7 +13738,28 @@ fn append_decision_evidence(
     trace_id: &str,
     payload: serde_json::Value,
 ) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
-    let Some(signing) = load_receipt_signing_material(None)? else {
+    let signing = load_receipt_signing_material(None)?;
+    append_decision_evidence_with_signing(
+        ledger_dir,
+        schema_version,
+        decision_id,
+        decision_kind,
+        trace_id,
+        payload,
+        signing.as_ref(),
+    )
+}
+
+fn append_decision_evidence_with_signing(
+    ledger_dir: &Path,
+    schema_version: &str,
+    decision_id: &str,
+    decision_kind: observability::evidence_ledger::DecisionKind,
+    trace_id: &str,
+    payload: serde_json::Value,
+    signing: Option<&Ed25519SigningMaterial>,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    let Some(signing) = signing else {
         return Ok(None);
     };
     let now = chrono::Utc::now();
@@ -13722,12 +13777,13 @@ fn append_decision_evidence(
         signature: String::new(),
         prev_entry_hash: String::new(),
     };
-    let store = observability::evidence_ledger_durable::DurableEvidenceLedger::open(ledger_dir)
-        .context("failed opening the durable evidence ledger")?;
-    store
-        .append_signed_chained(entry, &signing.signing_key)
-        .map(Some)
-        .context("failed appending to the durable evidence ledger")
+    observability::evidence_ledger_durable::DurableEvidenceLedger::append_signed_chained_in(
+        ledger_dir,
+        entry,
+        &signing.signing_key,
+    )
+    .map(Some)
+    .context("failed appending to the durable evidence ledger")
 }
 
 /// Record an operator trust decision in the durable evidence ledger in
@@ -13807,12 +13863,32 @@ fn build_run_decision_evidence_payload(
 }
 
 /// Record the run's outcome in the durable evidence ledger.
+#[allow(dead_code)]
 fn append_run_evidence_entry(
     project_root: &Path,
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     trace_id: &str,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    let signing = load_receipt_signing_material(None)?;
+    append_run_evidence_entry_with_signing(
+        project_root,
+        receipt,
+        receipt_path,
+        dispatch,
+        trace_id,
+        signing.as_ref(),
+    )
+}
+
+fn append_run_evidence_entry_with_signing(
+    project_root: &Path,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+    signing: Option<&Ed25519SigningMaterial>,
 ) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
     use observability::evidence_ledger::DecisionKind;
 
@@ -13823,13 +13899,14 @@ fn append_run_evidence_entry(
         None => DecisionKind::Admit,
     };
     let payload = build_run_decision_evidence_payload(receipt, receipt_path, dispatch)?;
-    append_decision_evidence(
+    append_decision_evidence_with_signing(
         &project_ledger_dir(project_root),
         RUN_DECISION_EVIDENCE_SCHEMA,
         &receipt.core.receipt_id,
         decision_kind,
         trace_id,
         payload,
+        signing,
     )
 }
 
@@ -14144,6 +14221,7 @@ struct AuthenticatedRunLedgerRecord {
 /// Persist the run's signed host-effect ledger beside its receipt
 /// (`.franken-node/state/run-ledgers/<day>/<receipt id>.json`). Runs that
 /// recorded no ledger (non-native runtimes) persist nothing.
+#[allow(dead_code)]
 fn persist_run_host_effect_ledger(
     project_root: &Path,
     policy_mode: &str,
@@ -14151,6 +14229,27 @@ fn persist_run_host_effect_ledger(
     receipt_path: &Path,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     trace_id: &str,
+) -> Result<Option<PathBuf>> {
+    let signing = load_receipt_signing_material(None)?;
+    persist_run_host_effect_ledger_with_signing(
+        project_root,
+        policy_mode,
+        receipt,
+        receipt_path,
+        dispatch,
+        trace_id,
+        signing.as_ref(),
+    )
+}
+
+fn persist_run_host_effect_ledger_with_signing(
+    project_root: &Path,
+    policy_mode: &str,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+    signing: Option<&Ed25519SigningMaterial>,
 ) -> Result<Option<PathBuf>> {
     let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
         return Ok(None);
@@ -14177,8 +14276,8 @@ fn persist_run_host_effect_ledger(
         receipt_snapshot: Some(receipt_snapshot),
         record_signature: None,
     };
-    let signing = load_receipt_signing_material(None)?
-        .ok_or_else(|| missing_replay_bundle_signing_key_error("run-record signing"))?;
+    let signing =
+        signing.ok_or_else(|| missing_replay_bundle_signing_key_error("run-record signing"))?;
     record.record_signature = Some(tools::replay_bundle::sign_run_ledger_record(
         &serde_json::to_value(&record)?,
         &signing.signing_key,
@@ -48009,16 +48108,25 @@ fn main() -> Result<()> {
                     &receipt,
                     configured_run_receipt_limit(&resolved.config),
                 )?;
+                let receipt_signing = load_receipt_signing_material(None);
                 // Explicit replay capture and publisher-approved source must
                 // be durably bound to a signed record before command success.
-                let persisted_ledger = persist_run_host_effect_ledger(
-                    &project_root,
-                    &policy,
-                    &receipt,
-                    &receipt_path,
-                    &dispatch,
-                    &trace_id,
-                );
+                let persisted_ledger = if dispatch.host_effect_ledger.is_none() {
+                    Ok(None)
+                } else {
+                    match &receipt_signing {
+                        Ok(signing) => persist_run_host_effect_ledger_with_signing(
+                            &project_root,
+                            &policy,
+                            &receipt,
+                            &receipt_path,
+                            &dispatch,
+                            &trace_id,
+                            signing.as_ref(),
+                        ),
+                        Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                    }
+                };
                 if dispatch.native_replay.is_some() {
                     persisted_ledger
                         .context("failed persisting requested native replay capture")?
@@ -48055,13 +48163,19 @@ fn main() -> Result<()> {
                     }
                 };
                 // Likewise a ledger append failure is reported, not fatal.
-                if let Err(err) = append_run_evidence_entry(
-                    &project_root,
-                    &receipt,
-                    &receipt_path,
-                    &dispatch,
-                    &trace_id,
-                ) && !structured_logs_jsonl
+                let evidence_append_result = match &receipt_signing {
+                    Ok(signing) => append_run_evidence_entry_with_signing(
+                        &project_root,
+                        &receipt,
+                        &receipt_path,
+                        &dispatch,
+                        &trace_id,
+                        signing.as_ref(),
+                    ),
+                    Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                };
+                if let Err(err) = evidence_append_result
+                    && !structured_logs_jsonl
                 {
                     eprintln!("warning: evidence ledger append failed: {err:#}");
                 }

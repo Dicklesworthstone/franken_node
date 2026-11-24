@@ -288,6 +288,8 @@ struct ProvisionedRuntimeEvidenceSession {
     grant: RuntimeEvidenceSessionGrant,
     capture_path: PathBuf,
     protected_state_root: PathBuf,
+    product_root: ed25519_dalek::SigningKey,
+    product_root_verifying_key: ed25519_dalek::VerifyingKey,
 }
 
 #[cfg(feature = "engine")]
@@ -685,27 +687,37 @@ fn runtime_evidence_capture_preimage(capture: &RuntimeEvidenceIdentityCapture) -
 
 #[cfg(feature = "engine")]
 impl RuntimeEvidenceIdentityCapture {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn issue(
         session_nonce: &str,
         identity: EvidenceVerificationIdentity,
         product_root: &ed25519_dalek::SigningKey,
     ) -> Result<Self> {
+        let verifying_key = product_root.verifying_key();
+        Self::issue_with_verifying_key(session_nonce, identity, product_root, &verifying_key)
+    }
+
+    pub(super) fn issue_with_verifying_key(
+        session_nonce: &str,
+        identity: EvidenceVerificationIdentity,
+        product_root: &ed25519_dalek::SigningKey,
+        product_root_verification_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self> {
         use ed25519_dalek::Signer as _;
 
-        let product_root_verification_key = product_root.verifying_key();
         let product_root_verification_key_hex =
             hex::encode(product_root_verification_key.as_bytes());
         let mut capture = Self {
             schema_version: RUNTIME_EVIDENCE_CAPTURE_SCHEMA.to_string(),
             session_nonce: session_nonce.to_string(),
-            product_root_key_id: product_root_key_id(&product_root_verification_key),
+            product_root_key_id: product_root_key_id(product_root_verification_key),
             product_root_verification_key_hex,
             evidence_verification_identity: identity,
             signature_hex: String::new(),
         };
         let preimage = runtime_evidence_capture_preimage(&capture)?;
         capture.signature_hex = hex::encode(product_root.sign(&preimage).to_bytes());
-        capture.verify_with_product_root(&product_root_verification_key)?;
+        capture.verify_with_product_root(product_root_verification_key)?;
         Ok(capture)
     }
 
@@ -839,7 +851,7 @@ pub(super) fn ensure_runtime_evidence_directory_with_status(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != linux_process_identity()?.effective_uid {
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
             anyhow::bail!(
                 "runtime evidence directory {} is not owned by the current effective user",
                 path.display()
@@ -886,7 +898,7 @@ pub(super) fn ensure_runtime_evidence_directory_with_status(
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::MetadataExt as _;
-            if metadata.uid() != linux_process_identity()?.effective_uid {
+            if metadata.uid() != rustix::process::geteuid().as_raw() {
                 anyhow::bail!(
                     "runtime evidence directory {} is not owned by the current effective user",
                     path.display()
@@ -1169,7 +1181,7 @@ pub(super) fn validate_runtime_evidence_private_file_metadata(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != linux_process_identity()?.effective_uid {
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
             anyhow::bail!(
                 "runtime evidence key material {} is not owned by the current effective user",
                 path.display()
@@ -1361,7 +1373,8 @@ fn provision_runtime_evidence_session(
     uuid::Uuid::parse_str(session_nonce).context("runtime evidence session nonce is invalid")?;
     let (product_root_path, capture_directory, protected_state_root) = prepared_directories;
     let product_root = load_or_create_runtime_evidence_product_root(&product_root_path)?;
-    let root_key_id = product_root_key_id(&product_root.verifying_key());
+    let product_root_verifying_key = product_root.verifying_key();
+    let root_key_id = product_root_key_id(&product_root_verifying_key);
 
     use rand::RngCore as _;
     let mut signing_seed = Zeroizing::new([0_u8; 32]);
@@ -1382,10 +1395,11 @@ fn provision_runtime_evidence_session(
         None,
     )
     .context("construct product-provisioned runtime evidence authority")?;
-    let capture = RuntimeEvidenceIdentityCapture::issue(
+    let capture = RuntimeEvidenceIdentityCapture::issue_with_verifying_key(
         session_nonce,
         authority.verification_identity(),
         &product_root,
+        &product_root_verifying_key,
     )?;
     let capture_path = persist_runtime_evidence_capture(&capture_directory, &capture)?;
     let grant = RuntimeEvidenceSessionGrant {
@@ -1396,6 +1410,8 @@ fn provision_runtime_evidence_session(
         grant,
         capture_path,
         protected_state_root,
+        product_root,
+        product_root_verifying_key,
     })
 }
 
@@ -2220,22 +2236,12 @@ struct LinuxProcessIdentity {
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 fn linux_process_identity() -> Result<LinuxProcessIdentity> {
-    let status = std::fs::read_to_string("/proc/self/status")
-        .context("failed reading Linux process credentials")?;
-    let status_id = |key: &str, field_index: usize| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(key))
-            .and_then(|value| value.split_whitespace().nth(field_index))
-            .and_then(|value| value.parse::<u32>().ok())
-    };
+    let parent_pid =
+        rustix::process::getppid().map_or(0, |pid| u32::try_from(pid.as_raw_pid()).unwrap_or(0));
     Ok(LinuxProcessIdentity {
-        parent_pid: status_id("PPid:", 0)
-            .ok_or_else(|| anyhow::anyhow!("process status had no valid parent PID"))?,
-        effective_uid: status_id("Uid:", 1)
-            .ok_or_else(|| anyhow::anyhow!("process status had no effective UID"))?,
-        effective_gid: status_id("Gid:", 1)
-            .ok_or_else(|| anyhow::anyhow!("process status had no effective GID"))?,
+        parent_pid,
+        effective_uid: rustix::process::geteuid().as_raw(),
+        effective_gid: rustix::process::getegid().as_raw(),
     })
 }
 
@@ -7776,6 +7782,14 @@ fn resolve_explicit_engine_plan_with(
     path_env: Option<OsString>,
     path_exists: &impl Fn(&Path) -> bool,
 ) -> DispatchResolutionResult<DispatchPlan> {
+    if !has_explicit_engine_override(&inputs)
+        && let Some(embedded) = inputs.embedded_engine
+    {
+        return Ok(DispatchPlan::FrankenEngine {
+            binary: embedded.to_string_lossy().into_owned(),
+        });
+    }
+
     let binary = resolve_engine_binary_path_with(
         inputs.configured_hint,
         inputs.env_override,
@@ -7786,13 +7800,6 @@ fn resolve_explicit_engine_plan_with(
     );
 
     if !command_exists_with(&binary, path_env, path_exists) {
-        if !has_explicit_engine_override(&inputs)
-            && let Some(embedded) = inputs.embedded_engine
-        {
-            return Ok(DispatchPlan::FrankenEngine {
-                binary: embedded.to_string_lossy().into_owned(),
-            });
-        }
         return Err(DispatchResolutionError::RequestedRuntimeUnavailable(
             ActionableError::new(
                 "requested runtime `franken-engine` was not found; fix --engine-bin, FRANKEN_ENGINE_BIN, FRANKEN_NODE_ENGINE_BINARY_PATH, or [engine].binary_path",
@@ -7829,6 +7836,17 @@ fn resolve_dispatch_plan_with(
         PreferredRuntime::Auto => {}
     }
 
+    // The native engine is linked into this binary: unless an operator
+    // explicitly named an engine binary override, use it directly without
+    // walking PATH for an unused sidecar executable.
+    if !has_explicit_engine_override(&inputs)
+        && let Some(embedded) = inputs.embedded_engine
+    {
+        return Ok(DispatchPlan::FrankenEngine {
+            binary: embedded.to_string_lossy().into_owned(),
+        });
+    }
+
     let binary = resolve_engine_binary_path_with(
         inputs.configured_hint,
         inputs.env_override,
@@ -7846,14 +7864,6 @@ fn resolve_dispatch_plan_with(
         return Err(DispatchResolutionError::RequestedRuntimeUnavailable(
             configured_engine_binary_missing_error(Path::new(&binary), app_path),
         ));
-    }
-
-    // The native engine is linked into this binary: prefer it over any
-    // external Node/Bun fallback (which profile-governed `run` rejects anyway).
-    if let Some(embedded) = inputs.embedded_engine {
-        return Ok(DispatchPlan::FrankenEngine {
-            binary: embedded.to_string_lossy().into_owned(),
-        });
     }
 
     resolve_fallback_runtime_plan_with(app_path, PreferredRuntime::Auto, path_env, path_exists)
@@ -9057,7 +9067,7 @@ fn prepare_best_effort_package_attribution_tracker(
         let graph = capture(root, entrypoint, options).ok()?;
         let pin = graph.report().input_hash.clone();
         let package_identities = CapturedPackageIdentities::from_graph(&graph);
-        let resolver = CapturedEngineResolver::new_with_parser_options(
+        let resolver = CapturedEngineResolver::for_best_effort_attribution(
             graph,
             &pin,
             orchestrator_config.parser_options.clone(),
@@ -10386,6 +10396,17 @@ impl EngineDispatcher {
         } else {
             None
         };
+        let needs_external_candidates = embedded_engine.is_none()
+            || self.configured_path.is_some()
+            || config_path.is_some()
+            || env_override
+                .as_deref()
+                .is_some_and(|raw| !raw.trim().is_empty());
+        let candidates = if needs_external_candidates {
+            default_engine_binary_candidates()
+        } else {
+            Vec::new()
+        };
         let dispatch_plan = match resolve_dispatch_plan_with(
             app_path,
             self.requested_runtime,
@@ -10394,7 +10415,7 @@ impl EngineDispatcher {
                 env_override: env_override.as_deref(),
                 cli_path: self.configured_path.as_deref(),
                 config_path,
-                candidates: &default_engine_binary_candidates(),
+                candidates: &candidates,
                 embedded_engine: embedded_engine.as_deref(),
             },
             std::env::var_os("PATH"),
@@ -11020,19 +11041,8 @@ impl EngineDispatcher {
 
         #[cfg(target_os = "linux")]
         let process_spawn_admission = {
-            let status = std::fs::read_to_string("/proc/self/status")
-                .context("failed reading native-session worker process credentials")?;
-            let status_id = |key: &str| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix(key))
-                    .and_then(|value| value.split_whitespace().nth(1))
-                    .and_then(|value| value.parse::<u32>().ok())
-            };
-            let effective_uid = status_id("Uid:")
-                .ok_or_else(|| anyhow::anyhow!("worker status had no effective UID"))?;
-            let effective_gid = status_id("Gid:")
-                .ok_or_else(|| anyhow::anyhow!("worker status had no effective GID"))?;
+            let effective_uid = rustix::process::geteuid().as_raw();
+            let effective_gid = rustix::process::getegid().as_raw();
             if peer_credentials.uid != effective_uid || peer_credentials.gid != effective_gid {
                 anyhow::bail!(
                     "private native-session control peer credentials did not match the worker identity"
@@ -11072,10 +11082,8 @@ impl EngineDispatcher {
                         "ordinary native-session control peer was not visible in the worker PID namespace"
                     );
                 }
-                let parent_pid = status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("PPid:"))
-                    .and_then(|value| value.trim().parse::<i32>().ok())
+                let parent_pid = rustix::process::getppid()
+                    .map(|pid| pid.as_raw_pid())
                     .ok_or_else(|| anyhow::anyhow!("worker status had no valid parent PID"))?;
                 if parent_pid != peer_credentials.pid {
                     anyhow::bail!(
@@ -11803,8 +11811,8 @@ impl EngineDispatcher {
         // The enclosing owners' revision is captured before rechecking live
         // authority and compared atomically with the admission record. A
         // completed parent fence cannot admit a preflight predating its census.
-        let admission_generation =
-            crate::ops::native_session_inventory::native_session_admission_ticket(
+        let admission_ticket =
+            crate::ops::native_session_inventory::native_session_admission_ticket_with_connection(
                 project_paths.project_root(),
             )?;
         let operator_admission = trust_requirements
@@ -11964,6 +11972,8 @@ impl EngineDispatcher {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
             protected_state_root: runtime_evidence_state_root,
+            product_root,
+            product_root_verifying_key,
         } = provision_runtime_evidence_session(
             prepared_evidence_directories,
             &nonce,
@@ -11992,7 +12002,7 @@ impl EngineDispatcher {
         // instead of leaving a historical capture with unknown supervision.
         // Admission failure still refuses launch; an abrupt process loss or a
         // store that cannot record admission remains conservatively unknown.
-        let mut session_inventory = NativeSessionInventoryGuard::admit(
+        let mut session_inventory = NativeSessionInventoryGuard::admit_with_context(
             &runtime_evidence_state_root,
             NativeSessionAdmission {
                 session_nonce: nonce.clone(),
@@ -12014,7 +12024,8 @@ impl EngineDispatcher {
                 process_spawn_authority_granted: Some(process_spawn_admission.is_some()),
                 source_capsule,
             },
-            admission_generation,
+            admission_ticket,
+            Some((product_root, product_root_verifying_key)),
         )
         .context("native-session inventory admission failed; worker was not started")?;
         let effect_journal = session_inventory.prepare_effect_journal()

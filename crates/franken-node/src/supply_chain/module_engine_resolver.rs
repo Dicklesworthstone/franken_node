@@ -17,7 +17,7 @@ use super::registry::{
     ModuleKind, PinnedModuleRegistry, RegisteredModule, RegisteredTarget, RegistrySummary,
     RequestStyle, ResolutionKind,
 };
-use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl};
+use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl, SourceLanguage};
 use frankenengine_engine::capability::RuntimeCapability;
 use frankenengine_engine::hash_tiers::ContentHash;
 use frankenengine_engine::import_attributes::ImportAttributes as EngineImportAttributes;
@@ -120,6 +120,53 @@ impl CapturedEngineResolver {
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
         Ok(resolver)
+    }
+
+    /// Lightweight construction for best-effort non-frozen runtime attribution.
+    /// When every captured module is plain JavaScript or JSON, skips full
+    /// engine front-end parsing/normalization (since [`Self::module_attribution_specs`]
+    /// only consumes graph-level identities, builtin edges, and raw source
+    /// text) while preserving `max_source_bytes` bounds and falling back to
+    /// [`Self::new_with_parser_options`] whenever any module requires
+    /// TypeScript normalization.
+    pub fn for_best_effort_attribution(
+        graph: CapturedModuleGraph,
+        independent_graph_pin: &str,
+        parser_options: ParserOptions,
+    ) -> Result<Self, CaptureError> {
+        let all_plain_js_or_json = graph.report().modules.iter().all(|module| {
+            matches!(
+                module.source_language,
+                SourceLanguage::JavaScript | SourceLanguage::Json
+            )
+        });
+        if !all_plain_js_or_json {
+            return Self::new_with_parser_options(graph, independent_graph_pin, parser_options);
+        }
+        let max_source_bytes = parser_options.budget.max_source_bytes;
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
+            graph,
+            independent_graph_pin,
+            |module, source, _report| {
+                let source_bytes = u64::try_from(source.len()).unwrap_or(u64::MAX);
+                if source_bytes > max_source_bytes {
+                    return Err(super::error(
+                        "ERR_SOURCE_TOO_LARGE",
+                        format!(
+                            "captured source {} exceeds max_source_bytes ({max_source_bytes})",
+                            module.id.path
+                        ),
+                    ));
+                }
+                Ok(match module.source_language {
+                    SourceLanguage::Json => ModuleKind::Json,
+                    _ if module.format_hint == "module" => ModuleKind::EsModule,
+                    _ => ModuleKind::CommonJs,
+                })
+            },
+            native_builtin_provider,
+        )?;
+        Ok(Self::from_registry(registry))
     }
 
     pub fn from_registry(registry: PinnedModuleRegistry) -> Self {
