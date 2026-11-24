@@ -332,7 +332,25 @@ fn parse_range(text: &str) -> Checked<Vec<Conjunction>> {
             conjunction.term(op, partial(value)?)?;
             index += 1;
         }
+        // npm removes the lowest stable inclusive bound before evaluating
+        // prerelease admission, including when another comparator opts in
+        // to 0.0.0 prereleases. Matching and override selection must see the
+        // same normalized comparators.
+        conjunction.comparators.retain(|comparison| {
+            comparison.op != Op::Ge || comparison.version != Version::release([0; 3])
+        });
         result.push(conjunction);
+    }
+    // A wildcard disjunct dominates the complete npm range, including the
+    // prerelease opt-ins of other arms. Do this only AFTER every original
+    // arm has passed syntax and resource checks; a wildcard cannot conceal
+    // malformed or over-budget authority. Impossible wildcard inequalities
+    // such as >* have no comparators but are not unrestricted ranges.
+    if result
+        .iter()
+        .any(|arm| !arm.impossible && arm.comparators.is_empty())
+    {
+        return Ok(vec![Conjunction::default()]);
     }
     Ok(result)
 }
@@ -384,10 +402,6 @@ pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
             }
             let mut comparisons = Vec::new();
             for entry in arm.comparators {
-                // npm normalizes the lowest stable inclusive bound to ANY.
-                if entry.op == Op::Ge && entry.version == Version::release([0; 3]) {
-                    continue;
-                }
                 if !comparisons.contains(&entry) {
                     comparisons.push(entry);
                 }
@@ -664,6 +678,62 @@ mod tests {
         );
         assert_eq!(matches("*", "1.0.0-alpha"), Some(false));
         assert_eq!(matches("<2.0.0", "1.9.0-alpha"), Some(false));
+    }
+
+    #[test]
+    fn wildcard_disjunctions_preserve_npm_prerelease_exclusion() {
+        // Actual npm node-semver 7.8.5 canonicalizes a wildcard OR arm
+        // to the whole range. It does not preserve another arm's opt-in
+        // to prereleases, regardless of the order of those arms.
+        for any in ["*", "x", "", "~x", "<=*", ">=*", ">=0", ">=0.0.0"] {
+            for prerelease in [">=1.0.0-alpha", "^1.0.0-alpha", "1.0.0-alpha - 2"] {
+                for range in [
+                    format!("{any} || {prerelease}"),
+                    format!("{prerelease} || {any}"),
+                ] {
+                    for version in ["1.0.0-alpha", "1.0.0-beta", "1.0.1-alpha"] {
+                        assert_eq!(matches(&range, version), Some(false), "{range}: {version}");
+                    }
+                    assert_eq!(matches(&range, "9.0.0"), Some(true), "{range}");
+                }
+            }
+        }
+        // A wildcard in a conjunction does not erase its other bounds.
+        assert_eq!(matches("* >=1.0.0-alpha", "1.0.0-beta"), Some(true));
+        assert_eq!(matches("^1.0.0-alpha || >*", "1.0.0-beta"), Some(true));
+        assert_eq!(matches("^1.0.0-alpha || <*", "1.0.0-beta"), Some(true));
+        // Every authored arm must still parse before wildcard normalization.
+        assert_eq!(matches("* || >=1.0.0-alpha || garbage", "1.0.0"), None);
+        assert_eq!(matches("* || >9007199254740991", "1.0.0"), None);
+        assert_eq!(
+            matches(&vec!["*"; MAX_ALTERNATIVES + 1].join(" || "), "1.0.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn minimum_release_bounds_use_npm_range_normalization() {
+        // node-semver removes >=0.0.0 even in a conjunction that explicitly
+        // selects prereleases of 0.0.0. Keep matching and override range
+        // intersection on the same interpretation of this boundary.
+        for (range, intersects_exact) in [
+            (">=0.0.0 <=0.0.0-rc.1", true),
+            (">=0 <=0.0.0-rc.1", true),
+            ("0.0.0 - 0.0.0-rc.1", true),
+            // npm's comparator-pair intersection is stricter than matches:
+            // the generated <0.0.1-0 bound excludes this exact prerelease.
+            ("^0.0.0 <=0.0.0-rc.1", false),
+        ] {
+            assert_eq!(matches(range, "0.0.0-alpha"), Some(true), "{range}");
+            assert_eq!(matches(range, "0.0.0"), Some(false), "{range}");
+            assert_eq!(
+                intersects(range, "0.0.0-alpha"),
+                Some(intersects_exact),
+                "{range}"
+            );
+        }
+        assert_eq!(matches(">=0.0.0 <0.0.0", "0.0.0-alpha"), Some(false));
+        assert_eq!(matches(">0.0.0 <=0.0.0-rc.1", "0.0.0-alpha"), Some(false));
     }
 
     #[test]
