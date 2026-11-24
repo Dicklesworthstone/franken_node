@@ -256,13 +256,7 @@ pub(super) fn run_captured_cancellable(
     ExecutionControl::admit(&snapshots)?;
     let roots = [projects[0].canonicalize()?, projects[1].canonicalize()?];
     let (node, native) = runtime_invocations(native_executable)?;
-    let bun = Invocation {
-        executable: bun_executable
-            .canonicalize()
-            .context("resolve Bun executable")?,
-        before: Vec::new(),
-        after: Vec::new(),
-    };
+    let bun = Invocation::bun(bun_executable)?;
     let runtimes = [&node, &bun, &native];
     for (role, invocation) in ROLES.into_iter().zip(runtimes) {
         for root in &roots {

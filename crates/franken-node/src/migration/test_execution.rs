@@ -325,9 +325,8 @@ fn configured_command(
     let cwd = Path::new(settings.cwd.as_deref().unwrap_or(""));
     let mut command =
         invocation.command(&script_from(cwd, test)?, &workspace.join(cwd), environment);
-    // The invocation's operator-selected options always precede application
-    // data. In particular, native runtime_invocations appends `--` after its
-    // runtime controls, while Node/Bun stop option parsing at the script.
+    // The invocation already supplies its runtime-specific option terminator.
+    // All remaining words are the exact captured application arguments.
     command.args(&settings.arguments);
     for (name, value) in &settings.environment {
         match value {
@@ -598,6 +597,54 @@ mod tests {
             Some(Path::new("/workspace/packages/api"))
         );
         assert_eq!(command.get_program(), native.executable.as_os_str());
+    }
+
+    #[test]
+    fn bun_reference_receives_literal_leading_separators_like_node() {
+        let root = tempfile::tempdir().unwrap();
+        let test = Path::new("read-argv.cjs");
+        put(
+            root.path(),
+            "read-argv.cjs",
+            b"process.stdout.write(JSON.stringify(process.argv.slice(2)));",
+        );
+        let node = node();
+        let bun_path = super::super::super::bun_on_path(
+            &std::env::var_os("PATH").unwrap_or_default(),
+            root.path(),
+            &node.executable,
+            &std::env::current_exe().unwrap(),
+        )
+        .expect("real Bun reference");
+        let bun = Invocation::bun(&bun_path).unwrap();
+        let environment = std::env::vars_os().collect();
+        for arguments in [
+            vec![],
+            vec!["--"],
+            vec!["--", "--", "--eval", "literal"],
+            vec!["", "--", "λ"],
+        ] {
+            let settings = Settings {
+                arguments: arguments.iter().map(|word| (*word).to_owned()).collect(),
+                ..Settings::default()
+            };
+            for runtime in [&node, &bun] {
+                let mut command =
+                    configured_command(&settings, test, runtime, root.path(), &environment)
+                        .unwrap();
+                let output = smoke_supervisor::run_command_with_timeout(
+                    &mut command,
+                    Duration::from_secs(5),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                assert!(output.status.success(), "{:?}", runtime.executable);
+                assert_eq!(
+                    serde_json::from_slice::<Vec<String>>(&output.stdout).unwrap(),
+                    arguments
+                );
+            }
+        }
     }
 
     #[test]

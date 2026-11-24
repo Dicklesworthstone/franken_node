@@ -389,11 +389,7 @@ impl Prepared {
         pair::ExecutionControl::admit(&[self.seed.original(), self.seed.candidate()])?;
         let (node, native) = runtime_invocations(native)?;
         if let Some(bun) = bun {
-            let bun = Invocation {
-                executable: bun.canonicalize().context("resolve Bun executable")?,
-                before: vec![],
-                after: vec![],
-            };
+            let bun = Invocation::bun(bun)?;
             self.execute(&[&node, &bun, &native], deadline)
         } else {
             self.execute(&[&node, &native], deadline)

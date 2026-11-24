@@ -106,11 +106,7 @@ pub fn minimize(
         "product replay validator implementation changed"
     );
     let (node, native) = runtime_invocations(native)?;
-    let bun = Invocation {
-        executable: bun.canonicalize().context("resolve Bun executable")?,
-        before: vec![],
-        after: vec![],
-    };
+    let bun = Invocation::bun(bun)?;
     minimize_loaded(loaded, [&node, &bun, &native], options, started)
 }
 

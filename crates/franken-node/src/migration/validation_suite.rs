@@ -603,6 +603,19 @@ struct Invocation {
 }
 
 impl Invocation {
+    fn bun(executable: &Path) -> Result<Self> {
+        Ok(Self {
+            executable: executable
+                .canonicalize()
+                .context("resolve Bun executable")?,
+            before: vec![],
+            // Bun consumes one separator immediately after the script. Supply
+            // that separator ourselves so every captured guest word survives,
+            // including an initial literal "--". Identity records this prefix.
+            after: vec!["--".into()],
+        })
+    }
+
     fn identity(&self, deadline: Instant) -> Result<RuntimeIdentity> {
         let mut file = open_regular(&self.executable)?;
         let before = file.metadata()?;

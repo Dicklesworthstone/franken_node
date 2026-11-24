@@ -844,11 +844,7 @@ impl RewriteCandidate {
             before: vec![],
             after: vec![],
         };
-        let bun = super::Invocation {
-            executable: bun_executable.canonicalize()?,
-            before: vec![],
-            after: vec![],
-        };
+        let bun = super::Invocation::bun(bun_executable)?;
         let identities = [
             node.identity(self.deadline)?,
             bun.identity(self.deadline)?,
