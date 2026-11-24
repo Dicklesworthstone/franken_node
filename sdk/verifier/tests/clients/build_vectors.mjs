@@ -927,7 +927,7 @@ addCfIncident("counterfactual_incident_independent_pin", "COUNTERFACTUAL_BASELIN
   metadata: { expected_baseline_integrity_hash: hash("another independently selected incident") },
 });
 const substitutedBaseline = clone(incident);
-substitutedBaseline.created_at = "2026-11-23T12:00:00Z";
+substitutedBaseline.initial_state_snapshot.epoch += 1;
 addCfIncident("counterfactual_incident_validly_signed_substitute", "COUNTERFACTUAL_BASELINE_PIN_MISMATCH", {
   baselineBytes: resealIncident(substitutedBaseline),
   metadata: { expected_baseline_integrity_hash: incident.integrity_hash },
