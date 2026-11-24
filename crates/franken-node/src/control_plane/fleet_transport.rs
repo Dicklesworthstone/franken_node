@@ -3063,10 +3063,9 @@ impl FleetTransport for AsupersyncFleetTransport {
                     "fleet action log already contains the maximum {MAX_ACTION_LOG_ENTRIES} entries; refusing to discard retained containment actions"
                 )));
             }
+            validate_fleet_native_session_publication(action, state.actions.as_ref())?;
             validate_fleet_policy_publication(action, state.actions.as_ref())?;
-            let mut actions = state.actions.as_ref().clone();
-            actions.push(action.clone());
-            state.actions = Arc::new(actions);
+            Arc::make_mut(&mut state.actions).push(action.clone());
         }
         self.record_event("publish_action")?;
         Ok(())
@@ -6742,6 +6741,62 @@ mod tests {
         assert_eq!(state.nodes.len(), MAX_NODES_CAP);
         assert!(state.nodes.contains(&status));
         assert!(state.nodes.iter().all(|node| node.zone_id == "east"));
+    }
+
+    #[cfg(feature = "asupersync-transport")]
+    #[test]
+    fn asupersync_validates_native_hold_ownership_before_appending() {
+        use asupersync::{Budget, runtime::RuntimeBuilder};
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let mut transport = super::AsupersyncFleetTransport::with_cx(
+            runtime.request_cx_with_budget(Budget::INFINITE),
+            "observer",
+            super::AsupersyncFleetNetwork::new(),
+        );
+        transport.initialize().unwrap();
+        let emitted_at = DateTime::parse_from_rfc3339("2026-04-06T02:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let hold = FleetActionRecord {
+            action_id: "hold-east".into(),
+            emitted_at,
+            action: FleetAction::NativeSessionHold {
+                zone_id: "east".into(),
+                reason: "maintenance".into(),
+            },
+        };
+        let resume = |zone: &str| FleetActionRecord {
+            action_id: format!("resume-{zone}"),
+            emitted_at,
+            action: FleetAction::NativeSessionResume {
+                zone_id: zone.into(),
+                hold_action_id: hold.action_id.clone(),
+                reason: None,
+            },
+        };
+
+        assert!(transport.publish_action(&resume("east")).is_err());
+        assert!(transport.list_actions().unwrap().is_empty());
+        transport.publish_action(&hold).unwrap();
+        assert!(transport.publish_action(&resume("west")).is_err());
+        let actions = transport.list_actions().unwrap();
+        assert_eq!(actions, [hold.clone()]);
+        assert!(
+            super::fleet_native_session_holds(&actions, "east")
+                .unwrap()
+                .contains("hold-east")
+        );
+
+        let release = resume("east");
+        transport.publish_action(&release).unwrap();
+        transport.publish_action(&release).unwrap();
+        let actions = transport.list_actions().unwrap();
+        assert_eq!(actions, [hold, release]);
+        assert!(
+            super::fleet_native_session_holds(&actions, "east")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "asupersync-transport")]
