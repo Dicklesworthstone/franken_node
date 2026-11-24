@@ -29845,8 +29845,30 @@ fn handle_native_incident_counterfactual(args: &cli::IncidentCounterfactualArgs)
             std::time::Duration::from_millis(args.timeout_ms),
         )
         .map_err(|error| anyhow::anyhow!("native counterfactual execution refused: {error}"))?;
+        let (report_schema, digest_domain, baseline_description) = match (
+            outcome.schema_version.as_str(),
+            outcome.verification_scope.as_str(),
+        ) {
+            (
+                ops::native_replay::NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA,
+                ops::native_replay::NATIVE_COUNTERFACTUAL_SCOPE,
+            ) => (
+                "franken-node/incident-native-counterfactual/v1",
+                "incident-native-counterfactual/v1",
+                "baseline guest execution and original policy decisions verified",
+            ),
+            (
+                ops::native_replay::NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA,
+                ops::native_replay::NATIVE_COUNTERFACTUAL_FAILURE_SCOPE,
+            ) => (
+                "franken-node/incident-native-counterfactual/v2",
+                "incident-native-counterfactual/v2",
+                "baseline uncaught-exception prefix verified; original-policy equivalence unavailable",
+            ),
+            _ => anyhow::bail!("native counterfactual returned an unsupported verification scope"),
+        };
         let mut report = serde_json::json!({
-            "schema_version": "franken-node/incident-native-counterfactual/v1",
+            "schema_version": report_schema,
             "command": "incident.counterfactual",
             "executor": "native",
             "bundle_id": bundle.bundle_id,
@@ -29869,7 +29891,7 @@ fn handle_native_incident_counterfactual(args: &cli::IncidentCounterfactualArgs)
         // observed branch. This digest is not a signature or rollout approval.
         let canonical = counterfactual_to_json(&report)?;
         report["counterfactual_digest"] = serde_json::json!(incident_counterfactual_sha256(
-            format!("incident-native-counterfactual/v1\n{canonical}").as_bytes()
+            format!("{digest_domain}\n{canonical}").as_bytes()
         ));
         if args.json {
             println!("{}", counterfactual_to_json(&report)?);
@@ -29882,7 +29904,7 @@ fn handle_native_incident_counterfactual(args: &cli::IncidentCounterfactualArgs)
                 outcome.consumed_host_effects,
                 outcome.captured_host_effects,
             );
-            println!("  baseline guest execution and original policy decisions verified");
+            println!("  {baseline_description}");
             println!(
                 "  capability restriction observed; policy rollout and replay certification unavailable"
             );

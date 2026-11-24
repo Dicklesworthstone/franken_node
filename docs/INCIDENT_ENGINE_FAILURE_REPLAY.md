@@ -111,9 +111,15 @@ franken-node incident counterfactual \
 The three public-key inputs independently authenticate the export, original
 run, and runtime identity/effect ledger. The containing bundle is read once
 and authenticated before captured input is executed. The worker first
-reproduces the completed original run, including its policy decisions and
-frozen module sources. A failed or incomplete baseline refuses the entire
-counterfactual.
+reproduces the original run from frozen module sources. Completed originals
+require matching guest execution and original policy decisions. An original
+uncaught exception requires a certified failure prefix with matching exception,
+console, host effects, IR3, instruction count and nondeterminism context. Its
+baseline remains `guest_failure_prefix`: failed runs do not retain the sealed
+policy decisions needed to establish original-policy equivalence. A divergent
+baseline or one without the required sealed failure context refuses the entire
+counterfactual. Engine-failure originals, interrupted sessions and incomplete
+captures remain unsupported.
 
 The second execution preserves the captured source, arguments, ambient
 authority, runtime settings and nondeterminism inputs while subtracting the
@@ -138,14 +144,26 @@ The engine's intrinsic `vm_dispatch`, `heap_allocate`, and `console`
 capabilities cannot be removed through package declarations and are also
 refused as restrictions. Captured ambient process-shape authority is preserved.
 
-The `franken-node/incident-native-counterfactual/v1` report binds the original
-incident, verified origins, restriction and observed outcome into its digest.
+Completed originals produce `franken-node/incident-native-counterfactual/v1`.
+Certified uncaught-exception originals produce
+`franken-node/incident-native-counterfactual/v2`, with execution scope
+`certified_failure_prefix_capability_attenuation`. Each version binds the
+original incident, verified origins, restriction and observed outcome into its
+own versioned digest domain.
 It includes the verified baseline, remaining declared capabilities, actual terminal
 state and console, and consumed/unused original input counts. The digest is
 an integrity commitment, not a signature. The branch has
 `replay_certified = false` and `policy_equivalence_certified = false`; an
 observed capability restriction is not a certificate for a different policy
 or a rollout approval. Native mode does not support `--promote`.
+
+For a failed original, `execution_value_matches_original` is always `null`,
+including when the restricted branch completes: the original had no completed
+execution value to compare. `terminal_state_matches_original` compares terminal
+classes only. For example, removing an unused grant can preserve the original
+uncaught exception, while removing `fs_write` can stop the branch before its
+recorded write. Neither result by itself establishes that an alternative policy
+preserves intended application behavior.
 
 ## Required finalization
 

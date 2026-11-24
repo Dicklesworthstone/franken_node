@@ -600,6 +600,25 @@ mod native {
         }
     }
 
+    fn assert_native_counterfactual_digest(report: &Value, domain: &str) {
+        let mut unsigned = report.clone();
+        let digest = unsigned
+            .as_object_mut()
+            .unwrap()
+            .remove("counterfactual_digest")
+            .unwrap();
+        let canonical =
+            frankenengine_node::tools::counterfactual_replay::to_canonical_json(&unsigned).unwrap();
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(
+            digest,
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(format!("{domain}\n{canonical}").as_bytes()))
+            )
+        );
+    }
+
     #[test]
     fn native_counterfactual_executes_a_restricted_frozen_program_without_repeating_effects() {
         let fixture = Fixture::new_with_sources(false, SourceMode::AutomaticCommonJs);
@@ -659,25 +678,101 @@ mod native {
 
         // The digest commits to source authority, restriction and actual branch
         // observations; it is not the synthetic model's expected-loss score.
-        let mut unsigned = report.clone();
-        let digest = unsigned
-            .as_object_mut()
-            .unwrap()
-            .remove("counterfactual_digest")
-            .unwrap();
-        let canonical =
-            frankenengine_node::tools::counterfactual_replay::to_canonical_json(&unsigned).unwrap();
-        use sha2::{Digest as _, Sha256};
-        assert_eq!(
-            digest,
-            format!(
-                "sha256:{}",
-                hex::encode(Sha256::digest(
-                    format!("incident-native-counterfactual/v1\n{canonical}").as_bytes()
-                ))
-            )
-        );
+        assert_native_counterfactual_digest(&report, "incident-native-counterfactual/v1");
         fixture.assert_no_repeated_effects();
+    }
+
+    #[test]
+    fn native_counterfactual_restricts_a_certified_uncaught_exception_offline() {
+        let fixture = Fixture::new_with_sources(true, SourceMode::AutomaticCommonJs);
+        fixture.archive_original_authority_and_inputs();
+
+        // Both branches start with the same real, authenticated failing run.
+        // Removing an unused grant preserves its exception and recorded inputs;
+        // removing write authority stops before its captured write instead.
+        for (denied, terminal, consumed, unused, same_terminal, same_console) in [
+            ("env_read", "uncaught_exception", 2, 0, true, true),
+            ("fs_write", "engine_failure", 1, 1, false, false),
+        ] {
+            let output = fixture.counterfactual(denied, "30000");
+            assert!(output.status.success(), "{denied}: {output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                report["schema_version"],
+                "franken-node/incident-native-counterfactual/v2"
+            );
+            assert_eq!(report["executor"], "native");
+            assert_eq!(report["run_origin_verified"], true);
+            assert_eq!(report["runtime_origin_verified"], true);
+            assert_eq!(report["run_origin"]["receipt_id"], fixture.receipt_id);
+            assert_eq!(report["promotion_available"], false);
+            let execution = &report["execution"];
+            assert_eq!(
+                execution["schema_version"],
+                "franken-node/native-counterfactual-outcome/v2"
+            );
+            assert_eq!(
+                execution["verification_scope"],
+                "certified_failure_prefix_capability_attenuation"
+            );
+            let baseline = &execution["baseline"];
+            assert_eq!(baseline["verification_scope"], "guest_failure_prefix");
+            assert_eq!(baseline["captured_terminal_state"], "uncaught_exception");
+            assert_eq!(baseline["replay_terminal_state"], "uncaught_exception");
+            assert_eq!(baseline["matched"], true);
+            assert_eq!(baseline["divergences"], json!([]));
+            assert_eq!(baseline["module_load_disabled"], false);
+            for field in [
+                "terminal_state_match",
+                "console_match",
+                "host_effects_match",
+                "ir3_hash_match",
+                "instruction_count_match",
+                "nondeterminism_trace_match",
+                "exception_value_match",
+            ] {
+                assert_eq!(baseline[field], true, "{denied}: {field}");
+            }
+            for field in [
+                "ir4_witness_match",
+                "execution_value_match",
+                "lane_match",
+                "exit_code_match",
+                "decisions_match",
+            ] {
+                assert!(baseline[field].is_null(), "{denied}: {field}");
+            }
+            assert_eq!(execution["denied_capabilities"], json!([denied]));
+            assert!(
+                execution["retained_declared_capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tag| tag != denied)
+            );
+            assert_eq!(execution["terminal_state"], terminal);
+            assert_eq!(execution["terminal_state_matches_original"], same_terminal);
+            assert_eq!(execution["console_matches_original"], same_console);
+            assert!(execution["execution_value_matches_original"].is_null());
+            assert_eq!(execution["captured_host_effects"], 2);
+            assert_eq!(execution["consumed_host_effects"], consumed);
+            assert_eq!(execution["unused_original_host_effects"], unused);
+            assert_eq!(execution["replay_certified"], false);
+            assert_eq!(execution["policy_equivalence_certified"], false);
+            if same_terminal {
+                assert!(
+                    execution["exception_value"]
+                        .as_str()
+                        .unwrap()
+                        .contains("captured-stop")
+                );
+            } else {
+                assert!(execution["exception_value"].is_null());
+                assert!(execution["engine_failure"].is_string());
+            }
+            assert_native_counterfactual_digest(&report, "incident-native-counterfactual/v2");
+            fixture.assert_no_repeated_effects();
+        }
     }
 
     #[test]
@@ -785,7 +880,7 @@ mod native {
         fixture.assert_no_repeated_effects();
 
         for (guest_exception, mode) in [
-            (true, SourceMode::AutomaticCommonJs),
+            (true, SourceMode::EntryOnly),
             (false, SourceMode::EntryOnly),
         ] {
             let fixture = Fixture::new_with_sources(guest_exception, mode);

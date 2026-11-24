@@ -34,6 +34,12 @@ pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub const NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA: &str =
     "franken-node/native-counterfactual-outcome/v1";
 pub const NATIVE_COUNTERFACTUAL_SCOPE: &str = "captured_inputs_capability_attenuation";
+/// Branches whose original execution has a certified guest-exception prefix.
+/// This schema never implies completed execution or original-policy equivalence.
+pub const NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA: &str =
+    "franken-node/native-counterfactual-outcome/v2";
+pub const NATIVE_COUNTERFACTUAL_FAILURE_SCOPE: &str =
+    "certified_failure_prefix_capability_attenuation";
 pub const MAX_NATIVE_COUNTERFACTUAL_DENIALS: usize = 32;
 
 /// Restrictions applied to an independently authenticated capture. A branch
@@ -187,7 +193,9 @@ pub struct NativeCounterfactualOutcome {
     pub consumed_host_effects: usize,
     pub unused_original_host_effects: usize,
     pub console_matches_original: bool,
+    /// Defined only when both the original and the branch completed.
     pub execution_value_matches_original: Option<bool>,
+    /// Compares terminal classes only, not exception values, policy or VM state.
     pub terminal_state_matches_original: bool,
     pub replay_certified: bool,
     pub policy_equivalence_certified: bool,
@@ -219,13 +227,31 @@ impl NativeCounterfactualOutcome {
         captured_host_effects: usize,
     ) -> Result<(), String> {
         request.validate()?;
-        if self.schema_version != NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA
+        let (schema, scope, baseline_valid) = match self.baseline.captured_terminal_state {
+            NativeReplayTerminalState::Completed => (
+                NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA,
+                NATIVE_COUNTERFACTUAL_SCOPE,
+                self.baseline.verification_scope == POLICY_EQUIVALENCE_SCOPE
+                    && self.baseline.satisfies_policy_equivalence(),
+            ),
+            NativeReplayTerminalState::UncaughtException => (
+                NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA,
+                NATIVE_COUNTERFACTUAL_FAILURE_SCOPE,
+                self.baseline.satisfies_certified_guest_exception_prefix(),
+            ),
+            NativeReplayTerminalState::EngineFailure => {
+                return Err(
+                    "native counterfactual worker returned an ineligible original terminal state"
+                        .to_string(),
+                );
+            }
+        };
+        if self.schema_version != schema
             || self.execution_kind != "native_counterfactual"
-            || self.verification_scope != NATIVE_COUNTERFACTUAL_SCOPE
+            || self.verification_scope != scope
             || self.capture_payload_sha256 != capture_payload_sha256
             || self.denied_capabilities != request.denied_capabilities
-            || self.baseline.verification_scope != POLICY_EQUIVALENCE_SCOPE
-            || !self.baseline.satisfies_policy_equivalence()
+            || !baseline_valid
             || self.replay_certified
             || self.policy_equivalence_certified
             || self.retained_declared_capabilities != retained_declared_capabilities
@@ -247,10 +273,13 @@ impl NativeCounterfactualOutcome {
             return Err("native counterfactual worker returned an invalid observation".to_string());
         }
         let completed = self.terminal_state == NativeReplayTerminalState::Completed;
+        let original_completed =
+            self.baseline.captured_terminal_state == NativeReplayTerminalState::Completed;
         if self.execution_value.is_some() != completed
             || self.instructions_executed.is_some() != completed
-            || self.execution_value_matches_original.is_some() != completed
-            || self.terminal_state_matches_original != completed
+            || self.execution_value_matches_original.is_some() != (completed && original_completed)
+            || self.terminal_state_matches_original
+                != (self.terminal_state == self.baseline.captured_terminal_state)
             || (!completed && self.exit_code.is_some())
             || self.exception_value.is_some()
                 != (self.terminal_state == NativeReplayTerminalState::UncaughtException)
@@ -470,10 +499,12 @@ impl NativeReplayWorkerExpectation {
     ) -> Result<Vec<String>, String> {
         use frankenengine_engine::capability::RuntimeCapability;
 
-        if self.terminal_state != NativeReplayTerminalState::Completed || self.module_load_disabled
-        {
+        let eligible_original = self.terminal_state == NativeReplayTerminalState::Completed
+            || (self.terminal_state == NativeReplayTerminalState::UncaughtException
+                && self.failure_context);
+        if !eligible_original || self.module_load_disabled {
             return Err(
-                "native counterfactual requires a completed original run with frozen module sources"
+                "native counterfactual requires a completed original or certified guest exception with frozen module sources"
                     .to_string(),
             );
         }
@@ -611,6 +642,35 @@ impl NativeReplayOutcome {
             && self.lane_match == Some(true)
             && self.exit_code_match == Some(true)
             && self.exception_value_match.is_none()
+    }
+
+    /// A modern frozen-source guest exception whose complete captured failure
+    /// prefix was reproduced. This certifies neither a completed execution nor
+    /// original-policy equivalence, and excludes historical contextless failures.
+    #[must_use]
+    pub fn satisfies_certified_guest_exception_prefix(&self) -> bool {
+        self.schema_version == NATIVE_REPLAY_OUTCOME_SCHEMA
+            && self.replay_kind == "native_reexecution"
+            && self.verification_scope == "guest_failure_prefix"
+            && !self.module_load_disabled
+            && self.matched
+            && self.divergences.is_empty()
+            && !self.captured_trace_id.trim().is_empty()
+            && self.captured_trace_id == self.replay_trace_id
+            && self.captured_terminal_state == NativeReplayTerminalState::UncaughtException
+            && self.replay_terminal_state == NativeReplayTerminalState::UncaughtException
+            && self.terminal_state_match
+            && self.ir3_hash_match == Some(true)
+            && self.instruction_count_match == Some(true)
+            && self.nondeterminism_trace_match == Some(true)
+            && self.exception_value_match == Some(true)
+            && self.console_match
+            && self.host_effects_match
+            && self.ir4_witness_match.is_none()
+            && self.execution_value_match.is_none()
+            && self.lane_match.is_none()
+            && self.exit_code_match.is_none()
+            && self.decisions_match.is_none()
     }
 
     /// Returns `true` iff guest execution matched AND original policy decisions
@@ -758,8 +818,8 @@ pub fn reexecute_supervised_with_policy_equivalence(
     reexecute_supervised(capture, timeout).map(NativeReplayOutcome::into_policy_equivalence_outcome)
 }
 
-/// Verify the original completed run, then execute a capability-restricted
-/// branch in the same owned child and under one startup/execution/drain deadline.
+/// Verify a completed original or certified guest-exception prefix, then execute
+/// a capability-restricted branch under one startup/execution/drain deadline.
 /// The caller must authenticate the incident, source capture and runtime authority
 /// independently before calling. No branch can repeat live host effects.
 #[cfg(feature = "engine")]
@@ -4429,11 +4489,14 @@ mod engine {
         denied_capabilities: &[String],
     ) -> Result<NativeCounterfactualOutcome, String> {
         let payload = decode_capture(capture)?;
-        if payload.module_sources.is_none()
-            || !matches!(&payload.expected, CapturedAttempt::Completed(_))
-        {
+        let original_completed = matches!(&payload.expected, CapturedAttempt::Completed(_));
+        let certified_exception = matches!(
+            &payload.expected,
+            CapturedAttempt::UncaughtException(expected) if expected.failure_context.is_some()
+        );
+        if payload.module_sources.is_none() || !(original_completed || certified_exception) {
             return Err(
-                "native counterfactual requires a completed original run with frozen module sources"
+                "native counterfactual requires a completed original or certified guest exception with frozen module sources"
                     .to_string(),
             );
         }
@@ -4447,17 +4510,36 @@ mod engine {
             );
         }
         let package = attenuated_package(&payload.package, denied_capabilities)?;
-        // A changed expected result, missing input, divergent policy decision,
-        // or incomplete original run cannot become evidence for an alternative.
+        // A changed expected result, exception, input or certified failure
+        // prefix cannot become evidence for an alternative. Only completed
+        // originals can establish original-policy equivalence.
         // The public supervisor owns one timeout for both this baseline and the
         // branch; neither phase can outlive its owned worker process.
-        let baseline = reexecute(capture)?.into_policy_equivalence_outcome();
-        if !baseline.satisfies_policy_equivalence() {
-            return Err(
-                "native counterfactual requires successful original execution and policy verification"
-                    .to_string(),
-            );
-        }
+        let mut baseline = reexecute(capture)?;
+        let (schema, scope) = if original_completed {
+            baseline = baseline.into_policy_equivalence_outcome();
+            if !baseline.satisfies_policy_equivalence() {
+                return Err(
+                    "native counterfactual requires successful original execution and policy verification"
+                        .to_string(),
+                );
+            }
+            (
+                NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA,
+                NATIVE_COUNTERFACTUAL_SCOPE,
+            )
+        } else {
+            if !baseline.satisfies_certified_guest_exception_prefix() {
+                return Err(
+                    "native counterfactual requires successful certified guest-exception prefix verification"
+                        .to_string(),
+                );
+            }
+            (
+                NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA,
+                NATIVE_COUNTERFACTUAL_FAILURE_SCOPE,
+            )
+        };
         let capture_payload_sha256 = capture.payload_sha256.clone();
         let denied_capabilities = denied_capabilities.to_vec();
         std::thread::Builder::new()
@@ -4514,19 +4596,32 @@ mod engine {
                 // Catching an exception, returning successfully, or requesting
                 // the original next input later cannot erase a prior mismatch.
                 let consumed_host_effects = inputs.verify(&observed.host_effect_transcript)?;
-                let CapturedAttempt::Completed(expected) = &payload.expected else {
-                    return Err("native counterfactual original run was not completed".to_string());
-                };
-                let console_matches_original = observed.console_output == expected.console_output;
-                let execution_value_matches_original = observed
-                    .execution_value
-                    .as_ref()
-                    .map(|value| value == &expected.execution_value);
+                let (console_matches_original, execution_value_matches_original) =
+                    match &payload.expected {
+                        CapturedAttempt::Completed(expected) => (
+                            observed.console_output == expected.console_output,
+                            observed
+                                .execution_value
+                                .as_ref()
+                                .map(|value| value == &expected.execution_value),
+                        ),
+                        CapturedAttempt::UncaughtException(expected) => {
+                            (observed.console_output == expected.console_output, None)
+                        }
+                        CapturedAttempt::EngineFailure(_) => {
+                            return Err(
+                                "native counterfactual original terminal state is ineligible"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                let terminal_state_matches_original =
+                    observed.terminal_state == baseline.captured_terminal_state;
                 let captured_host_effects = payload.host_effect_transcript.len();
                 Ok(NativeCounterfactualOutcome {
-                    schema_version: NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA.to_string(),
+                    schema_version: schema.to_string(),
                     execution_kind: "native_counterfactual".to_string(),
-                    verification_scope: NATIVE_COUNTERFACTUAL_SCOPE.to_string(),
+                    verification_scope: scope.to_string(),
                     capture_payload_sha256,
                     baseline,
                     denied_capabilities,
@@ -4557,8 +4652,7 @@ mod engine {
                     unused_original_host_effects: captured_host_effects - consumed_host_effects,
                     console_matches_original,
                     execution_value_matches_original,
-                    terminal_state_matches_original: observed.terminal_state
-                        == NativeReplayTerminalState::Completed,
+                    terminal_state_matches_original,
                     replay_certified: false,
                     policy_equivalence_certified: false,
                 })
@@ -5510,11 +5604,42 @@ mod engine {
         }
 
         #[cfg(unix)]
+        fn record_frozen_exception(root: &Path, source: &str) -> NativeReplayCapture {
+            record_frozen_attempt(
+                root,
+                source,
+                ["module_load", "fs_read", "fs_write", "builtin", "timer"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                Arc::new(SandboxedHostIo::with_root(root).unwrap()),
+                NativeReplayTerminalState::UncaughtException,
+            )
+        }
+
+        #[cfg(unix)]
         fn record_frozen_execution(
             root: &Path,
             source: &str,
             capabilities: Vec<String>,
             provider: Arc<dyn HostIoProvider>,
+        ) -> NativeReplayCapture {
+            record_frozen_attempt(
+                root,
+                source,
+                capabilities,
+                provider,
+                NativeReplayTerminalState::Completed,
+            )
+        }
+
+        #[cfg(unix)]
+        fn record_frozen_attempt(
+            root: &Path,
+            source: &str,
+            capabilities: Vec<String>,
+            provider: Arc<dyn HostIoProvider>,
+            expected_terminal_state: NativeReplayTerminalState,
         ) -> NativeReplayCapture {
             use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
                 GraphOptions, capture,
@@ -5584,24 +5709,41 @@ mod engine {
                 provider,
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
-            let result = orchestrator
-                .execute_resolved_entry_with_resolver(
-                    &package,
-                    &entry,
-                    resolver.execution_resolver(root, policy).unwrap(),
-                )
-                .expect("complete the real original frozen run");
-            NativeReplayCapture::from_execution(
+            let result = orchestrator.execute_resolved_entry_with_resolver(
                 &package,
-                &config,
-                &runtime,
-                AmbientAuthorityGrant::DenyAll,
-                &[],
-                None,
-                Some(&sources),
-                &result,
-            )
-            .expect("capture the completed frozen original")
+                &entry,
+                resolver.execution_resolver(root, policy).unwrap(),
+            );
+            let capture = match result {
+                Ok(result) => NativeReplayCapture::from_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    None,
+                    Some(&sources),
+                    &result,
+                ),
+                Err(error) => NativeReplayCapture::from_failed_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    None,
+                    Some(&sources),
+                    &orchestrator,
+                    &error,
+                ),
+            }
+            .expect("capture the finalized frozen original");
+            assert_eq!(
+                capture.terminal_state().unwrap(),
+                expected_terminal_state,
+                "the fixture must produce the intended genuine engine terminal state",
+            );
+            capture
         }
 
         #[cfg(unix)]
@@ -5848,6 +5990,241 @@ mod engine {
                     "{error}"
                 );
                 assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_branches_from_a_certified_multifile_exception_offline() {
+            on_native_stack(|| {
+                let workspace = tempfile::tempdir().unwrap();
+                let original = workspace.path().join("original");
+                std::fs::create_dir(&original).unwrap();
+                std::fs::write(original.join("input.txt"), "captured-before-throw").unwrap();
+                std::fs::write(
+                    original.join("value.cjs"),
+                    "module.exports = 'frozen-dependency';",
+                )
+                .unwrap();
+                let capture = record_frozen_exception(
+                    &original,
+                    "const fs = require('fs'); const prefix = require('./value.cjs'); const value = fs.readFileSync('input.txt', 'utf8'); console.log(prefix, value); fs.writeFileSync('output.txt', value); console.log('after-write'); throw 'captured-guest-failure';",
+                );
+                let payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let CapturedAttempt::UncaughtException(expected) = &payload.expected else {
+                    panic!("fixture must preserve its real uncaught exception");
+                };
+                assert!(expected.failure_context.is_some());
+                let archived = workspace.path().join("archived");
+                std::fs::rename(&original, &archived).unwrap();
+                std::fs::create_dir(&original).unwrap();
+                for name in ["app.cjs", "value.cjs"] {
+                    std::fs::write(original.join(name), "throw 'LIVE_SOURCE_MUST_NOT_RUN';")
+                        .unwrap();
+                }
+                std::fs::write(original.join("input.txt"), "LIVE_INPUT_MUST_NOT_BE_READ").unwrap();
+                std::fs::write(original.join("output.txt"), "LIVE_OUTPUT_MUST_NOT_CHANGE").unwrap();
+
+                let stopped = counterfactual(&capture, &["fs_write".into()])
+                    .expect("branch from the verified exception using frozen inputs");
+                assert_eq!(
+                    stopped.schema_version,
+                    NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA,
+                );
+                assert_eq!(
+                    stopped.verification_scope,
+                    NATIVE_COUNTERFACTUAL_FAILURE_SCOPE,
+                );
+                assert!(stopped.baseline.satisfies_certified_guest_exception_prefix());
+                assert!(!stopped.baseline.satisfies_policy_equivalence());
+                assert_eq!(stopped.baseline.verification_scope, "guest_failure_prefix");
+                assert_eq!(
+                    stopped.terminal_state,
+                    NativeReplayTerminalState::EngineFailure,
+                );
+                assert_eq!(stopped.captured_host_effects, 2);
+                assert_eq!(stopped.consumed_host_effects, 1);
+                assert_eq!(stopped.unused_original_host_effects, 1);
+                assert_eq!(stopped.console_output.len(), 1);
+                assert!(stopped.console_output[0].message.contains("frozen-dependency"));
+                assert!(stopped.console_output[0].message.contains("captured-before-throw"));
+                assert!(stopped.execution_value.is_none());
+                assert!(stopped.execution_value_matches_original.is_none());
+                assert!(!stopped.console_matches_original);
+                assert!(!stopped.terminal_state_matches_original);
+                assert!(!stopped.replay_certified && !stopped.policy_equivalence_certified);
+
+                let before_input = counterfactual(&capture, &["fs_read".into()]).unwrap();
+                assert_eq!(
+                    before_input.terminal_state,
+                    NativeReplayTerminalState::EngineFailure,
+                );
+                assert_eq!(before_input.consumed_host_effects, 0);
+                assert_eq!(before_input.unused_original_host_effects, 2);
+                assert!(before_input.console_output.is_empty());
+
+                let same_class = counterfactual(&capture, &["timer".into()])
+                    .expect("an unused restriction preserves the original exception prefix");
+                assert_eq!(
+                    same_class.schema_version,
+                    NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA,
+                );
+                assert_eq!(
+                    same_class.terminal_state,
+                    NativeReplayTerminalState::UncaughtException,
+                );
+                assert_eq!(
+                    same_class.exception_value.as_deref(),
+                    Some(expected.exception_value.as_str()),
+                );
+                assert!(same_class.execution_value.is_none());
+                assert!(same_class.execution_value_matches_original.is_none());
+                assert!(same_class.console_matches_original);
+                assert!(same_class.terminal_state_matches_original);
+                assert_eq!(same_class.consumed_host_effects, 2);
+                assert_eq!(same_class.unused_original_host_effects, 0);
+                assert!(!same_class.replay_certified && !same_class.policy_equivalence_certified);
+                assert_eq!(
+                    std::fs::read_to_string(original.join("input.txt")).unwrap(),
+                    "LIVE_INPUT_MUST_NOT_BE_READ",
+                );
+                assert_eq!(
+                    std::fs::read_to_string(original.join("output.txt")).unwrap(),
+                    "LIVE_OUTPUT_MUST_NOT_CHANGE",
+                );
+                assert_eq!(
+                    std::fs::read_to_string(archived.join("output.txt")).unwrap(),
+                    "captured-before-throw",
+                );
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_refuses_changed_or_uncertified_failure_prefixes() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                std::fs::write(root.path().join("input.txt"), "captured-input").unwrap();
+                let capture = record_frozen_exception(
+                    root.path(),
+                    "const fs = require('fs'); const value = fs.readFileSync('input.txt', 'utf8'); console.log(value, Math.random()); fs.writeFileSync('output.txt', value); throw 'original-exception';",
+                );
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let quiet_root = tempfile::tempdir().unwrap();
+                let quiet = record_frozen_exception(quiet_root.path(), "throw 'quiet';");
+                let quiet_payload: NativeReplayPayload =
+                    serde_json::from_str(&quiet.payload_json).unwrap();
+                let CapturedAttempt::UncaughtException(quiet_failure) = &quiet_payload.expected else {
+                    panic!("quiet fixture must fail");
+                };
+                let quiet_randomness = &quiet_failure
+                    .failure_context
+                    .as_ref()
+                    .unwrap()
+                    .randomness_transcript;
+                let CapturedAttempt::UncaughtException(failure) = &original.expected else {
+                    panic!("original fixture must fail");
+                };
+                assert_ne!(
+                    &failure.failure_context.as_ref().unwrap().randomness_transcript,
+                    quiet_randomness,
+                    "the original must have a genuinely different randomness prefix",
+                );
+
+                for mutation in [
+                    "exception",
+                    "console",
+                    "ir3",
+                    "instructions",
+                    "randomness",
+                    "dropped-console",
+                    "modules",
+                    "unused-input",
+                ] {
+                    let mut changed = original.clone();
+                    let CapturedAttempt::UncaughtException(expected) = &mut changed.expected else {
+                        unreachable!();
+                    };
+                    let context = expected.failure_context.as_mut().unwrap();
+                    match mutation {
+                        "exception" => expected.exception_value = "forged-exception".into(),
+                        "console" => expected.console_output[0].message = "forged-console".into(),
+                        "ir3" => {
+                            context.ir3_hash = if context.ir3_hash.starts_with('0') {
+                                format!("1{}", &context.ir3_hash[1..])
+                            } else {
+                                format!("0{}", &context.ir3_hash[1..])
+                            };
+                        }
+                        "instructions" => context.instructions_executed += 1,
+                        "randomness" => context.randomness_transcript = quiet_randomness.clone(),
+                        "dropped-console" => context.dropped_console_entries += 1,
+                        "modules" => {
+                            context
+                                .imported_module_hashes
+                                .insert("forged.cjs".into(), "f".repeat(64));
+                        }
+                        "unused-input" => changed.host_effect_transcript.push((
+                            HostIoRequest::FsRead {
+                                path: "unused.txt".into(),
+                            },
+                            Ok(HostIoResponse::FsRead {
+                                bytes: b"unused".to_vec(),
+                            }),
+                        )),
+                        _ => unreachable!(),
+                    }
+                    let changed_capture = encode_capture(&changed).unwrap();
+                    assert!(
+                        counterfactual(&changed_capture, &["timer".into()]).is_err(),
+                        "cannot branch from a changed {mutation} baseline",
+                    );
+                }
+
+                let mut historical = original.clone();
+                let CapturedAttempt::UncaughtException(expected) = &mut historical.expected else {
+                    unreachable!();
+                };
+                expected.failure_context = None;
+                assert!(
+                    counterfactual(&encode_capture(&historical).unwrap(), &["timer".into()])
+                        .unwrap_err()
+                        .contains("certified guest exception"),
+                    "historical contextless failures cannot authorize a new branch",
+                );
+                let mut process_authorized = original;
+                process_authorized
+                    .package
+                    .capabilities
+                    .push("process_spawn".into());
+                assert!(
+                    counterfactual(
+                        &encode_capture(&process_authorized).unwrap(),
+                        &["timer".into()],
+                    )
+                    .unwrap_err()
+                    .contains("process-authorized"),
+                );
+
+                let stopped_root = tempfile::tempdir().unwrap();
+                let stopped = record_frozen_attempt(
+                    stopped_root.path(),
+                    "const fs = require('fs'); fs.writeFileSync('must-not-exist.txt', 'denied');",
+                    ["module_load", "fs_read", "builtin", "timer"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    Arc::new(SandboxedHostIo::with_root(stopped_root.path()).unwrap()),
+                    NativeReplayTerminalState::EngineFailure,
+                );
+                assert!(counterfactual(&stopped, &["timer".into()]).is_err());
+                assert!(!stopped_root.path().join("must-not-exist.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("output.txt")).unwrap(),
+                    "captured-input",
+                );
             });
         }
 
@@ -8255,6 +8632,243 @@ mod tests {
     }
 
     #[test]
+    fn certified_guest_exception_prefix_requires_every_failure_witness_without_policy_promotion() {
+        let original = failed_worker_outcome(NativeReplayTerminalState::UncaughtException, true);
+        assert!(original.satisfies_certified_guest_exception_prefix());
+        worker_expectation(NativeReplayTerminalState::UncaughtException, true, true)
+            .validate_outcome(&original, POLICY_EQUIVALENCE_SCOPE)
+            .unwrap();
+        assert_policy_refusal(
+            original.clone(),
+            "certified exception is not a completed policy proof",
+        );
+        let encoded = serde_json::to_value(&original).unwrap();
+        for field in [
+            "ir3_hash_match",
+            "instruction_count_match",
+            "nondeterminism_trace_match",
+            "exception_value_match",
+        ] {
+            for value in [serde_json::Value::Null, serde_json::json!(false)] {
+                let mut changed = encoded.clone();
+                changed[field] = value;
+                let candidate: NativeReplayOutcome = serde_json::from_value(changed).unwrap();
+                assert!(
+                    !candidate.satisfies_certified_guest_exception_prefix(),
+                    "{field}"
+                );
+            }
+        }
+        for field in [
+            "ir4_witness_match",
+            "execution_value_match",
+            "lane_match",
+            "exit_code_match",
+            "decisions_match",
+        ] {
+            let mut changed = encoded.clone();
+            changed[field] = serde_json::json!(true);
+            let candidate: NativeReplayOutcome = serde_json::from_value(changed).unwrap();
+            assert!(
+                !candidate.satisfies_certified_guest_exception_prefix(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("schema_version", serde_json::json!("unsupported")),
+            ("replay_kind", serde_json::json!("recorded_trace")),
+            (
+                "verification_scope",
+                serde_json::json!(POLICY_EQUIVALENCE_SCOPE),
+            ),
+            ("module_load_disabled", serde_json::json!(true)),
+            ("matched", serde_json::json!(false)),
+            (
+                "divergences",
+                serde_json::json!(["imported module hashes differ"]),
+            ),
+            ("captured_trace_id", serde_json::json!("")),
+            ("replay_trace_id", serde_json::json!("another-run")),
+            ("captured_terminal_state", serde_json::json!("completed")),
+            ("replay_terminal_state", serde_json::json!("engine_failure")),
+            ("terminal_state_match", serde_json::json!(false)),
+            ("console_match", serde_json::json!(false)),
+            ("host_effects_match", serde_json::json!(false)),
+        ] {
+            let mut changed = encoded.clone();
+            changed[field] = value;
+            let candidate: NativeReplayOutcome = serde_json::from_value(changed).unwrap();
+            assert!(
+                !candidate.satisfies_certified_guest_exception_prefix(),
+                "{field}"
+            );
+        }
+        let mut blank = original;
+        blank.captured_trace_id = " ".into();
+        blank.replay_trace_id = " ".into();
+        assert!(!blank.satisfies_certified_guest_exception_prefix());
+        assert!(
+            !failed_worker_outcome(NativeReplayTerminalState::UncaughtException, false)
+                .satisfies_certified_guest_exception_prefix()
+        );
+        assert!(
+            !failed_worker_outcome(NativeReplayTerminalState::EngineFailure, true)
+                .satisfies_certified_guest_exception_prefix()
+        );
+        assert!(!completed_policy_candidate().satisfies_certified_guest_exception_prefix());
+    }
+
+    #[test]
+    fn failure_counterfactual_worker_binds_version_prefix_and_terminal_comparison_semantics() {
+        let expectation =
+            worker_expectation(NativeReplayTerminalState::UncaughtException, true, true);
+        let request = NativeCounterfactualRequest {
+            denied_capabilities: vec!["fs_write".to_string()],
+        };
+        let retained = vec!["fs_read".to_string(), "module_load".to_string()];
+        let original = NativeCounterfactualOutcome {
+            schema_version: NATIVE_COUNTERFACTUAL_FAILURE_OUTCOME_SCHEMA.to_string(),
+            execution_kind: "native_counterfactual".to_string(),
+            verification_scope: NATIVE_COUNTERFACTUAL_FAILURE_SCOPE.to_string(),
+            capture_payload_sha256: expectation.capture_payload_sha256.clone(),
+            baseline: failed_worker_outcome(NativeReplayTerminalState::UncaughtException, true),
+            denied_capabilities: request.denied_capabilities.clone(),
+            retained_declared_capabilities: retained.clone(),
+            terminal_state: NativeReplayTerminalState::UncaughtException,
+            execution_value: None,
+            // Terminal equality is deliberately a class comparison; no field
+            // claims this different branch exception equals the original value.
+            exception_value: Some("another branch exception".to_string()),
+            engine_failure: None,
+            exit_code: None,
+            instructions_executed: None,
+            console_output: Vec::new(),
+            captured_host_effects: expectation.captured_host_effects,
+            consumed_host_effects: 0,
+            unused_original_host_effects: expectation.captured_host_effects,
+            console_matches_original: false,
+            execution_value_matches_original: None,
+            terminal_state_matches_original: true,
+            replay_certified: false,
+            policy_equivalence_certified: false,
+        };
+        let validate = |outcome: &NativeCounterfactualOutcome| {
+            expectation.validate_outcome(&outcome.baseline, POLICY_EQUIVALENCE_SCOPE)?;
+            outcome.validate_for_request(
+                &expectation.capture_payload_sha256,
+                &request,
+                &retained,
+                expectation.captured_host_effects,
+            )
+        };
+        validate(&original).unwrap();
+
+        let mut stopped = original.clone();
+        stopped.terminal_state = NativeReplayTerminalState::EngineFailure;
+        stopped.exception_value = None;
+        stopped.engine_failure = Some("capability denied".into());
+        stopped.terminal_state_matches_original = false;
+        validate(&stopped).unwrap();
+
+        let mut completed = original.clone();
+        completed.terminal_state = NativeReplayTerminalState::Completed;
+        completed.exception_value = None;
+        completed.execution_value = Some("branch result".into());
+        completed.instructions_executed = Some(10);
+        completed.terminal_state_matches_original = false;
+        validate(&completed).unwrap();
+        completed.execution_value_matches_original = Some(false);
+        assert!(
+            validate(&completed).is_err(),
+            "a failed original has no result to compare"
+        );
+        completed.execution_value_matches_original = None;
+        completed.terminal_state_matches_original = true;
+        assert!(
+            validate(&completed).is_err(),
+            "completion differs from the original exception"
+        );
+
+        let encoded = serde_json::to_value(&original).unwrap();
+        for (field, value) in [
+            (
+                "schema_version",
+                serde_json::json!(NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA),
+            ),
+            (
+                "verification_scope",
+                serde_json::json!(NATIVE_COUNTERFACTUAL_SCOPE),
+            ),
+            ("replay_certified", serde_json::json!(true)),
+            ("policy_equivalence_certified", serde_json::json!(true)),
+            ("execution_value_matches_original", serde_json::json!(true)),
+            ("terminal_state_matches_original", serde_json::json!(false)),
+            ("instructions_executed", serde_json::json!(10)),
+            ("exit_code", serde_json::json!(1)),
+            ("exception_value", serde_json::Value::Null),
+        ] {
+            let mut changed = encoded.clone();
+            changed[field] = value;
+            let candidate: NativeCounterfactualOutcome = serde_json::from_value(changed).unwrap();
+            assert!(validate(&candidate).is_err(), "{field}");
+        }
+        for field in [
+            "ir3_hash_match",
+            "instruction_count_match",
+            "nondeterminism_trace_match",
+            "exception_value_match",
+            "console_match",
+            "host_effects_match",
+        ] {
+            let mut changed = encoded.clone();
+            changed["baseline"][field] = serde_json::json!(false);
+            let candidate: NativeCounterfactualOutcome = serde_json::from_value(changed).unwrap();
+            assert!(validate(&candidate).is_err(), "{field}");
+        }
+        let mut promoted = original.clone();
+        promoted.baseline = promoted.baseline.into_policy_equivalence_outcome();
+        assert!(
+            validate(&promoted).is_err(),
+            "failure prefixes cannot acquire policy scope"
+        );
+
+        let mut replaced = original.clone();
+        replaced.baseline = completed_policy_candidate().into_policy_equivalence_outcome();
+        assert!(
+            replaced
+                .validate_for_request(
+                    &expectation.capture_payload_sha256,
+                    &request,
+                    &retained,
+                    expectation.captured_host_effects,
+                )
+                .is_err(),
+            "v2 cannot disguise a completed v1 baseline",
+        );
+        replaced.schema_version = NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA.to_string();
+        replaced.verification_scope = NATIVE_COUNTERFACTUAL_SCOPE.to_string();
+        replaced.terminal_state_matches_original = false;
+        replaced
+            .validate_for_request(
+                &expectation.capture_payload_sha256,
+                &request,
+                &retained,
+                expectation.captured_host_effects,
+            )
+            .unwrap();
+        assert!(
+            validate(&replaced).is_err(),
+            "parent must bind the baseline to the original capture"
+        );
+        assert!(
+            worker_expectation(NativeReplayTerminalState::UncaughtException, true, false)
+                .validate_outcome(&original.baseline, POLICY_EQUIVALENCE_SCOPE)
+                .is_err(),
+            "a worker cannot add failure context absent from the authenticated original",
+        );
+    }
+
+    #[test]
     fn counterfactual_worker_verdict_binds_exact_grants_and_original_effect_population() {
         let expectation = worker_expectation(NativeReplayTerminalState::Completed, true, false);
         let request = NativeCounterfactualRequest {
@@ -8449,7 +9063,24 @@ mod tests {
         for state in ["uncaught_exception", "engine_failure"] {
             let mut changed = original.clone();
             changed["expected"]["terminal_state"] = serde_json::json!(state);
-            assert!(project(&changed).is_err(), "{state}");
+            assert!(project(&changed).is_err(), "contextless {state}");
+            changed["expected"]["failure_context"] = serde_json::json!({"ir3_hash": "captured"});
+            if state == "uncaught_exception" {
+                assert_eq!(
+                    project(&changed).unwrap(),
+                    ["fs:read", "module_load", "timer", "fs:read"],
+                );
+                changed["module_sources"] = serde_json::Value::Null;
+                assert!(
+                    project(&changed).is_err(),
+                    "certified exceptions still require frozen sources"
+                );
+            } else {
+                assert!(
+                    project(&changed).is_err(),
+                    "engine failures remain ineligible"
+                );
+            }
         }
         for capability in ["process_spawn", "unknown_captured_authority"] {
             let mut changed = original.clone();

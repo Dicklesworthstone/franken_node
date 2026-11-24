@@ -1904,6 +1904,7 @@ mod tests {
             ("promotion_signature", Value::Null),
             ("promotion_contract", Value::Null),
             ("schema_version", json!("franken-node/incident-native-counterfactual/v1")),
+            ("schema_version", json!("franken-node/incident-native-counterfactual/v2")),
         ] {
             let mut changed = original.clone();
             changed[field] = replacement;
