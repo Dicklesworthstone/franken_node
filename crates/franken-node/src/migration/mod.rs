@@ -1584,22 +1584,46 @@ fn select_migration_runtime_smoke_target(
 
     let manifest_display = relative_display(&project_root, &manifest_path);
 
-    for (label, entry_path) in manifest_entry_candidates(&manifest) {
-        if let Some(target) = build_runtime_smoke_target(
-            &project_root,
-            manifest_dir,
-            &manifest_display,
-            &label,
-            &entry_path,
-        ) {
-            return Ok(target);
-        }
-    }
-
-    if let Some((script_name, command)) = preferred_script_smoke_candidates(&manifest)
+    let scripts = manifest.get("scripts");
+    let validation_script = ["smoke", "validate", "test"]
         .into_iter()
-        .next()
-    {
+        .find(|name| scripts.and_then(|scripts| scripts.get(name)).is_some());
+    // A library or executable entry is useful as a smoke fallback, but its
+    // successful load says nothing about a validation command the author named.
+    let script = if let Some(name) = validation_script {
+        Some(name.to_owned())
+    } else {
+        for (label, entry_path) in manifest_entry_candidates(&manifest) {
+            if let Some(target) = build_runtime_smoke_target(
+                &project_root,
+                manifest_dir,
+                &manifest_display,
+                &label,
+                &entry_path,
+            ) {
+                return Ok(target);
+            }
+        }
+        if scripts.and_then(|scripts| scripts.get("start")).is_some() {
+            Some("start".to_owned())
+        } else {
+            collect_package_script_rewrites(&manifest)
+                .0
+                .into_iter()
+                .next()
+                .map(|rewrite| rewrite.script_name)
+        }
+    };
+
+    if let Some(script_name) = script {
+        let command = scripts
+            .and_then(|scripts| scripts.get(&script_name))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "runtime smoke requires scripts.{script_name} to be a string command"
+                )
+            })?;
         for hook in [format!("pre{script_name}"), format!("post{script_name}")] {
             if manifest
                 .get("scripts")
@@ -1611,7 +1635,7 @@ fn select_migration_runtime_smoke_target(
                 );
             }
         }
-        let (entry_path, guest_args) = parse_migration_smoke_invocation(&command).map_err(|reason| {
+        let (entry_path, guest_args) = parse_migration_smoke_invocation(command).map_err(|reason| {
             anyhow::anyhow!(
                 "runtime smoke cannot preserve scripts.{script_name}: {reason}; provide a direct native invocation or an explicit migration test inventory"
             )
@@ -1719,44 +1743,6 @@ fn manifest_entry_candidates(manifest: &serde_json::Value) -> Vec<(String, Strin
             }
         }
         _ => {}
-    }
-    candidates
-}
-
-fn preferred_script_smoke_candidates(manifest: &serde_json::Value) -> Vec<(String, String)> {
-    let (rewrites, _) = collect_package_script_rewrites(manifest);
-    let mut candidates = Vec::new();
-    for preferred in ["smoke", "validate", "test", "start"] {
-        if let Some(command) = manifest
-            .get("scripts")
-            .and_then(|scripts| scripts.get(preferred))
-            .and_then(serde_json::Value::as_str)
-        {
-            // A designated validation invocation is not interchangeable with
-            // its first runtime segment or a default index file. Keep even an
-            // unsupported command so selection reports the fidelity problem.
-            push_bounded(
-                &mut candidates,
-                (preferred.to_string(), command.to_string()),
-                MAX_FINDINGS_PER_CATEGORY,
-            );
-        }
-    }
-    for script_rewrite in rewrites {
-        if candidates
-            .iter()
-            .any(|(name, _)| *name == script_rewrite.script_name)
-        {
-            continue;
-        }
-        if candidates.len() == MAX_FINDINGS_PER_CATEGORY {
-            break;
-        }
-        push_bounded(
-            &mut candidates,
-            (script_rewrite.script_name, script_rewrite.original_command),
-            MAX_FINDINGS_PER_CATEGORY,
-        );
     }
     candidates
 }
@@ -2268,6 +2254,61 @@ mod native_migration_smoke_command_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("scripts.smoke"), "{error}");
+    }
+
+    #[test]
+    fn declared_validation_scripts_take_precedence_over_package_entries() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["library.js", "check.js", "server.js"] {
+            std::fs::write(root.path().join(name), "console.log(42);").unwrap();
+        }
+        let select = |scripts: serde_json::Value| {
+            std::fs::write(
+                root.path().join("package.json"),
+                serde_json::json!({"main":"library.js","scripts":scripts}).to_string(),
+            )
+            .unwrap();
+            select_migration_runtime_smoke_target(root.path())
+        };
+        for name in ["smoke", "validate", "test"] {
+            let selected =
+                select(serde_json::json!({name:"node check.js expected","start":"node server.js"}))
+                    .unwrap();
+            assert!(
+                selected
+                    .display
+                    .contains(&format!("scripts.{name} -> check.js"))
+            );
+            assert_eq!(selected.guest_args, ["expected"]);
+            for bad in [
+                serde_json::json!("node missing.js"),
+                serde_json::json!(null),
+                serde_json::json!(""),
+            ] {
+                assert!(
+                    select(serde_json::json!({name:bad}))
+                        .unwrap_err()
+                        .to_string()
+                        .contains(&format!("scripts.{name}"))
+                );
+            }
+        }
+        assert!(select(serde_json::json!({"smoke":"node --loader custom check.js","validate":"node check.js"}))
+            .unwrap_err().to_string().contains("scripts.smoke"));
+        assert!(
+            select(serde_json::json!({"validate":"node missing.js","test":"node check.js"}))
+                .unwrap_err()
+                .to_string()
+                .contains("scripts.validate")
+        );
+        assert!(
+            select(serde_json::json!({"smoke":"node check.js","presmoke":"node setup.js"}))
+                .unwrap_err()
+                .to_string()
+                .contains("scripts.presmoke")
+        );
+        let entry = select(serde_json::json!({"start":"node server.js"})).unwrap();
+        assert!(entry.display.contains(":main -> library.js"));
     }
 
     #[test]

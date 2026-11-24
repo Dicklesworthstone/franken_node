@@ -91,6 +91,8 @@ A completed suite report is retained under `test_suite` in the validation JSON a
 
 Only a successfully captured project with no discovered tests takes the existing single-entrypoint smoke path. That smoke executes the invoked native binary, not a Node/Bun fallback, and verifies its receipt round-trip. Entrypoint arguments are rebased to a non-parent-traversing path beneath the selected working directory (`./src/app.js`, for example), because `run` deliberately rejects absolute content paths. A smoke PASS does not claim test-suite equivalence. Non-Linux primary validation retains its existing smoke behavior; the native suite mechanism requires Linux.
 
+When policy permits this smoke path, the first declared validation script in the order `smoke`, `validate`, `test` takes precedence over `main`, `module`, `exports` and `bin`. A script must name a contained entrypoint and use a supported literal invocation. A missing entrypoint, unsupported command or lifecycle hook fails the check. With no validation script, normal package entrypoints keep precedence over `start` and other recognized scripts.
+
 These commands retain their existing execution semantics: they execute trusted project code unless `--static-only` is used on `migrate validate`. The standalone operator below separately requires `--execute`. A successfully generated `migrate-report` can exit successfully while its contained admission decision is `no_go`; report generation is not authorization to deploy. Static assessment and rewrite suggestions precede suite capture and are not an atomic assessment/execution snapshot. Full environment capture, signed release certification, and automatic native failure-capsule export remain outside this path.
 
 ## Native Rust Project-Suite Operator (Linux)
