@@ -22,6 +22,8 @@ pub(crate) mod module_capsule;
 const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 const SCOPED_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v4";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROCESS_PREPARATION_ENTRIES: usize = 4096;
+const MAX_PROCESS_PREPARATION_BYTES: usize = MAX_PAYLOAD_BYTES / 2;
 // Engine-independent v3 wire contract. Product integration tests exercise these
 // values against actual native captures; inspection never executes the guest.
 const MAX_NATIVE_CONSOLE_BYTES: u64 = 8 * 1024 * 1024;
@@ -763,6 +765,112 @@ pub(super) fn verify_terminal_events(
     Ok(())
 }
 
+fn recorded_outcome<'a>(value: &'a Value, field: &str) -> Result<&'a Map<String, Value>> {
+    let outcome = object(value, field)?;
+    if outcome.len() != 1 || !(outcome.contains_key("Ok") || outcome.contains_key("Err")) {
+        return Err(invalid(field, "expected one result outcome"));
+    }
+    Ok(outcome)
+}
+
+// Inspect the v3/v4 wire records without linking the engine or invoking a
+// provider. The process journal interleaves both families. Its host-I/O
+// subsequence must be exactly the tape stored separately by the recorder.
+fn verify_process_capture(payload: &Value, host_io: &[Value]) -> Result<()> {
+    const FIELD: &str = ".payload.process";
+    let has_authority = array(
+        &payload["package"]["capabilities"],
+        ".payload.package.capabilities",
+    )?
+    .iter()
+    .any(|cap| matches!(cap.as_str(), Some("process_spawn" | "process.spawn")));
+    let process = payload.get("process").filter(|value| !value.is_null());
+    if has_authority != process.is_some() {
+        return Err(invalid(
+            FIELD,
+            "process authority and its capture must be present together",
+        ));
+    }
+    let Some(process) = process else {
+        return Ok(());
+    };
+    let process = exact(process, FIELD, &["preparation", "journal"], &[])?;
+    let entries = array(&process["preparation"], FIELD)?;
+    if entries.len() > MAX_PROCESS_PREPARATION_ENTRIES {
+        return Err(invalid(
+            FIELD,
+            "process preparation exceeds its entry bound",
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    let mut encoded_bytes = 0;
+    for entry in entries {
+        let record = exact(entry, FIELD, &["kind", "request", "outcome"], &[])?;
+        let kind = text(&record["kind"], FIELD)?;
+        let request = &record["request"];
+        process_operation(request)?;
+        if !seen.insert((kind, request)) {
+            return Err(invalid(FIELD, "repeated process preparation request"));
+        }
+        let outcome = recorded_outcome(&record["outcome"], FIELD)?;
+        match (kind, outcome.get("Ok")) {
+            ("preflight", Some(Value::Null)) | ("preflight" | "prepare", None) => {}
+            ("prepare", Some(prepared)) => process_operation(prepared)?,
+            _ => return Err(invalid(FIELD, "invalid process preparation")),
+        }
+        if let Some(error) = outcome.get("Err") {
+            nonblank(&error["kind"], FIELD)?;
+        }
+        // The producer budgets the sum of compact record sizes, excluding the
+        // enclosing array's punctuation. Key order cannot change these sizes.
+        encoded_bytes += serde_json::to_vec(entry)
+            .map_err(|_| invalid(FIELD, "cannot encode process preparation"))?
+            .len();
+        if encoded_bytes > MAX_PROCESS_PREPARATION_BYTES {
+            return Err(invalid(FIELD, "process preparation exceeds its byte bound"));
+        }
+    }
+    let mut exchanges = host_io.iter();
+    for entry in array(&process["journal"], FIELD)? {
+        let record = exact(entry, FIELD, &["effect_family", "request", "outcome"], &[])?;
+        match record["effect_family"].as_str() {
+            Some("host_io") => {
+                let Some(pair) = exchanges.next().and_then(Value::as_array) else {
+                    return Err(invalid(FIELD, "unmatched host I/O in process journal"));
+                };
+                if pair.first() != Some(&record["request"])
+                    || pair.get(1) != Some(&record["outcome"])
+                {
+                    return Err(invalid(FIELD, "process journal disagrees with host I/O"));
+                }
+            }
+            Some("process_spawn") => {
+                process_operation(&record["request"])?;
+                let outcome = recorded_outcome(&record["outcome"], FIELD)?;
+                let observation = outcome.get("Ok").unwrap_or(&record["outcome"]["Err"]);
+                nonblank(&observation["kind"], FIELD)?;
+            }
+            _ => return Err(invalid(FIELD, "unknown process journal effect family")),
+        }
+    }
+    if exchanges.next().is_some() {
+        return Err(invalid(FIELD, "process journal omits recorded host I/O"));
+    }
+    Ok(())
+}
+
+fn process_operation(request: &Value) -> Result<()> {
+    match request["operation"].as_str() {
+        Some("run" | "spawn" | "write_stdin" | "close_stdin" | "wait" | "kill" | "cleanup") => {
+            Ok(())
+        }
+        _ => Err(invalid(
+            ".payload.process",
+            "unknown process request operation",
+        )),
+    }
+}
+
 pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMetadata>> {
     let Some(capture) = initial.get("native_replay") else {
         return Ok(None);
@@ -858,9 +966,6 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         &payload["host_io_exception_provenance"],
         ".payload.host_io_exception_provenance",
     )?;
-    if let Some(process) = payload.get("process").filter(|value| !value.is_null()) {
-        object(process, ".payload.process")?;
-    }
     let exchanges = array(
         &payload["host_effect_transcript"],
         ".payload.host_effect_transcript",
@@ -874,14 +979,9 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
             ));
         }
         object(&pair[0], ".payload.host_effect_transcript[].request")?;
-        let outcome = object(&pair[1], ".payload.host_effect_transcript[].outcome")?;
-        if outcome.len() != 1 || !(outcome.contains_key("Ok") || outcome.contains_key("Err")) {
-            return Err(invalid(
-                ".payload.host_effect_transcript[].outcome",
-                "expected one result outcome",
-            ));
-        }
+        recorded_outcome(&pair[1], ".payload.host_effect_transcript[].outcome")?;
     }
+    verify_process_capture(&payload, exchanges)?;
     let captured_terminal_state = terminal(&payload)?;
     bind_run_context(initial, &payload, captured_terminal_state)?;
     Ok(Some(VerifiedNativeCaptureMetadata {
@@ -977,6 +1077,95 @@ pub(in crate::incident_bundle) mod tests {
             });
         }
         value
+    }
+
+    #[test]
+    fn process_capture_binds_authority_preparation_and_the_ordered_host_io_subsequence() {
+        let mut value = payload("completed");
+        value["package"]["capabilities"] = json!(["process_spawn", "fs_read"]);
+        let request = json!({"operation":"cleanup","handle":"PRIVATE-HANDLE"});
+        let process = json!({"effect_family":"process_spawn","request":request,
+            "outcome":{"Ok":{"kind":"cleaned","was_present":false}}});
+        let read = |path: &str| {
+            json!({"effect_family":"host_io",
+            "request":{"kind":"fs_read","path":path},"outcome":{"Ok":{"kind":"fs_read","bytes":[]}}})
+        };
+        let first = read("PRIVATE-FIRST");
+        let second = read("PRIVATE-SECOND");
+        value["host_effect_transcript"] = json!([
+            [first["request"], first["outcome"]],
+            [second["request"], second["outcome"]]
+        ]);
+        let preflight = json!({"kind":"preflight","request":request,"outcome":{"Ok":null}});
+        let prepare = json!({"kind":"prepare","request":request,"outcome":{"Ok":request}});
+        value["process"] =
+            json!({"preparation":[preflight, prepare],"journal":[first,process,second]});
+        assert_eq!(
+            verify(&captured(&value))
+                .unwrap()
+                .unwrap()
+                .host_io_exchange_count,
+            2
+        );
+        let mut alias = value.clone();
+        alias["package"]["capabilities"][0] = json!("process.spawn");
+        assert!(verify(&captured(&alias)).is_ok());
+
+        let reject = |value: &Value| {
+            let error = verify(&captured(value)).unwrap_err();
+            assert!(matches!(&error, IncidentBundleError::Structure {path, ..}
+                if path == "$.initial_state_snapshot.native_replay.payload.process"));
+            assert!(!format!("{error:?}").contains("PRIVATE-"));
+        };
+        for journal in [
+            json!([second, process, first]),
+            json!([first, process]),
+            json!([first, process, second, second]),
+            json!([first, {"effect_family":"unknown"}, second]),
+        ] {
+            let mut changed = value.clone();
+            changed["process"]["journal"] = journal;
+            reject(&changed);
+        }
+        let mut changed = value.clone();
+        changed["process"]["journal"][0]["outcome"]["Ok"]["bytes"] = json!([1]);
+        reject(&changed);
+        for preparation in [
+            json!([prepare, prepare]),
+            json!([{"kind":"preflight","request":request,"outcome":{"Ok":request}}]),
+            json!([{"kind":"prepare","request":request,"outcome":{"Ok":null}}]),
+            json!([{"kind":"prepare","request":request,"outcome":{"Ok":request,"Err":{"kind":"denied"}}}]),
+        ] {
+            let mut changed = value.clone();
+            changed["process"]["preparation"] = preparation;
+            reject(&changed);
+        }
+        for malformed in [Value::Null, json!({}), json!({"journal":[]})] {
+            let mut changed = value.clone();
+            changed["process"] = malformed;
+            reject(&changed);
+        }
+        value["package"]["capabilities"] = json!(["fs_read"]);
+        reject(&value);
+    }
+
+    #[test]
+    fn valid_incident_signature_cannot_substitute_for_recorded_process_evidence() {
+        use super::super::verify_incident_bundle;
+
+        let mut initial = with_run_context("completed");
+        let mut value = payload("completed");
+        value["package"]["capabilities"] = json!(["process_spawn"]);
+        value["process"] = json!({"preparation":[],"journal":[]});
+        initial["native_replay"] = captured(&value)["native_replay"].clone();
+        let anchor = signing_key().verifying_key();
+        verify_incident_bundle(&signed_bundle(initial.clone()), &anchor).unwrap();
+        value["process"] = json!({});
+        initial["native_replay"] = captured(&value)["native_replay"].clone();
+        assert!(
+            matches!(verify_incident_bundle(&signed_bundle(initial), &anchor),
+            Err(IncidentBundleError::Structure {path, ..}) if path.ends_with(".payload.process"))
+        );
     }
 
     #[test]

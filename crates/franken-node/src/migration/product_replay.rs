@@ -690,11 +690,7 @@ pub fn replay(
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let loaded = load(path, Some(pin), deadline)?;
     let (node, native) = runtime_invocations(native)?;
-    let bun = Invocation {
-        executable: bun.canonicalize().context("resolve Bun executable")?,
-        before: vec![],
-        after: vec![],
-    };
+    let bun = Invocation::bun(bun)?;
     reexecute(loaded, [&node, &bun, &native], verify_fix, deadline)
 }
 

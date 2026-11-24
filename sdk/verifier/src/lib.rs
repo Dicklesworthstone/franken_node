@@ -620,6 +620,163 @@ pub struct SignedSessionTranscript {
     pub ed25519_signature_hex: String,
 }
 
+/// Schema for a caller-owned expected verification workflow.
+pub const SIGNED_SESSION_POLICY_SCHEMA_VERSION: &str =
+    "franken-verifier/signed-session-policy/v1";
+
+/// Maximum serialized size of an independently supplied session policy.
+pub const MAX_SIGNED_SESSION_POLICY_BYTES: usize = 256 * 1024;
+
+/// One required, ordered operation over an independently known artifact binding.
+///
+/// Bindings use the SDK operation's canonical digest, which is not necessarily
+/// the hash of its input file. Obtain it from the trusted workflow request, not
+/// by copying the candidate transcript.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedSessionStepPolicy {
+    pub operation: VerificationOperation,
+    pub artifact_binding_hash: String,
+    pub verdict: VerificationVerdict,
+}
+
+impl fmt::Debug for SignedSessionStepPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SignedSessionStepPolicy { fields: [redacted] }")
+    }
+}
+
+/// Caller-owned identity and exact ordered steps required from a signed session.
+///
+/// This policy is separate from the candidate's evidence and signing key. Use a
+/// unique session ID for each requested audit when replay of an older result
+/// would be inappropriate. Matching authenticates the signer's recorded
+/// decisions for this request; it does not rerun the operations, authenticate
+/// instance-local HMAC tags independently, establish freshness, or grant runtime
+/// authority.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedSessionPolicy {
+    pub schema_version: String,
+    pub session_id: String,
+    pub verifier_identity: String,
+    pub steps: Vec<SignedSessionStepPolicy>,
+}
+
+impl fmt::Debug for SignedSessionPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SignedSessionPolicy { fields: [redacted] }")
+    }
+}
+
+/// Redacted failure when binding an authenticated session to its caller's request.
+#[derive(Clone, PartialEq)]
+pub enum SignedSessionPolicyError {
+    TooLarge,
+    Invalid,
+    Mismatch,
+    Verification(VerifierSdkError),
+}
+
+impl SignedSessionPolicyError {
+    /// Stable error code; no policy identity, artifact binding or path is exposed.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge => "SESSION_POLICY_TOO_LARGE",
+            Self::Invalid => "SESSION_POLICY_INVALID",
+            Self::Mismatch => "SESSION_POLICY_MISMATCH",
+            Self::Verification(_) => "SESSION_AUTHENTICATION_FAILED",
+        }
+    }
+}
+
+impl fmt::Debug for SignedSessionPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl fmt::Display for SignedSessionPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooLarge => "trusted session policy exceeds its byte limit",
+            Self::Invalid => "trusted session policy is invalid",
+            Self::Mismatch => "authenticated session does not match the trusted session policy",
+            Self::Verification(_) => "signed session authentication failed",
+        })
+    }
+}
+
+impl std::error::Error for SignedSessionPolicyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Verification(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl SignedSessionPolicy {
+    /// Validate bounded, unambiguous expectations before consuming any evidence.
+    pub fn validate(&self) -> Result<(), SignedSessionPolicyError> {
+        if self.schema_version != SIGNED_SESSION_POLICY_SCHEMA_VERSION
+            || validate_session_id(&self.session_id).is_err()
+            || validate_verifier_identity(&self.verifier_identity).is_err()
+            || self.steps.len() > MAX_VERIFICATION_SESSION_STEPS
+            || self
+                .steps
+                .iter()
+                .any(|step| !is_canonical_sha256_hex(&step.artifact_binding_hash))
+        {
+            return Err(SignedSessionPolicyError::Invalid);
+        }
+        Ok(())
+    }
+
+    fn require_match(
+        &self,
+        transcript: &SignedSessionTranscript,
+    ) -> Result<(), SignedSessionPolicyError> {
+        if !constant_time_eq(&self.session_id, &transcript.session_id)
+            || !constant_time_eq(&self.verifier_identity, &transcript.verifier_identity)
+            || self.steps.len() != transcript.steps.len()
+            || self
+                .steps
+                .iter()
+                .zip(&transcript.steps)
+                .any(|(expected, actual)| {
+                    expected.operation != actual.operation
+                        || expected.verdict != actual.verdict
+                        || !constant_time_eq(
+                            &expected.artifact_binding_hash,
+                            &actual.artifact_binding_hash,
+                        )
+                })
+        {
+            return Err(SignedSessionPolicyError::Mismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Read a caller-owned policy with a byte cap and duplicate/unknown-field refusal.
+///
+/// Do not extract this policy from the candidate transcript. Its authority comes
+/// from the caller's independently established workflow requirements.
+pub fn parse_signed_session_policy(
+    bytes: &[u8],
+) -> Result<SignedSessionPolicy, SignedSessionPolicyError> {
+    if bytes.len() > MAX_SIGNED_SESSION_POLICY_BYTES {
+        return Err(SignedSessionPolicyError::TooLarge);
+    }
+    let value = incident_bundle::decode_evidence_json(bytes)
+        .map_err(|_| SignedSessionPolicyError::Invalid)?;
+    let policy: SignedSessionPolicy =
+        serde_json::from_value(value).map_err(|_| SignedSessionPolicyError::Invalid)?;
+    policy.validate()?;
+    Ok(policy)
+}
+
 /// Stateful multi-step verification workflow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerificationSession {
@@ -2027,6 +2184,22 @@ impl VerifierSdk {
         verifying_key
             .verify_strict(&signing_payload, &signature)
             .map_err(|_| VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid))
+    }
+
+    /// Authenticate a session and require its exact caller-selected workflow.
+    ///
+    /// The independently trusted key authenticates the transcript before any
+    /// identity, operation, artifact or verdict mismatch is reported. A valid
+    /// signature for a different request cannot satisfy this policy.
+    pub fn verify_signed_session_with_policy(
+        verifying_key: &VerifyingKey,
+        transcript: &SignedSessionTranscript,
+        policy: &SignedSessionPolicy,
+    ) -> Result<(), SignedSessionPolicyError> {
+        policy.validate()?;
+        Self::verify_signed_session(verifying_key, transcript)
+            .map_err(SignedSessionPolicyError::Verification)?;
+        policy.require_match(transcript)
     }
 
     fn verify_result_signature(&self, result: &VerificationResult) -> Result<(), VerifierSdkError> {
@@ -9327,4 +9500,311 @@ mod tests {
             assert!(VerifierSdk::verify_signed_session(&sdk.verifying_key(), &tampered).is_err());
         }
     }
+}
+
+#[cfg(test)]
+mod signed_session_policy_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    const BUNDLE: &[u8] = include_bytes!("../tests/fixtures/public_api/bundle_canonical.json");
+    const PRIVATE: &str = "SIGNED-SESSION-PRIVATE-SENTINEL";
+
+    fn fixture(verdict: VerificationVerdict) -> (VerifyingKey, SignedSessionTranscript) {
+        let sdk = VerifierSdk::with_signing_key(
+            "verifier://facade-test",
+            SigningKey::from_bytes(&[91_u8; 32]),
+        );
+        let mut session = sdk.create_session("portable-audit-session").unwrap();
+        if verdict != VerificationVerdict::Inconclusive {
+            let bundle: crate::bundle::ReplayBundle =
+                serde_json::from_slice(BUNDLE).unwrap();
+            let canonical = crate::bundle::serialize(&bundle).unwrap();
+            let pass = sdk
+                .verify_trust_state(&canonical, &bundle.integrity_hash)
+                .unwrap();
+            assert_eq!(pass.verdict, VerificationVerdict::Pass);
+            sdk.record_session_step(&mut session, &pass).unwrap();
+            if verdict == VerificationVerdict::Fail {
+                let fail = sdk.verify_migration_artifact(&canonical).unwrap();
+                assert_eq!(fail.verdict, VerificationVerdict::Fail);
+                sdk.record_session_step(&mut session, &fail).unwrap();
+            } else {
+                sdk.record_session_step(&mut session, &pass).unwrap();
+            }
+        }
+        assert_eq!(sdk.seal_session(&mut session).unwrap(), verdict);
+        let transcript = sdk.export_signed_session(&session).unwrap();
+        VerifierSdk::verify_signed_session(&sdk.verifying_key(), &transcript).unwrap();
+        (sdk.verifying_key(), transcript)
+    }
+
+
+    fn expected_trust_session_policy() -> SignedSessionPolicy {
+        // These expectations come from a trusted fixture and the requested workflow,
+        // independently of any candidate transcript.
+        let bundle: crate::bundle::ReplayBundle =
+            serde_json::from_slice(BUNDLE).unwrap();
+        SignedSessionPolicy {
+            schema_version: SIGNED_SESSION_POLICY_SCHEMA_VERSION.into(),
+            session_id: "portable-audit-session".into(),
+            verifier_identity: "verifier://facade-test".into(),
+            steps: vec![
+                SignedSessionStepPolicy {
+                    operation: VerificationOperation::TrustState,
+                    artifact_binding_hash: bundle.integrity_hash.clone(),
+                    verdict: VerificationVerdict::Pass,
+                };
+                2
+            ],
+        }
+    }
+
+    #[test]
+    fn signed_session_policy_binds_authenticated_results_to_the_requested_workflow() {
+        let (anchor, transcript) = fixture(VerificationVerdict::Pass);
+        let expected = expected_trust_session_policy();
+        let encoded = serde_json::to_vec(&expected).unwrap();
+        assert_eq!(parse_signed_session_policy(&encoded).unwrap(), expected);
+        VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &expected).unwrap();
+
+        let mut invalid = expected.clone();
+        invalid.schema_version = "unsupported".into();
+        assert_eq!(
+            VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &invalid),
+            Err(SignedSessionPolicyError::Invalid),
+        );
+        invalid = expected.clone();
+        invalid.steps[0].artifact_binding_hash = "A".repeat(64);
+        assert_eq!(
+            VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &invalid),
+            Err(SignedSessionPolicyError::Invalid),
+        );
+
+        let mut wrong_session = expected.clone();
+        wrong_session.session_id = "a-different-request".into();
+        let mut wrong_verifier = expected.clone();
+        wrong_verifier.verifier_identity = "verifier://another-enrolled-identity".into();
+        let mut wrong_artifact = expected.clone();
+        wrong_artifact.steps[1].artifact_binding_hash = "0".repeat(64);
+        let mut wrong_operation = expected.clone();
+        wrong_operation.steps[1].operation = VerificationOperation::MigrationArtifact;
+        let mut wrong_verdict = expected.clone();
+        wrong_verdict.steps[1].verdict = VerificationVerdict::Fail;
+        let mut missing_step = expected.clone();
+        missing_step.steps.pop();
+        let mut extra_step = expected.clone();
+        extra_step.steps.push(expected.steps[0].clone());
+        for policy in [
+            wrong_session,
+            wrong_verifier,
+            wrong_artifact,
+            wrong_operation,
+            wrong_verdict,
+            missing_step,
+            extra_step,
+        ] {
+            // The evidence and signature are unchanged and cryptographically valid.
+            VerifierSdk::verify_signed_session(&anchor, &transcript).unwrap();
+            assert_eq!(
+                VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &policy),
+                Err(SignedSessionPolicyError::Mismatch),
+            );
+        }
+    }
+
+    #[test]
+    fn signed_session_policy_rejects_another_validly_signed_audit_and_reordered_steps() {
+        let sdk = VerifierSdk::with_signing_key(
+            "verifier://facade-test",
+            SigningKey::from_bytes(&[91_u8; 32]),
+        );
+        let bundle: crate::bundle::ReplayBundle =
+            serde_json::from_slice(BUNDLE).unwrap();
+        let canonical = crate::bundle::serialize(&bundle).unwrap();
+        let trust = sdk.verify_trust_state(&canonical, &bundle.integrity_hash).unwrap();
+        let migration = sdk.verify_migration_artifact(&canonical).unwrap();
+        assert_eq!(migration.verdict, VerificationVerdict::Fail);
+        let expected = SignedSessionPolicy {
+            schema_version: SIGNED_SESSION_POLICY_SCHEMA_VERSION.into(),
+            session_id: "portable-audit-session".into(),
+            verifier_identity: "verifier://facade-test".into(),
+            steps: vec![
+                SignedSessionStepPolicy {
+                    operation: VerificationOperation::TrustState,
+                    artifact_binding_hash: bundle.integrity_hash,
+                    verdict: VerificationVerdict::Pass,
+                },
+                SignedSessionStepPolicy {
+                    operation: VerificationOperation::MigrationArtifact,
+                    artifact_binding_hash: migration.artifact_binding_hash.clone(),
+                    verdict: VerificationVerdict::Fail,
+                },
+            ],
+        };
+        for (id, results, should_match) in [
+            ("portable-audit-session", [&trust, &migration], true),
+            ("portable-audit-session", [&migration, &trust], false),
+            ("portable-audit-session", [&trust, &trust], false),
+            ("another-audit", [&trust, &migration], false),
+        ] {
+            let mut session = sdk.create_session(id).unwrap();
+            for result in results {
+                sdk.record_session_step(&mut session, result).unwrap();
+            }
+            sdk.seal_session(&mut session).unwrap();
+            let candidate = sdk.export_signed_session(&session).unwrap();
+            VerifierSdk::verify_signed_session(&sdk.verifying_key(), &candidate).unwrap();
+            let actual = VerifierSdk::verify_signed_session_with_policy(
+                &sdk.verifying_key(), &candidate, &expected,
+            );
+            if should_match {
+                actual.unwrap();
+                // A matched, authentic failing workflow is still a failing workflow.
+                assert_eq!(candidate.final_verdict, VerificationVerdict::Fail);
+            } else {
+                assert_eq!(actual, Err(SignedSessionPolicyError::Mismatch));
+            }
+        }
+    }
+
+    #[test]
+    fn signed_session_policy_authenticates_before_reporting_request_mismatches() {
+        let (anchor, mut transcript) = fixture(VerificationVerdict::Pass);
+        let mut expected = expected_trust_session_policy();
+        expected.session_id = "a-different-request".into();
+        transcript.ed25519_signature_hex = "0".repeat(128);
+        assert!(matches!(
+            VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &expected),
+            Err(SignedSessionPolicyError::Verification(_)),
+        ));
+        let (anchor, transcript) = fixture(VerificationVerdict::Pass);
+        let foreign = SigningKey::from_bytes(&[92_u8; 32]).verifying_key();
+        assert_ne!(anchor, foreign);
+        assert!(matches!(
+            VerifierSdk::verify_signed_session_with_policy(&foreign, &transcript, &expected),
+            Err(SignedSessionPolicyError::Verification(_)),
+        ));
+    }
+
+    #[test]
+    fn signed_session_policy_keeps_empty_sessions_inconclusive() {
+        let (anchor, transcript) = fixture(VerificationVerdict::Inconclusive);
+        let mut expected = expected_trust_session_policy();
+        expected.steps.clear();
+        VerifierSdk::verify_signed_session_with_policy(&anchor, &transcript, &expected).unwrap();
+        assert_eq!(transcript.final_verdict, VerificationVerdict::Inconclusive);
+    }
+
+    #[test]
+    fn signed_session_policy_refuses_ambiguous_unbounded_or_incomplete_requests() {
+        let expected = expected_trust_session_policy();
+        let original = serde_json::to_value(&expected).unwrap();
+        let mut cases = Vec::new();
+        for field in ["schema_version", "session_id", "verifier_identity", "steps"] {
+            let mut missing = original.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            cases.push(missing);
+            let mut null = original.clone();
+            null[field] = Value::Null;
+            cases.push(null);
+        }
+        for field in ["operation", "artifact_binding_hash", "verdict"] {
+            let mut missing = original.clone();
+            missing["steps"][0].as_object_mut().unwrap().remove(field);
+            cases.push(missing);
+        }
+        let mut unknown = original.clone();
+        unknown["allow_additional_steps"] = json!(true);
+        cases.push(unknown);
+        let mut unknown = original.clone();
+        unknown["steps"][0]["optional"] = json!(true);
+        cases.push(unknown);
+        let mut schema = original.clone();
+        schema["schema_version"] = json!("franken-verifier/signed-session-policy/v0");
+        cases.push(schema);
+        for bad in ["", "private secret", "é", "padded ", "a/b"] {
+            let mut identity = original.clone();
+            identity["session_id"] = json!(bad);
+            cases.push(identity);
+        }
+        for bad in [
+            String::new(),
+            "A".repeat(64),
+            "sha256:abcd".into(),
+            "0".repeat(63),
+        ] {
+            let mut digest = original.clone();
+            digest["steps"][0]["artifact_binding_hash"] = json!(bad);
+            cases.push(digest);
+        }
+        for (field, value) in [
+            ("operation", json!("unknown")),
+            ("operation", json!(1)),
+            ("verdict", json!("verified")),
+            ("verdict", Value::Null),
+        ] {
+            let mut malformed = original.clone();
+            malformed["steps"][0][field] = value;
+            cases.push(malformed);
+        }
+        for candidate in cases {
+            assert_eq!(
+                parse_signed_session_policy(&serde_json::to_vec(&candidate).unwrap()),
+                Err(SignedSessionPolicyError::Invalid),
+            );
+        }
+        let encoded = serde_json::to_string(&expected).unwrap();
+        let duplicate_outer = encoded.replacen('{', "{\"session_id\":\"portable-audit-session\",", 1);
+        let duplicate_step = encoded.replacen(
+            "\"operation\":\"trust_state\"",
+            "\"operation\":\"trust_state\",\"operation\":\"trust_state\"",
+            1,
+        );
+        assert_ne!(duplicate_step, encoded);
+        for candidate in [duplicate_outer, duplicate_step, format!("{encoded}{{}}")] {
+            assert_eq!(
+                parse_signed_session_policy(candidate.as_bytes()),
+                Err(SignedSessionPolicyError::Invalid),
+            );
+        }
+
+        let mut bounded = expected.clone();
+        bounded.session_id = "s".repeat(255);
+        bounded.verifier_identity = format!("verifier://{}", "v".repeat(255));
+        bounded.steps.resize(MAX_VERIFICATION_SESSION_STEPS, expected.steps[0].clone());
+        let encoded = serde_json::to_vec(&bounded).unwrap();
+        assert!(encoded.len() < MAX_SIGNED_SESSION_POLICY_BYTES);
+        parse_signed_session_policy(&encoded).unwrap();
+        let mut at_byte_limit = encoded.clone();
+        at_byte_limit.resize(MAX_SIGNED_SESSION_POLICY_BYTES, b' ');
+        parse_signed_session_policy(&at_byte_limit).unwrap();
+        at_byte_limit.push(b' ');
+        assert_eq!(
+            parse_signed_session_policy(&at_byte_limit),
+            Err(SignedSessionPolicyError::TooLarge),
+        );
+        bounded.steps.push(expected.steps[0].clone());
+        assert_eq!(bounded.validate(), Err(SignedSessionPolicyError::Invalid));
+        bounded.steps.pop();
+        bounded.session_id.push('s');
+        assert_eq!(bounded.validate(), Err(SignedSessionPolicyError::Invalid));
+    }
+
+    #[test]
+    fn signed_session_policy_diagnostics_do_not_disclose_requested_artifacts_or_identities() {
+        let mut policy = expected_trust_session_policy();
+        policy.session_id = PRIVATE.into();
+        policy.verifier_identity = format!("verifier://{PRIVATE}");
+        assert!(!format!("{policy:?}").contains(PRIVATE));
+        assert!(!format!("{:?}", policy.steps[0]).contains(&policy.steps[0].artifact_binding_hash));
+        for error in [
+            SignedSessionPolicyError::Invalid,
+            SignedSessionPolicyError::TooLarge,
+            SignedSessionPolicyError::Mismatch,
+        ] {
+            assert!(!format!("{error:?}: {error}").contains(PRIVATE));
+        }
+    }
+
 }

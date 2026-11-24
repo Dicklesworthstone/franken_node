@@ -187,11 +187,14 @@ fn native_migration_smoke_preserves_script_arguments_without_changing_process_re
         std::fs::write(project.path().join("app.ts"),
             "const expected = ['--mode', 'test value', '', '--', '--runtime', 'bun', '--policy', 'legacy-risky'];\nconst actual = process.argv.slice(2);\nif (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('smoke guest arguments changed');\nconsole.log('guest arguments preserved');\n"
         ).unwrap();
+        // Loading the library succeeds under either policy. Only the declared
+        // smoke invocation checks its arguments and exercises process access.
+        std::fs::write(project.path().join("library.js"), "console.log(42);").unwrap();
         std::fs::write(
             project.path().join("package.json"),
             serde_json::json!({
                 "name":"native-script-arguments", "version":"1.0.0", "engines":{"node":">=22"},
-                "scripts":{"smoke":script}
+                "main":"library.js", "scripts":{"smoke":script}
             })
             .to_string(),
         )
@@ -214,6 +217,7 @@ fn native_migration_smoke_preserves_script_arguments_without_changing_process_re
             .args(["migrate", "validate"])
             .arg(project.path())
             .arg("--json")
+            .env("FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION", "false")
             .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
             .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE");
         let output = native_smoke_supervisor::run_command_with_timeout(
