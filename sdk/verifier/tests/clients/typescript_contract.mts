@@ -16,6 +16,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "publisher-source-trust") return verified.facts.source.package_name;
     if (verified.format === "counterfactual-receipt") return verified.facts.baseline_integrity_hash;
     if (verified.format === "counterfactual-incident") return verified.facts.baseline.incident_id;
+    if (verified.format === "counterfactual-promotion") return verified.facts.mitigation_id;
     if (verified.format === "ltv-evidence") return verified.facts.artifact_id;
     return verified.facts.bundle_id;
   } catch (error: unknown) {
@@ -132,6 +133,49 @@ export async function refuseCounterfactualTrustOmissions(data: Uint8Array, ancho
   await verifyArtifact(data, anchor, { format: "counterfactual-incident", signatureHex: "signature", trustedIncidentPublicKeyHex: anchor });
   // @ts-expect-error The independently trusted exporter cannot be supplied by the artifact itself.
   await verifyArtifact(data, anchor, { format: "counterfactual-incident", signatureHex: "signature", expectedBaselineIntegrityHash: "hash" });
+}
+
+export async function auditCounterfactualPromotion(
+  data: Uint8Array, operatorAnchor: string, incidentAnchor: string, expectedBaseline: string,
+  runAnchor: string, runtimeAnchor: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, operatorAnchor, {
+    verifier: executable, format: "counterfactual-promotion",
+    trustedIncidentPublicKeyHex: incidentAnchor, expectedBaselineIntegrityHash: expectedBaseline,
+    trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor,
+  });
+  if (verified.format !== "counterfactual-promotion"
+      || verified.facts.baseline_scope !== "authenticated_runtime_incident") {
+    throw new Error("promotion contracts bound to a runtime-authenticated incident required");
+  }
+  const executed: false = verified.facts.guest_execution_verified;
+  const authorized: false = verified.facts.rollout_authorized;
+  const delta: string = verified.facts.expected_loss_delta;
+  const from: string = verified.facts.valid_from_epoch_ms;
+  const until: string = verified.facts.valid_until_epoch_ms;
+  const executor: "synthetic" | "production" = verified.facts.executor;
+  const epoch: string = verified.facts.baseline.runtime_origin.signed_epoch;
+  // @ts-expect-error Signed i64 fields must never be exposed as imprecise numbers.
+  const roundedDelta: number = verified.facts.expected_loss_delta;
+  // @ts-expect-error Authentic historical contracts cannot authorize a rollout.
+  const rolloutGrant: true = verified.facts.rollout_authorized;
+  void roundedDelta; void rolloutGrant;
+  return `${verified.facts.mitigation_id}:${executor}:${delta}:${from}:${until}:${epoch}:${executed}:${authorized}`;
+}
+
+export async function refuseCounterfactualPromotionTrustOmissions(
+  data: Uint8Array, anchor: string, executable: string,
+): Promise<void> {
+  // @ts-expect-error Embedded promotion signatures still need an independent incident exporter and pin.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "counterfactual-promotion" });
+  // @ts-expect-error An exporter authority cannot choose the expected incident identity.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "counterfactual-promotion", trustedIncidentPublicKeyHex: anchor });
+  // @ts-expect-error A baseline pin does not authenticate its exporting authority.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "counterfactual-promotion", expectedBaselineIntegrityHash: "hash" });
+  // @ts-expect-error The operator key is required independently of the exporter authority.
+  await verifyArtifact(data, null, { verifier: executable, format: "counterfactual-promotion", trustedIncidentPublicKeyHex: anchor, expectedBaselineIntegrityHash: "hash" });
+  // @ts-expect-error Product promotion contracts contain their signatures and cannot accept a detached replacement.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "counterfactual-promotion", trustedIncidentPublicKeyHex: anchor, expectedBaselineIntegrityHash: "hash", signatureHex: "signature" });
 }
 
 export async function auditRuntimeOrigin(

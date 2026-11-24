@@ -102,6 +102,32 @@ for (const test of cases) {
       }
       assert.equal(facts.baseline_scope, expectedScope);
     }
+    if (test.format === "counterfactual-promotion") {
+      assert.equal(result.scope, "authenticated_counterfactual_promotion");
+      const facts = result.facts;
+      for (const [key, expected] of Object.entries(test.promotion_expected ?? {})) assert.deepEqual(facts[key], expected, `${test.name}: ${key}`);
+      assert.equal(facts.baseline_integrity_hash, test.expected_baseline_integrity_hash);
+      assert.equal(facts.baseline.integrity_hash, test.expected_baseline_integrity_hash);
+      assert.equal(facts.signer_public_key_hex, test.anchor.toLowerCase());
+      assert.equal(facts.baseline.signer_public_key_hex, test.incident_anchor.toLowerCase());
+      const report = Buffer.from(JSON.parse(data.toString("utf8")).report_base64, "base64");
+      assert.equal(facts.report_sha256, createHash("sha256").update(report).digest("hex"));
+      assert.equal(facts.guest_execution_verified, false);
+      assert.equal(facts.rollout_authorized, false);
+      assert(["synthetic", "production"].includes(facts.executor));
+      assert(["single", "sweep"].includes(facts.mode));
+      assert(facts.result_count >= 1 && facts.result_count <= 20);
+      for (const key of ["expected_loss_delta", "valid_from_epoch_ms", "valid_until_epoch_ms"]) {
+        assert.equal(typeof facts[key], "string");
+      }
+      assert(BigInt(facts.expected_loss_delta) > 0n);
+      assert(BigInt(facts.valid_until_epoch_ms) > BigInt(facts.valid_from_epoch_ms));
+      const expectedScope = test.runtime_anchor !== undefined ? "authenticated_runtime_incident"
+        : test.run_anchor !== undefined ? "authenticated_run_incident" : "authenticated_recorded_incident";
+      assert.equal(facts.baseline_scope, expectedScope);
+      if (test.run_anchor !== undefined) assert.equal(facts.baseline.run_origin.signer_public_key_hex, test.run_anchor.toLowerCase());
+      if (test.runtime_anchor !== undefined) assert.equal(facts.baseline.runtime_origin.product_root_key_id, `ed25519:${test.runtime_anchor.toLowerCase()}`);
+    }
     if (test.format === "ltv-evidence") {
       assert.equal(result.scope, "authenticated_ltv_anteriority");
       assert.deepEqual(result.facts, test.ltv_facts, test.name);
@@ -163,6 +189,64 @@ const cfIncidentProtocol = await verifyArtifact(Buffer.from(JSON.stringify({ pro
 assert.equal(cfIncidentProtocol.facts.baseline_scope, "authenticated_runtime_incident");
 assert.equal(cfIncidentProtocol.facts.guest_execution_verified, false);
 console.log(JSON.stringify({ case: "protocol_cf_incident_valid", result: "verified" }));
+const promotionCases = cases.filter((test) => test.format === "counterfactual-promotion");
+assert(promotionCases.filter((test) => test.expected === "verified").length >= 5);
+assert(promotionCases.filter((test) => test.expected !== "verified").length >= 20);
+const promotionCase = promotionCases.find((test) => test.expected === "verified" && test.runtime_anchor !== undefined);
+const promotionOptions = {
+  verifier: resolve("fake_verifier"), format: "counterfactual-promotion",
+  trustedIncidentPublicKeyHex: promotionCase.incident_anchor,
+  expectedBaselineIntegrityHash: promotionCase.expected_baseline_integrity_hash,
+  trustedRunPublicKeyHex: promotionCase.run_anchor,
+  trustedRuntimePublicKeyHex: promotionCase.runtime_anchor,
+};
+const promotionControls = [
+  "cf_promotion_wrong_scope", "cf_promotion_wrong_format", "cf_promotion_wrong_signer",
+  "cf_promotion_wrong_pin", "cf_promotion_wrong_nested_pin", "cf_promotion_wrong_exporter",
+  "cf_promotion_wrong_run_signer", "cf_promotion_wrong_runtime_key", "cf_promotion_missing_run_origin",
+  "cf_promotion_missing_runtime_origin", "cf_promotion_downgraded_baseline", "cf_promotion_missing_field",
+  "cf_promotion_extra_field", "cf_promotion_bad_report_hash", "cf_promotion_bad_output_hash",
+  "cf_promotion_bad_counterfactual_digest", "cf_promotion_bad_contract_digest", "cf_promotion_empty_operator",
+  "cf_promotion_operator_whitespace", "cf_promotion_operator_control", "cf_promotion_operator_oversize",
+  "cf_promotion_operator_surrogate", "cf_promotion_empty_mitigation", "cf_promotion_mitigation_whitespace",
+  "cf_promotion_mitigation_control", "cf_promotion_invalid_executor", "cf_promotion_invalid_mode",
+  "cf_promotion_zero_count", "cf_promotion_boolean_count", "cf_promotion_single_count_mismatch",
+  "cf_promotion_excessive_count", "cf_promotion_numeric_delta", "cf_promotion_overflow_delta",
+  "cf_promotion_zero_delta", "cf_promotion_negative_delta", "cf_promotion_noncanonical_delta",
+  "cf_promotion_numeric_from", "cf_promotion_underflow_from", "cf_promotion_plus_from",
+  "cf_promotion_negative_zero_from", "cf_promotion_numeric_until", "cf_promotion_overflow_until",
+  "cf_promotion_newline_until", "cf_promotion_empty_window", "cf_promotion_reversed_window",
+  "cf_promotion_guest_execution_claim", "cf_promotion_rollout_claim", "cf_promotion_boolean_number",
+];
+for (const mode of promotionControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })),
+    promotionCase.anchor, promotionOptions),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+for (const mode of ["cf_promotion_valid", "cf_promotion_valid_sweep"]) {
+  const promoted = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })),
+    promotionCase.anchor, promotionOptions);
+  assert.equal(promoted.facts.rollout_authorized, false);
+  assert.equal(promoted.facts.guest_execution_verified, false);
+  assert.equal(promoted.facts.expected_loss_delta, mode.endsWith("_sweep") ? "9223372036854775807" : "9007199254740993");
+  assert.equal(promoted.facts.valid_from_epoch_ms, mode.endsWith("_sweep") ? "0" : "-9223372036854775808");
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
+}
+const promotionInputs = [
+  ["promotion_missing_exporter", { trustedIncidentPublicKeyHex: undefined }, "INCIDENT_ANCHOR_INVALID"],
+  ["promotion_bad_exporter", { trustedIncidentPublicKeyHex: "bad-key" }, "INCIDENT_ANCHOR_INVALID"],
+  ["promotion_missing_pin", { expectedBaselineIntegrityHash: undefined }, "EXPECTED_BASELINE_INVALID"],
+  ["promotion_noncanonical_pin", { expectedBaselineIntegrityHash: "A".repeat(64) }, "EXPECTED_BASELINE_INVALID"],
+  ["promotion_prefixed_pin", { expectedBaselineIntegrityHash: "sha256:" + "a".repeat(64) }, "EXPECTED_BASELINE_INVALID"],
+  ["promotion_detached_signature", { signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
+  ["promotion_runtime_requires_run", { trustedRunPublicKeyHex: undefined }, "INPUT_INVALID"],
+];
+for (const [name, overrides, code] of promotionInputs) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), promotionCase.anchor, { ...promotionOptions, ...overrides }),
+    (error) => error instanceof VerifierError && error.code === code, name);
+  console.log(JSON.stringify({ case: name, result: code }));
+}
 const fleetCase = cases.find((test) => test.name === "fleet_independent_http_observations");
 const epochCase = cases.find((test) => test.name === "epoch_independent_http_commit");
 const epochControls = [
@@ -589,7 +673,8 @@ for (const mode of ltvControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
-  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases,
+  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + promotionInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
     + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases
-    + counterfactualControls.length + ltvControls.length + nativeControls.length + nativePositives.length + 1, passed: true }));
+    + counterfactualControls.length + ltvControls.length + promotionControls.length + 2
+    + nativeControls.length + nativePositives.length + 1, passed: true }));

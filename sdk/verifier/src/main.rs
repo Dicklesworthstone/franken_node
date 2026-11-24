@@ -11,8 +11,9 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use frankenengine_verifier_sdk::bundle::{self, BundleError};
 use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, ReplayCapsule};
 use frankenengine_verifier_sdk::counterfactual::{
-    CounterfactualIncidentTrust, CounterfactualReceiptError, verify_counterfactual_incident,
-    verify_counterfactual_receipt,
+    CounterfactualIncidentTrust, CounterfactualReceiptError,
+    MAX_COUNTERFACTUAL_INCIDENT_OUTPUT_BYTES, verify_counterfactual_incident,
+    verify_counterfactual_promotion, verify_counterfactual_receipt,
 };
 use frankenengine_verifier_sdk::fleet_quiescence::{
     FleetCoordinatorTrust, FleetQuiescencePolicy, MAX_FLEET_QUIESCENCE_POLICY_BYTES,
@@ -53,10 +54,12 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-receipt-input/v1";
 const COUNTERFACTUAL_INCIDENT_INPUT_SCHEMA: &str =
     "franken-verifier/counterfactual-incident-input/v1";
+const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
+    "franken-verifier/counterfactual-promotion-input/v1";
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -239,6 +242,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "publisher-source-trust"
             | "counterfactual-receipt"
             | "counterfactual-incident"
+            | "counterfactual-promotion"
             | "ltv-evidence"
             | "fleet-quiescence-observations"
             | "fleet-epoch-commit"
@@ -304,7 +308,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (Some(key), None)
     };
     let run_anchor = match (format.as_str(), run_anchor) {
-        ("incident-bundle" | "counterfactual-incident", Some(text)) => {
+        ("incident-bundle" | "counterfactual-incident" | "counterfactual-promotion", Some(text)) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -321,7 +325,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, None) => None,
     };
     let runtime_anchor = match (format.as_str(), run_anchor.as_ref(), runtime_anchor) {
-        ("incident-bundle" | "counterfactual-incident", Some(_), Some(text)) => {
+        ("incident-bundle" | "counterfactual-incident" | "counterfactual-promotion", Some(_), Some(text)) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -373,7 +377,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, Some(_)) => return Err(usage()),
         (_, None) => None,
     };
-    let counterfactual_incident = if format == "counterfactual-incident" {
+    let counterfactual_incident = if matches!(
+        format.as_str(),
+        "counterfactual-incident" | "counterfactual-promotion"
+    ) {
         let encoded = incident_anchor.ok_or_else(usage)?;
         let mut bytes = [0_u8; 32];
         hex::decode_to_slice(encoded, &mut bytes).map_err(|_| {
@@ -608,6 +615,26 @@ struct CounterfactualIncidentInputEnvelope {
     schema_version: String,
     baseline_bundle_base64: String,
     counterfactual_output: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CounterfactualPromotionInputEnvelope {
+    schema_version: String,
+    baseline_bundle_base64: String,
+    report_base64: String,
+}
+
+fn decode_counterfactual_evidence(encoded: &str, max_bytes: usize) -> Result<Vec<u8>, Failure> {
+    if encoded.is_empty() || encoded.len() > max_bytes.div_ceil(3) * 4 {
+        return Err(failure("EVIDENCE_INVALID", "invalid counterfactual evidence encoding"));
+    }
+    let bytes = STANDARD.decode(encoded)
+        .map_err(|_| failure("EVIDENCE_INVALID", "invalid counterfactual evidence encoding"))?;
+    if bytes.len() > max_bytes || STANDARD.encode(&bytes) != encoded {
+        return Err(failure("EVIDENCE_INVALID", "noncanonical counterfactual evidence encoding"));
+    }
+    Ok(bytes)
 }
 
 #[derive(Deserialize)]
@@ -1022,6 +1049,59 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "baseline_scope": baseline["scope"],
                     "baseline": baseline["facts"],
                     "guest_execution_verified": verified.guest_execution_verified,
+                }
+            }))
+        }
+        "counterfactual-promotion" => {
+            let policy = request.counterfactual_incident.as_ref()
+                .ok_or_else(|| failure("USAGE", USAGE))?;
+            let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
+            let envelope: CounterfactualPromotionInputEnvelope = serde_json::from_value(value)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid counterfactual promotion transport"))?;
+            if envelope.schema_version != COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA {
+                return Err(failure("EVIDENCE_INVALID", "unsupported counterfactual promotion transport"));
+            }
+            let baseline_bytes = decode_counterfactual_evidence(
+                &envelope.baseline_bundle_base64, MAX_INCIDENT_BUNDLE_BYTES,
+            )?;
+            let report_bytes = decode_counterfactual_evidence(
+                &envelope.report_base64, MAX_COUNTERFACTUAL_INCIDENT_OUTPUT_BYTES,
+            )?;
+            let verified = verify_counterfactual_promotion(
+                &baseline_bytes,
+                &report_bytes,
+                &CounterfactualIncidentTrust {
+                    expected_baseline_integrity_hash: &policy.expected_baseline_integrity_hash,
+                    trusted_counterfactual_signer: trusted_key,
+                    trusted_bundle_signer: &policy.incident_anchor,
+                    trusted_run_signer: request.run_anchor.as_ref(),
+                    trusted_product_root: request.runtime_anchor.as_ref(),
+                },
+            ).map_err(|error| failure(error.code(), "counterfactual promotion verification failed"))?;
+            let baseline = incident_verification_response(
+                verified.baseline, verified.run_origin, verified.runtime_origin,
+            );
+            Ok(json!({
+                "scope": "authenticated_counterfactual_promotion",
+                "facts": {
+                    "baseline_integrity_hash": baseline["facts"]["integrity_hash"],
+                    "signer_public_key_hex": verified.operator_public_key_hex,
+                    "operator_id": verified.operator_id,
+                    "report_sha256": verified.report_sha256,
+                    "counterfactual_digest": verified.counterfactual_digest,
+                    "counterfactual_output_sha256": verified.counterfactual_output_sha256,
+                    "promotion_contract_digest": verified.promotion_contract_digest,
+                    "mitigation_id": verified.mitigation_id,
+                    "executor": verified.executor,
+                    "mode": verified.mode,
+                    "result_count": verified.result_count,
+                    "expected_loss_delta": verified.expected_loss_delta.to_string(),
+                    "valid_from_epoch_ms": verified.valid_from_epoch_ms.to_string(),
+                    "valid_until_epoch_ms": verified.valid_until_epoch_ms.to_string(),
+                    "baseline_scope": baseline["scope"],
+                    "baseline": baseline["facts"],
+                    "guest_execution_verified": verified.guest_execution_verified,
+                    "rollout_authorized": verified.rollout_authorized,
                 }
             }))
         }
@@ -2159,6 +2239,72 @@ mod tests {
     fn an_unbounded_input_stream_is_cut_off_before_verification() {
         let error = run(&args("incident-bundle", ANCHOR), &mut io::repeat(b' ')).unwrap_err();
         assert_eq!(error.code, "INPUT_TOO_LARGE");
+    }
+
+    #[test]
+    fn counterfactual_promotion_requires_independent_baseline_trust_without_detached_signature() {
+        let mut request = args("counterfactual-promotion", ANCHOR);
+        assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+        request.extend(["--trusted-incident-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+        request.extend([
+            "--expected-baseline-integrity-hash".into(),
+            "a".repeat(64),
+        ]);
+        let parsed = arguments(&request).unwrap();
+        assert!(parsed.signature.is_none());
+        assert!(parsed.counterfactual_incident.is_some());
+        let mut detached = request.clone();
+        detached.extend(["--signature-hex".into(), "00".repeat(64)]);
+        assert_eq!(arguments(&detached).unwrap_err().code, "USAGE");
+
+        let mut runtime_without_run = request.clone();
+        runtime_without_run.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(arguments(&runtime_without_run).unwrap_err().code, "USAGE");
+        request.extend([
+            "--trusted-run-key-hex".into(), ANCHOR.into(),
+            "--trusted-runtime-key-hex".into(), ANCHOR.into(),
+        ]);
+        let parsed = arguments(&request).unwrap();
+        assert!(parsed.run_anchor.is_some());
+        assert!(parsed.runtime_anchor.is_some());
+    }
+
+    #[test]
+    fn counterfactual_promotion_transport_rejects_ambiguous_or_noncanonical_inputs() {
+        let mut request = args("counterfactual-promotion", ANCHOR);
+        request.extend([
+            "--trusted-incident-key-hex".into(), ANCHOR.into(),
+            "--expected-baseline-integrity-hash".into(), "a".repeat(64),
+        ]);
+        let transport = json!({
+            "schema_version": COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA,
+            "baseline_bundle_base64": STANDARD.encode(FIXTURE),
+            "report_base64": STANDARD.encode(b"{}"),
+        });
+        for (field, value) in [
+            ("schema_version", json!("franken-verifier/counterfactual-promotion-input/v99")),
+            ("report_base64", json!("")),
+            ("report_base64", json!("e30=\n")),
+            ("baseline_bundle_base64", json!("not-base64")),
+            ("trusted_key_hex", json!(ANCHOR)),
+        ] {
+            let mut changed = transport.clone();
+            changed[field] = value;
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            assert_eq!(
+                run(&request, &mut bytes.as_slice()).unwrap_err().code,
+                "EVIDENCE_INVALID",
+                "{field}",
+            );
+        }
+        let mut duplicate = serde_json::to_string(&transport).unwrap();
+        duplicate.pop();
+        duplicate.push_str(",\"report_base64\":\"e30=\"}");
+        assert_eq!(
+            run(&request, &mut duplicate.as_bytes()).unwrap_err().code,
+            "JSON_INVALID",
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "counterfactual-incident" | "ltv-evidence" | "fleet-quiescence-observations" | "fleet-epoch-commit";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "counterfactual-incident" | "counterfactual-promotion" | "ltv-evidence" | "fleet-quiescence-observations" | "fleet-epoch-commit";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
-  format?: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit" | "counterfactual-incident">;
+  format?: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit" | "counterfactual-incident" | "counterfactual-promotion">;
   /** Independent original receipt authority, only for incident verification formats. Missing proof fails. */
   trustedRunPublicKeyHex?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
@@ -34,6 +34,12 @@ export interface CounterfactualIncidentOptions extends Omit<VerifierOptions, "fo
   expectedBaselineIntegrityHash: string;
   /** Detached counterfactual receipt signature, checked with trustedPublicKeyHex. */
   signatureHex: string;
+}
+/** Existing product promotion contracts bound to an independently authenticated incident. */
+export interface CounterfactualPromotionOptions extends Omit<CounterfactualIncidentOptions, "format" | "signatureHex"> {
+  format: "counterfactual-promotion";
+  /** Signatures are embedded in the product report; trustedPublicKeyHex is the operator key. */
+  signatureHex?: never;
 }
 export interface FleetQuiescenceOptions {
   /** Trusted SDK executable, installed separately from the evidence. */
@@ -311,6 +317,22 @@ export type CounterfactualIncidentFacts = CounterfactualReceiptFacts & {
   | { baseline_scope: "authenticated_run_incident"; baseline: RunIncidentFacts }
   | { baseline_scope: "authenticated_runtime_incident"; baseline: RuntimeIncidentFacts }
 );
+/** Authenticated historical operator contracts; no guest replay or current rollout grant. */
+export type CounterfactualPromotionFacts = CounterfactualIncidentFacts & {
+  operator_id: string;
+  report_sha256: string;
+  /** Domain-bound digest: sha256: plus lowercase hexadecimal. */
+  counterfactual_digest: string;
+  promotion_contract_digest: string;
+  mitigation_id: string;
+  executor: "synthetic" | "production";
+  /** Exact positive signed i64 decimal, never rounded to a JavaScript number. */
+  expected_loss_delta: string;
+  /** Exact signed i64 epoch milliseconds, including pre-epoch timestamps. */
+  valid_from_epoch_ms: string;
+  valid_until_epoch_ms: string;
+  rollout_authorized: false;
+};
 export interface LtvEvidenceFacts {
   artifact_id: string;
   artifact_hash: string;
@@ -355,6 +377,7 @@ export type Verification = {
   | { format: "publisher-source-trust"; scope: "authenticated_publisher_source_trust"; facts: PublisherSourceTrustFacts }
   | { format: "counterfactual-receipt"; scope: "authenticated_counterfactual_receipt"; facts: CounterfactualReceiptFacts }
   | { format: "counterfactual-incident"; scope: "authenticated_counterfactual_incident"; facts: CounterfactualIncidentFacts }
+  | { format: "counterfactual-promotion"; scope: "authenticated_counterfactual_promotion"; facts: CounterfactualPromotionFacts }
   | { format: "ltv-evidence"; scope: "authenticated_ltv_anteriority"; facts: LtvEvidenceFacts }
 );
 export class VerifierError extends Error {
@@ -371,5 +394,6 @@ export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualIncidentOptions): Promise<Verification>;
+export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualPromotionOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: null, options: FleetQuiescenceOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: null, options: FleetEpochCommitOptions): Promise<Verification>;

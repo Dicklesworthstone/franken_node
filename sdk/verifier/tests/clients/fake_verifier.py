@@ -203,7 +203,7 @@ if mode.startswith("counterfactual_"):
         "result_count": 2,
         "signer_public_key_hex": anchor,
     }
-if mode.startswith("cf_incident_"):
+if mode.startswith(("cf_incident_", "cf_promotion_")):
     baseline = response["facts"]
     baseline["signer_public_key_hex"] = sys.argv[sys.argv.index("--trusted-incident-key-hex") + 1]
     baseline["integrity_hash"] = sys.argv[sys.argv.index("--expected-baseline-integrity-hash") + 1]
@@ -261,6 +261,89 @@ if mode.startswith("cf_incident_"):
         facts["result_count"] = 21
     elif mode == "cf_incident_single_count_mismatch":
         facts["result_count"] = 2
+if mode.startswith("cf_promotion_"):
+    response["format"] = "counterfactual-promotion"
+    response["scope"] = "authenticated_counterfactual_promotion"
+    facts.update({
+        "operator_id": "protocol-operator", "report_sha256": "a" * 64,
+        "counterfactual_digest": "sha256:" + "b" * 64,
+        "promotion_contract_digest": "sha256:" + "c" * 64,
+        "mitigation_id": "incident-policy-mitigation", "executor": "production",
+        "expected_loss_delta": "9007199254740993",
+        "valid_from_epoch_ms": "-9223372036854775808",
+        "valid_until_epoch_ms": "9223372036854775807",
+        "rollout_authorized": False,
+    })
+    changes = {
+        "cf_promotion_wrong_signer": ("signer_public_key_hex", "e" * 64),
+        "cf_promotion_wrong_pin": ("baseline_integrity_hash", "e" * 64),
+        "cf_promotion_bad_report_hash": ("report_sha256", "sha256:" + "a" * 64),
+        "cf_promotion_bad_output_hash": ("counterfactual_output_sha256", "D" * 64),
+        "cf_promotion_bad_counterfactual_digest": ("counterfactual_digest", "b" * 64),
+        "cf_promotion_bad_contract_digest": ("promotion_contract_digest", "sha256:" + "C" * 64),
+        "cf_promotion_empty_operator": ("operator_id", ""),
+        "cf_promotion_operator_whitespace": ("operator_id", " operator"),
+        "cf_promotion_operator_control": ("operator_id", "operator\n"),
+        "cf_promotion_operator_oversize": ("operator_id", "a" * 4097),
+        "cf_promotion_operator_surrogate": ("operator_id", "\ud800"),
+        "cf_promotion_empty_mitigation": ("mitigation_id", ""),
+        "cf_promotion_mitigation_whitespace": ("mitigation_id", "mitigation "),
+        "cf_promotion_mitigation_control": ("mitigation_id", "mitigation\x7f"),
+        "cf_promotion_invalid_executor": ("executor", "native"),
+        "cf_promotion_invalid_mode": ("mode", "parallel"),
+        "cf_promotion_zero_count": ("result_count", 0),
+        "cf_promotion_boolean_count": ("result_count", True),
+        "cf_promotion_single_count_mismatch": ("result_count", 2),
+        "cf_promotion_numeric_delta": ("expected_loss_delta", 9007199254740993),
+        "cf_promotion_overflow_delta": ("expected_loss_delta", "9223372036854775808"),
+        "cf_promotion_zero_delta": ("expected_loss_delta", "0"),
+        "cf_promotion_negative_delta": ("expected_loss_delta", "-1"),
+        "cf_promotion_noncanonical_delta": ("expected_loss_delta", "01"),
+        "cf_promotion_numeric_from": ("valid_from_epoch_ms", -9007199254740993),
+        "cf_promotion_underflow_from": ("valid_from_epoch_ms", "-9223372036854775809"),
+        "cf_promotion_plus_from": ("valid_from_epoch_ms", "+1"),
+        "cf_promotion_negative_zero_from": ("valid_from_epoch_ms", "-0"),
+        "cf_promotion_numeric_until": ("valid_until_epoch_ms", 9007199254740993),
+        "cf_promotion_overflow_until": ("valid_until_epoch_ms", "9223372036854775808"),
+        "cf_promotion_newline_until": ("valid_until_epoch_ms", "9223372036854775807\n"),
+        "cf_promotion_empty_window": ("valid_until_epoch_ms", "-9223372036854775808"),
+        "cf_promotion_guest_execution_claim": ("guest_execution_verified", True),
+        "cf_promotion_rollout_claim": ("rollout_authorized", True),
+        "cf_promotion_boolean_number": ("rollout_authorized", 0),
+        "cf_promotion_downgraded_baseline": ("baseline_scope", "authenticated_recorded_incident"),
+    }
+    if mode in changes:
+        key, value = changes[mode]
+        facts[key] = value
+    elif mode == "cf_promotion_wrong_scope":
+        response["scope"] = "authenticated_counterfactual_incident"
+    elif mode == "cf_promotion_wrong_format":
+        response["format"] = "counterfactual-incident"
+    elif mode == "cf_promotion_wrong_nested_pin":
+        baseline["integrity_hash"] = "e" * 64
+    elif mode == "cf_promotion_wrong_exporter":
+        baseline["signer_public_key_hex"] = anchor
+    elif mode == "cf_promotion_wrong_run_signer":
+        baseline["run_origin"]["signer_public_key_hex"] = anchor
+    elif mode == "cf_promotion_wrong_runtime_key":
+        baseline["runtime_origin"]["product_root_key_id"] = "ed25519:" + anchor
+    elif mode == "cf_promotion_missing_run_origin":
+        baseline.pop("run_origin", None)
+    elif mode == "cf_promotion_missing_runtime_origin":
+        baseline.pop("runtime_origin", None)
+    elif mode == "cf_promotion_missing_field":
+        facts.pop("report_sha256")
+    elif mode == "cf_promotion_extra_field":
+        facts["replay_certified"] = True
+    elif mode == "cf_promotion_excessive_count":
+        facts["mode"] = "sweep"
+        facts["result_count"] = 21
+    elif mode == "cf_promotion_reversed_window":
+        facts["valid_from_epoch_ms"], facts["valid_until_epoch_ms"] = "1", "0"
+    elif mode == "cf_promotion_valid_sweep":
+        facts["executor"], facts["mode"], facts["result_count"] = "synthetic", "sweep", 20
+        facts["expected_loss_delta"] = "9223372036854775807"
+        facts["valid_from_epoch_ms"], facts["valid_until_epoch_ms"] = "0", "1"
 if mode.startswith("ltv_"):
     response["format"] = "ltv-evidence"
     response["scope"] = "authenticated_ltv_anteriority"
