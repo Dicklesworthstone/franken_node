@@ -3,7 +3,7 @@
 # README trust scenario + package source inventory and host-effect candidates.
 set -euo pipefail
 
-BIN="${FRANKEN_NODE_BIN:-target/release/franken-node}"
+BIN="${1:-${FRANKEN_NODE_BIN:-target/release/franken-node}}"
 if [[ ! -x "$BIN" ]]; then
   echo "ERROR: franken-node binary not found or not executable at $BIN" >&2
   exit 2
@@ -27,6 +27,12 @@ report_step() {
 }
 
 TMP_WS="$(mktemp -d "${TMPDIR:-/tmp}/fn-demo-readme-scenario.XXXXXX")"
+# Isolate operator runtime-evidence state outside the guest project root so the
+# hermetic demo never collides with or fills the user's shared ~/.local/state.
+if [[ -z "${XDG_STATE_HOME:-}" ]]; then
+  TMP_STATE="$(mktemp -d "${TMPDIR:-/tmp}/fn-demo-readme-state.XXXXXX")"
+  export XDG_STATE_HOME="$TMP_STATE"
+fi
 
 python3 - "$TMP_WS" <<'PY'
 import base64, datetime, hashlib, json, os, pathlib, sys

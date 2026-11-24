@@ -932,7 +932,13 @@ def _execute_one_runtime_fixture(
     *,
     timeout_secs: float = 15.0,
 ) -> dict:
-    with tempfile.TemporaryDirectory(prefix=f"clv-{runtime}-") as tmp:
+    # Keep isolated runtime-evidence state outside `workdir` so hermetic live
+    # lockstep fixtures never fail against a full ~/.local/state/franken-node
+    # or leak retained sessions into the host user's state home.
+    with (
+        tempfile.TemporaryDirectory(prefix=f"clv-{runtime}-") as tmp,
+        tempfile.TemporaryDirectory(prefix=f"clv-state-{runtime}-") as state_tmp,
+    ):
         workdir = Path(tmp)
         script_path = workdir / "case.js"
         script_path.write_text(source_code, encoding="utf-8")
@@ -943,6 +949,11 @@ def _execute_one_runtime_fixture(
                 '[security]\nauthorized_api_keys = ["clv-live-key"]\n',
                 encoding="utf-8",
             )
+        run_env = os.environ.copy()
+        run_env.pop("FORCE_COLOR", None)
+        run_env["NO_COLOR"] = "1"
+        run_env["XDG_STATE_HOME"] = state_tmp
+        run_env["LOCALAPPDATA"] = state_tmp
         before = _snapshot_directory(workdir)
         started = time.perf_counter()
         timed_out = False
@@ -950,6 +961,7 @@ def _execute_one_runtime_fixture(
             proc = subprocess.run(
                 [*cmd_prefix, "case.js"],
                 cwd=workdir,
+                env=run_env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_secs,
