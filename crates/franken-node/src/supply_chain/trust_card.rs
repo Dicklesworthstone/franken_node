@@ -335,7 +335,7 @@ fn strongest_captured_integrity(raw: &str) -> (Option<&str>, BTreeSet<String>, b
     (algorithm, hashes, incomplete)
 }
 
-fn exact_dependency_version(version: &str) -> bool {
+pub(crate) fn exact_dependency_version(version: &str) -> bool {
     let (without_build, build) = version
         .split_once('+')
         .map_or((version, None), |(base, suffix)| (base, Some(suffix)));
@@ -1237,10 +1237,77 @@ pub struct OsvRiskBaseline {
     pub risk_assessment: RiskAssessment,
     pub reputation_score_basis_points: u16,
     pub reputation_trend: ReputationTrend,
+    /// Scope and identified findings retained by this overlay. Omitting the
+    /// field preserves the canonical bytes of previously signed baselines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_scope: Option<OsvRiskEvidenceScope>,
 }
 
 const MAX_OSV_BASELINE_SUMMARY_BYTES: usize = 65_536;
 const MAX_OSV_REFRESH_VULNERABILITIES: usize = 10_000;
+const MAX_OSV_SCOPE_VERSIONS: usize = 128;
+const MAX_OSV_SCOPE_VERSION_BYTES: usize = 128;
+
+/// Captured package versions and known findings covered by an OSV assessment.
+/// Version identities are separate from query completion: a failed query still
+/// belongs to the planned version set, while an unpinned placement is unresolved.
+/// This is package risk evidence; it grants no authority over artifact bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsvRiskEvidenceScope {
+    pub versions: BTreeSet<String>,
+    pub unresolved: bool,
+    pub vulnerability_ids: BTreeSet<String>,
+}
+
+impl OsvRiskEvidenceScope {
+    fn for_card(card: &TrustCard) -> Self {
+        let exact = exact_dependency_version(&card.extension.version);
+        Self {
+            versions: if exact {
+                BTreeSet::from([card.extension.version.clone()])
+            } else {
+                BTreeSet::new()
+            },
+            unresolved: !exact,
+            vulnerability_ids: BTreeSet::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), TrustCardError> {
+        if self.versions.len() > MAX_OSV_SCOPE_VERSIONS
+            || (self.versions.is_empty() && !self.unresolved)
+            || self.versions.iter().any(|version| {
+                version.len() > MAX_OSV_SCOPE_VERSION_BYTES || !exact_dependency_version(version)
+            })
+            || self.vulnerability_ids.len() > MAX_OSV_REFRESH_VULNERABILITIES
+            || self.vulnerability_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 256
+                    || id.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            })
+        {
+            return Err(TrustCardError::InvalidInput {
+                reason: "OSV evidence scope is malformed or excessive".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn retain(&mut self, incoming: &Self) -> Result<(), TrustCardError> {
+        self.versions.extend(incoming.versions.iter().cloned());
+        self.unresolved |= incoming.unresolved;
+        self.vulnerability_ids
+            .extend(incoming.vulnerability_ids.iter().cloned());
+        // Refuse the entire update if the union cannot fit. Evicting an older
+        // version or finding would invent clearance authority for a subset.
+        self.validate()
+    }
+
+    fn covers(&self, retained: &Self) -> bool {
+        !self.unresolved && !retained.unresolved && retained.versions.is_subset(&self.versions)
+    }
+}
 
 impl OsvRiskBaseline {
     fn validate(&self) -> Result<(), TrustCardError> {
@@ -1251,6 +1318,15 @@ impl OsvRiskBaseline {
                 reason: "OSV risk baseline has an invalid source hash or excessive summary"
                     .to_owned(),
             });
+        }
+        if let Some(scope) = &self.evidence_scope {
+            scope.validate()?;
+            if scope.vulnerability_ids.is_empty() {
+                return Err(TrustCardError::InvalidInput {
+                    reason: "an active OSV evidence scope must retain identified findings"
+                        .to_owned(),
+                });
+            }
         }
         Ok(())
     }
@@ -2353,7 +2429,9 @@ impl TrustCardRegistry {
         )
     }
 
-    /// Apply a complete OSV query without changing other sources' authority.
+    /// Apply an OSV query for the latest card's version without changing other
+    /// sources' authority. A single-card query cannot clear findings retained
+    /// for other captured versions or unresolved placements.
     /// Nonempty answers can raise risk without clearance authority. Clearing
     /// an active overlay requires a complete authenticated clean answer, even
     /// when independent risk masks its current level. The caller must set
@@ -2382,21 +2460,58 @@ impl TrustCardRegistry {
         }
         let latest = self
             .latest_verified_card(extension_id)?
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.to_owned()))?;
+        let mut scope = OsvRiskEvidenceScope::for_card(latest);
+        scope
+            .vulnerability_ids
+            .extend(vulnerability_ids.iter().cloned());
+        self.refresh_osv_risk_with_scope(
+            extension_id,
+            &scope,
+            complete_clean_authenticated,
+            now_secs,
+            trace_id,
+        )
+    }
+
+    /// Retain findings for a captured set of package versions without changing
+    /// the card's artifact identity. Findings and version scope accumulate;
+    /// partial answers cannot remove an earlier contribution. Only a complete,
+    /// authenticated clean query covering every retained version can clear the
+    /// overlay, and unresolved scope or a nonexact card version refuses clearance.
+    /// The caller must additionally verify current capture/artifact authority
+    /// before granting `complete_clean_authenticated`.
+    pub fn refresh_osv_risk_with_scope(
+        &mut self,
+        extension_id: &str,
+        scope: &OsvRiskEvidenceScope,
+        complete_clean_authenticated: bool,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<OsvRiskRefreshOutcome, TrustCardError> {
+        validate_extension_id(extension_id)?;
+        scope.validate()?;
+        let latest = self
+            .latest_verified_card(extension_id)?
             .cloned()
             .ok_or_else(|| TrustCardError::NotFound(extension_id.to_owned()))?;
-        let ids = vulnerability_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if ids.is_empty()
-            && latest.osv_risk_baseline.is_some()
-            && (!complete_clean_authenticated
-                || !exact_dependency_version(&latest.extension.version))
+        let retained_scope = latest.osv_risk_baseline.as_ref().map(|baseline| {
+            baseline
+                .evidence_scope
+                .clone()
+                .unwrap_or_else(|| OsvRiskEvidenceScope::for_card(&latest))
+        });
+        if scope.vulnerability_ids.is_empty()
+            && retained_scope.as_ref().is_some_and(|retained| {
+                !complete_clean_authenticated
+                    || !exact_dependency_version(&latest.extension.version)
+                    || !scope.covers(retained)
+            })
         {
             return Ok(OsvRiskRefreshOutcome::ClearanceRefused);
         }
 
-        let (risk, score, trend, baseline, detail) = if ids.is_empty() {
+        let (risk, score, trend, baseline, detail) = if scope.vulnerability_ids.is_empty() {
             match &latest.osv_risk_baseline {
                 Some(baseline) => {
                     let mut view = latest.clone();
@@ -2438,20 +2553,30 @@ impl TrustCardRegistry {
                     latest.reputation_score_basis_points,
                     latest.reputation_trend,
                     None,
-                    "complete OSV query was clean; unattributed aggregate assessment retained",
+                    "OSV query reported no findings; unattributed aggregate assessment retained",
                 ),
             }
         } else {
-            let baseline = latest
-                .osv_risk_baseline
-                .clone()
-                .unwrap_or_else(|| OsvRiskBaseline {
-                    source_card_hash: latest.card_hash.clone(),
-                    risk_assessment: latest.user_facing_risk_assessment.clone(),
-                    reputation_score_basis_points: latest.reputation_score_basis_points,
-                    reputation_trend: latest.reputation_trend,
-                });
+            let mut baseline =
+                latest
+                    .osv_risk_baseline
+                    .clone()
+                    .unwrap_or_else(|| OsvRiskBaseline {
+                        source_card_hash: latest.card_hash.clone(),
+                        risk_assessment: latest.user_facing_risk_assessment.clone(),
+                        reputation_score_basis_points: latest.reputation_score_basis_points,
+                        reputation_trend: latest.reputation_trend,
+                        evidence_scope: None,
+                    });
+            let mut evidence_scope = retained_scope.unwrap_or_else(|| scope.clone());
+            evidence_scope.retain(scope)?;
+            baseline.evidence_scope = Some(evidence_scope);
             baseline.validate()?;
+            let evidence_scope = baseline
+                .evidence_scope
+                .as_ref()
+                .expect("positive OSV findings retain their scope");
+            let ids = &evidence_scope.vulnerability_ids;
             let computed_risk = if ids.len() >= 3
                 || matches!(latest.revocation_status, RevocationStatus::Revoked { .. })
             {
@@ -2459,7 +2584,12 @@ impl TrustCardRegistry {
             } else {
                 RiskLevel::High
             };
-            let shown = ids.iter().take(64).copied().collect::<Vec<_>>().join(", ");
+            let shown = ids
+                .iter()
+                .take(64)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
             let suffix = if ids.len() > 64 {
                 format!(
                     "; {} additional records omitted from display",
@@ -2471,8 +2601,10 @@ impl TrustCardRegistry {
             let risk = latest.risk_with_camouflage_floor(RiskAssessment {
                 level: latest.user_facing_risk_assessment.level.max(computed_risk),
                 summary: format!(
-                    "OSV refresh reported {} vulnerability record(s): {shown}{suffix}",
-                    ids.len()
+                    "OSV evidence retains {} identified vulnerability record(s): {shown}{suffix}; captured versions: {}; unresolved placements: {}",
+                    ids.len(),
+                    evidence_scope.versions.iter().map(String::as_str).collect::<Vec<_>>().join(", "),
+                    evidence_scope.unresolved,
                 ),
             });
             let penalty = (ids.len().min(5) as u16).saturating_mul(90);
@@ -2485,7 +2617,7 @@ impl TrustCardRegistry {
                 score,
                 ReputationTrend::Declining,
                 Some(baseline),
-                "OSV vulnerability overlay applied with retained source baseline",
+                "OSV vulnerability overlay applied with retained version scope and source baseline",
             )
         };
 
@@ -4619,6 +4751,381 @@ mod tests {
             user_facing_risk_assessment: None,
             last_verified_timestamp: None,
             evidence_refs: None,
+        }
+    }
+
+    fn osv_scope(versions: &[&str], unresolved: bool, ids: &[&str]) -> OsvRiskEvidenceScope {
+        OsvRiskEvidenceScope {
+            versions: versions
+                .iter()
+                .map(|version| (*version).to_owned())
+                .collect(),
+            unresolved,
+            vulnerability_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    fn apply_osv_scope(
+        registry: &mut TrustCardRegistry,
+        scope: &OsvRiskEvidenceScope,
+        authenticated: bool,
+        now_secs: u64,
+    ) -> TrustCard {
+        match registry
+            .refresh_osv_risk_with_scope(
+                "npm:@acme/plugin",
+                scope,
+                authenticated,
+                now_secs,
+                "test-osv-version-scope",
+            )
+            .expect("valid scoped OSV refresh")
+        {
+            OsvRiskRefreshOutcome::Updated(card) => *card,
+            OsvRiskRefreshOutcome::ClearanceRefused => {
+                panic!("unexpected scoped clearance refusal")
+            }
+        }
+    }
+
+    #[test]
+    fn osv_other_version_findings_survive_single_card_sync_clearance() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry.create(sample_input(), 1_000, "initial").unwrap();
+        let vulnerable = apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["1.0.0", "2.0.0"], false, &["OSV-OTHER-VERSION"]),
+            false,
+            1_001,
+        );
+        assert_eq!(vulnerable.extension, initial.extension);
+        assert_eq!(vulnerable.provenance_summary, initial.provenance_summary);
+        assert_eq!(vulnerable.certification_level, initial.certification_level);
+        assert_eq!(
+            vulnerable.user_facing_risk_assessment.level,
+            RiskLevel::High
+        );
+        assert_eq!(
+            registry
+                .refresh_osv_risk("npm:@acme/plugin", &[], true, 1_002, "single-card-sync")
+                .unwrap(),
+            OsvRiskRefreshOutcome::ClearanceRefused
+        );
+        let retained = registry
+            .latest_verified_card("npm:@acme/plugin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.card_hash, vulnerable.card_hash);
+        assert_eq!(retained.trust_card_version, vulnerable.trust_card_version);
+        verify_card_signature(retained, DEFAULT_REGISTRY_KEY).unwrap();
+
+        let cleared = apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["1.0.0", "2.0.0"], false, &[]),
+            true,
+            1_003,
+        );
+        assert!(cleared.osv_risk_baseline.is_none());
+        assert_eq!(
+            cleared.user_facing_risk_assessment,
+            initial.user_facing_risk_assessment
+        );
+        assert_eq!(
+            cleared.reputation_score_basis_points,
+            initial.reputation_score_basis_points
+        );
+        assert_eq!(cleared.extension, initial.extension);
+    }
+
+    #[test]
+    fn osv_partial_scopes_retain_all_known_versions_findings_and_penalties() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry.create(sample_input(), 1_000, "initial").unwrap();
+        apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["1.0.0", "2.0.0"], false, &["OSV-A", "OSV-B"]),
+            false,
+            1_001,
+        );
+        let partial = apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["3.0.0"], false, &["OSV-C"]),
+            false,
+            1_002,
+        );
+        let baseline = partial.osv_risk_baseline.as_ref().unwrap();
+        assert_eq!(baseline.source_card_hash, initial.card_hash);
+        assert_eq!(
+            baseline.evidence_scope.as_ref().unwrap(),
+            &osv_scope(
+                &["1.0.0", "2.0.0", "3.0.0"],
+                false,
+                &["OSV-A", "OSV-B", "OSV-C"]
+            )
+        );
+        assert_eq!(
+            partial.user_facing_risk_assessment.level,
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            partial.reputation_score_basis_points,
+            initial.reputation_score_basis_points - 270
+        );
+        for id in ["OSV-A", "OSV-B", "OSV-C"] {
+            assert!(partial.user_facing_risk_assessment.summary.contains(id));
+        }
+        let repeated = apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["3.0.0"], false, &["OSV-C"]),
+            false,
+            1_003,
+        );
+        assert_eq!(repeated.osv_risk_baseline, partial.osv_risk_baseline);
+        assert_eq!(
+            repeated.reputation_score_basis_points,
+            partial.reputation_score_basis_points
+        );
+        for (scope, authenticated) in [
+            (osv_scope(&["1.0.0", "2.0.0", "3.0.0"], false, &[]), false),
+            (osv_scope(&["1.0.0", "2.0.0"], false, &[]), true),
+        ] {
+            assert_eq!(
+                registry
+                    .refresh_osv_risk_with_scope(
+                        "npm:@acme/plugin",
+                        &scope,
+                        authenticated,
+                        1_004,
+                        "partial-clean"
+                    )
+                    .unwrap(),
+                OsvRiskRefreshOutcome::ClearanceRefused
+            );
+        }
+        assert_eq!(
+            registry
+                .latest_verified_card("npm:@acme/plugin")
+                .unwrap()
+                .unwrap()
+                .card_hash,
+            repeated.card_hash
+        );
+    }
+
+    #[test]
+    fn osv_unresolved_scope_and_nonexact_cards_never_grant_clearance() {
+        for (card_version, retained_unresolved, incoming_unresolved) in [
+            ("1.0.0", true, false),
+            ("1.0.0", false, true),
+            ("multiple-or-unresolved", false, false),
+        ] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.extension.version = card_version.to_owned();
+            registry.create(input, 1_000, "initial").unwrap();
+            let vulnerable = apply_osv_scope(
+                &mut registry,
+                &osv_scope(&["1.0.0"], retained_unresolved, &["OSV-1"]),
+                false,
+                1_001,
+            );
+            let outcome = registry
+                .refresh_osv_risk_with_scope(
+                    "npm:@acme/plugin",
+                    &osv_scope(&["1.0.0"], incoming_unresolved, &[]),
+                    true,
+                    1_002,
+                    "incomplete-clean",
+                )
+                .unwrap();
+            assert_eq!(outcome, OsvRiskRefreshOutcome::ClearanceRefused);
+            assert_eq!(
+                registry
+                    .latest_verified_card("npm:@acme/plugin")
+                    .unwrap()
+                    .unwrap()
+                    .card_hash,
+                vulnerable.card_hash
+            );
+        }
+    }
+
+    #[test]
+    fn osv_legacy_baseline_bytes_and_implicit_version_scope_are_preserved() {
+        for version in ["1.0.0", "multiple-or-unresolved"] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.extension.version = version.to_owned();
+            let initial = registry.create(input, 1_000, "initial").unwrap();
+            let mut legacy = apply_osv(&mut registry, &["OSV-LEGACY"], false, 1_001);
+            legacy.osv_risk_baseline.as_mut().unwrap().evidence_scope = None;
+            sign_card_in_place(&mut legacy, DEFAULT_REGISTRY_KEY).unwrap();
+            let value = serde_json::to_value(&legacy).unwrap();
+            assert!(value["osv_risk_baseline"].get("evidence_scope").is_none());
+            let decoded: TrustCard = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                canonical_bytes(&value),
+                canonical_bytes(&serde_json::to_value(&decoded).unwrap())
+            );
+            assert_eq!(decoded.card_hash, legacy.card_hash);
+            verify_card_signature(&decoded, DEFAULT_REGISTRY_KEY).unwrap();
+            *registry
+                .cards_by_extension
+                .get_mut("npm:@acme/plugin")
+                .unwrap()
+                .last_mut()
+                .unwrap() = decoded;
+
+            let scoped = apply_osv_scope(
+                &mut registry,
+                &osv_scope(&["2.0.0"], false, &["OSV-NEW"]),
+                false,
+                1_002,
+            );
+            let baseline = scoped.osv_risk_baseline.as_ref().unwrap();
+            assert_eq!(baseline.source_card_hash, initial.card_hash);
+            let scope = baseline.evidence_scope.as_ref().unwrap();
+            assert_eq!(scope.unresolved, version != "1.0.0");
+            assert_eq!(scope.versions.contains("1.0.0"), version == "1.0.0");
+            assert!(scope.versions.contains("2.0.0"));
+            assert_eq!(
+                scope.vulnerability_ids,
+                BTreeSet::from(["OSV-NEW".to_owned()])
+            );
+            assert!(scoped.reputation_score_basis_points <= legacy.reputation_score_basis_points);
+            assert_eq!(
+                registry
+                    .refresh_osv_risk("npm:@acme/plugin", &[], true, 1_003, "legacy-sync")
+                    .unwrap(),
+                OsvRiskRefreshOutcome::ClearanceRefused
+            );
+        }
+    }
+
+    #[test]
+    fn osv_scope_is_signed_and_tampering_cannot_reduce_its_authority() {
+        let mut registry = TrustCardRegistry::default();
+        registry.create(sample_input(), 1_000, "initial").unwrap();
+        let card = apply_osv_scope(
+            &mut registry,
+            &osv_scope(&["1.0.0", "2.0.0"], true, &["OSV-A", "OSV-B"]),
+            false,
+            1_001,
+        );
+        let decoded: TrustCard =
+            serde_json::from_slice(&serde_json::to_vec(&card).unwrap()).unwrap();
+        verify_card_signature(&decoded, DEFAULT_REGISTRY_KEY).unwrap();
+        assert_eq!(decoded.osv_risk_baseline, card.osv_risk_baseline);
+        for mutation in 0..4 {
+            let mut tampered = card.clone();
+            let baseline = tampered.osv_risk_baseline.as_mut().unwrap();
+            match mutation {
+                0 => {
+                    baseline
+                        .evidence_scope
+                        .as_mut()
+                        .unwrap()
+                        .versions
+                        .remove("2.0.0");
+                }
+                1 => {
+                    baseline.evidence_scope.as_mut().unwrap().unresolved = false;
+                }
+                2 => {
+                    baseline
+                        .evidence_scope
+                        .as_mut()
+                        .unwrap()
+                        .vulnerability_ids
+                        .remove("OSV-B");
+                }
+                _ => {
+                    baseline.evidence_scope = None;
+                }
+            }
+            assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
+        }
+    }
+
+    #[test]
+    fn osv_scope_validation_refuses_malformed_or_excessive_input_without_mutation() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry.create(sample_input(), 1_000, "initial").unwrap();
+        let mut excessive = osv_scope(&["1.0.0"], false, &["OSV-1"]);
+        excessive.versions = (0..=MAX_OSV_SCOPE_VERSIONS)
+            .map(|index| format!("1.0.{index}"))
+            .collect();
+        for scope in [
+            osv_scope(&[], false, &["OSV-1"]),
+            osv_scope(&["^1.0.0"], false, &["OSV-1"]),
+            osv_scope(&["1.0.0"], false, &["OSV invalid"]),
+            excessive,
+        ] {
+            assert!(
+                registry
+                    .refresh_osv_risk_with_scope(
+                        "npm:@acme/plugin",
+                        &scope,
+                        false,
+                        1_001,
+                        "invalid-scope"
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                registry
+                    .latest_verified_card("npm:@acme/plugin")
+                    .unwrap()
+                    .unwrap()
+                    .card_hash,
+                initial.card_hash
+            );
+        }
+    }
+
+    #[test]
+    fn osv_scope_union_limits_never_evict_old_versions_or_findings() {
+        for bound_versions in [true, false] {
+            let mut registry = TrustCardRegistry::default();
+            registry.create(sample_input(), 1_000, "initial").unwrap();
+            let mut scope = osv_scope(&["1.0.0"], false, &["OSV-OLD"]);
+            let incoming = if bound_versions {
+                scope.versions = (0..MAX_OSV_SCOPE_VERSIONS)
+                    .map(|index| format!("1.0.{index}"))
+                    .collect();
+                osv_scope(&["2.0.0"], false, &["OSV-NEW"])
+            } else {
+                scope.vulnerability_ids = (0..MAX_OSV_REFRESH_VULNERABILITIES)
+                    .map(|index| format!("OSV-{index:05}"))
+                    .collect();
+                osv_scope(&["1.0.0"], false, &["OSV-NEW"])
+            };
+            let previous = apply_osv_scope(&mut registry, &scope, false, 1_001);
+            assert!(
+                registry
+                    .refresh_osv_risk_with_scope(
+                        "npm:@acme/plugin",
+                        &incoming,
+                        false,
+                        1_002,
+                        "scope-union-bound"
+                    )
+                    .is_err()
+            );
+            let retained = registry
+                .latest_verified_card("npm:@acme/plugin")
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.card_hash, previous.card_hash);
+            assert_eq!(
+                retained
+                    .osv_risk_baseline
+                    .as_ref()
+                    .unwrap()
+                    .evidence_scope
+                    .as_ref(),
+                Some(&scope)
+            );
         }
     }
 

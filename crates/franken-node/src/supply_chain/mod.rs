@@ -24,6 +24,7 @@ pub mod trust_card;
 pub mod trust_card_registry_store;
 pub mod trust_graph;
 pub mod typosquat;
+pub mod vulnerability_audit;
 
 #[cfg(all(test, feature = "engine"))]
 mod tests {
