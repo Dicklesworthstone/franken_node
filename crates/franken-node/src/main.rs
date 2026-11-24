@@ -735,6 +735,7 @@ struct TrustSyncAuditRefreshReport {
     vulnerabilities_found: usize,
     network_errors: usize,
     risk_lowering_rejections: usize,
+    incomplete_version_scopes: usize,
     warnings: Vec<String>,
 }
 
@@ -750,6 +751,9 @@ struct TrustSyncCliReport {
     vulnerabilities: usize,
     network_errors: usize,
     risk_lowering_rejections: usize,
+    incomplete_version_scopes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revocation_frontier_block_reason: Option<String>,
     cache_hits: usize,
     cache_misses: usize,
     stale_refreshes: usize,
@@ -20300,6 +20304,199 @@ mod trust_scan_tests {
     }
 
     #[test]
+    fn trust_sync_frontier_admission_requires_force_and_every_coverage_gate() {
+        let complete = TrustSyncAuditRefreshReport {
+            refreshed_count: 2,
+            vulnerabilities_found: 1,
+            ..TrustSyncAuditRefreshReport::default()
+        };
+        assert!(trust_sync_frontier_block_reason(true, &complete).is_none());
+        assert!(
+            trust_sync_frontier_block_reason(false, &complete)
+                .unwrap()
+                .contains("forced network refresh")
+        );
+        for (report, reason) in [
+            (
+                TrustSyncAuditRefreshReport {
+                    network_errors: 1,
+                    ..complete.clone()
+                },
+                "network or refresh error",
+            ),
+            (
+                TrustSyncAuditRefreshReport {
+                    risk_lowering_rejections: 1,
+                    ..complete.clone()
+                },
+                "clearance rejection",
+            ),
+            (
+                TrustSyncAuditRefreshReport {
+                    incomplete_version_scopes: 1,
+                    ..complete.clone()
+                },
+                "incomplete version scope",
+            ),
+        ] {
+            assert!(
+                trust_sync_frontier_block_reason(true, &report)
+                    .unwrap()
+                    .contains(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn trust_sync_positive_narrow_queries_and_refused_clean_queries_cannot_advance_frontier() {
+        use supply_chain::trust_card::{OsvRiskEvidenceScope, OsvRiskRefreshOutcome};
+
+        let now_secs = 2_000;
+        let mut registry =
+            supply_chain::trust_card::fixture_registry(now_secs).expect("fixture trust registry");
+        let scope = OsvRiskEvidenceScope {
+            versions: BTreeSet::from(["1.4.2".to_owned(), "2.0.0".to_owned()]),
+            unresolved: false,
+            vulnerability_ids: BTreeSet::from(["OSV-WIDER-SCOPE".to_owned()]),
+        };
+        assert!(matches!(
+            registry
+                .refresh_osv_risk_with_scope(
+                    "npm:@acme/auth-guard",
+                    &scope,
+                    false,
+                    now_secs,
+                    "wide-scope"
+                )
+                .unwrap(),
+            OsvRiskRefreshOutcome::Updated(_)
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = TrustCardCliRegistryState {
+            path: directory.path().join("scoped-trust-sync.json"),
+            registry,
+            cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
+        };
+        let positive =
+            refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, version| {
+                if name == "@acme/auth-guard" {
+                    assert_eq!(version, Some("1.4.2"));
+                }
+                Ok(TrustScanAuditMetadata {
+                    vulnerability_ids: if name == "@acme/auth-guard" {
+                        vec!["OSV-NARROW-QUERY".to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                    risk_lowering_authenticated: true,
+                })
+            });
+        assert_eq!(positive.network_errors, 0);
+        assert_eq!(positive.risk_lowering_rejections, 0);
+        assert_eq!(positive.incomplete_version_scopes, 1);
+        assert_eq!(positive.vulnerabilities_found, 1);
+        assert!(positive.refreshed_count > 0);
+        assert!(
+            trust_sync_frontier_block_reason(true, &positive)
+                .unwrap()
+                .contains("incomplete version scope")
+        );
+        assert!(
+            positive
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("single-version OSV refresh does not cover"))
+        );
+        let retained = state
+            .registry
+            .read("npm:@acme/auth-guard", now_secs + 120, "read-positive")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained
+                .osv_risk_baseline
+                .as_ref()
+                .unwrap()
+                .evidence_scope
+                .as_ref()
+                .unwrap()
+                .vulnerability_ids,
+            BTreeSet::from(["OSV-WIDER-SCOPE".to_owned(), "OSV-NARROW-QUERY".to_owned()])
+        );
+        let clean = refresh_trust_sync_audit_with(&mut state, now_secs + 240, true, |_, _| {
+            Ok(TrustScanAuditMetadata {
+                vulnerability_ids: Vec::new(),
+                risk_lowering_authenticated: true,
+            })
+        });
+        assert_eq!(clean.network_errors, 0);
+        assert_eq!(clean.risk_lowering_rejections, 1);
+        assert_eq!(clean.incomplete_version_scopes, 1);
+        let reason = trust_sync_frontier_block_reason(true, &clean).unwrap();
+        assert!(reason.contains("clearance rejection"));
+        assert!(reason.contains("incomplete version scope"));
+        assert_eq!(
+            state
+                .registry
+                .read("npm:@acme/auth-guard", now_secs + 240, "read-refused")
+                .unwrap()
+                .unwrap()
+                .card_hash,
+            retained.card_hash
+        );
+    }
+
+    #[test]
+    fn trust_sync_nonexact_card_queries_cannot_certify_complete_version_coverage() {
+        let dependency = RunPackageDependency {
+            extension_id: "npm:frontier-unresolved".to_owned(),
+            dependency_name: "frontier-unresolved".to_owned(),
+            version_requirement: "^1.0.0".to_owned(),
+            section: "dependencies".to_owned(),
+            lockfile_metadata: TrustScanLockfileMetadata::default(),
+        };
+        let input = build_trust_scan_card_input(
+            &dependency,
+            None,
+            &TrustScanDeepMetadata::default(),
+            &TrustScanAuditMetadata::default(),
+            1_000,
+        );
+        let mut registry = TrustCardRegistry::default();
+        registry.create(input, 1_000, "unresolved-input").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = TrustCardCliRegistryState {
+            path: directory.path().join("unresolved-trust-sync.json"),
+            registry,
+            cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
+        };
+        let cached = refresh_trust_sync_audit_with(&mut state, 1_001, false, |_, _| {
+            panic!("fresh cached cards do not make an OSV query")
+        });
+        assert_eq!(cached.incomplete_version_scopes, 0);
+        assert!(trust_sync_frontier_block_reason(false, &cached).is_some());
+
+        let queried = refresh_trust_sync_audit_with(&mut state, 1_002, true, |_, version| {
+            assert_eq!(version, Some("^1.0.0"));
+            Ok(TrustScanAuditMetadata {
+                vulnerability_ids: Vec::new(),
+                risk_lowering_authenticated: true,
+            })
+        });
+        assert_eq!(queried.refreshed_count, 1);
+        assert_eq!(queried.network_errors, 0);
+        assert_eq!(queried.risk_lowering_rejections, 0);
+        assert_eq!(queried.incomplete_version_scopes, 1);
+        assert!(
+            trust_sync_frontier_block_reason(true, &queried)
+                .unwrap()
+                .contains("incomplete version scope")
+        );
+    }
+
+    #[test]
     fn refresh_trust_sync_audit_with_updates_vulnerable_cards_and_records_warnings() {
         let now_secs = 2_000;
         let registry =
@@ -21457,23 +21654,26 @@ mod trust_command_tests {
             vulnerabilities_found: 6,
             network_errors: 7,
             risk_lowering_rejections: 0,
+            incomplete_version_scopes: 8,
             warnings: Vec::new(),
         };
 
-        let rendered = render_trust_sync_summary_from_report(&trust_sync_cli_report(
-            &cards,
-            &sync_report,
-            &audit_report,
-            true,
-        ));
+        let report = trust_sync_cli_report(&cards, &sync_report, &audit_report, true);
+        let rendered = render_trust_sync_summary_from_report(&report);
+        let json = serde_json::to_value(&report).unwrap();
 
         assert!(rendered.contains("force=true"));
         assert!(rendered.contains("refreshed=5"));
         assert!(rendered.contains("vulnerabilities=6"));
         assert!(rendered.contains("network_errors=7"));
+        assert!(rendered.contains("incomplete_version_scopes=8"));
         assert!(rendered.contains("forced_refreshes=4"));
         assert!(rendered.contains("revoked=1"));
         assert!(rendered.contains("quarantined=1"));
+        assert_eq!(json["incomplete_version_scopes"], 8);
+        let reason = json["revocation_frontier_block_reason"].as_str().unwrap();
+        assert!(reason.contains("7 network or refresh error(s)"));
+        assert!(reason.contains("8 trust card(s) have incomplete version scope"));
     }
 
     #[test]
@@ -31121,6 +31321,8 @@ fn trust_sync_cli_report(
         vulnerabilities: audit_report.vulnerabilities_found,
         network_errors: audit_report.network_errors,
         risk_lowering_rejections: audit_report.risk_lowering_rejections,
+        incomplete_version_scopes: audit_report.incomplete_version_scopes,
+        revocation_frontier_block_reason: trust_sync_frontier_block_reason(force, audit_report),
         cache_hits: sync_report.cache_hits,
         cache_misses: sync_report.cache_misses,
         stale_refreshes: sync_report.stale_refreshes,
@@ -31134,13 +31336,14 @@ fn trust_sync_cli_report(
 
 fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String {
     format!(
-        "trust sync completed: force={} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={}",
+        "trust sync completed: force={} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} incomplete_version_scopes={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={}",
         report.force,
         report.cards,
         report.refreshed,
         report.vulnerabilities,
         report.network_errors,
         report.risk_lowering_rejections,
+        report.incomplete_version_scopes,
         report.cache_hits,
         report.cache_misses,
         report.stale_refreshes,
@@ -31149,6 +31352,38 @@ fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String 
         report.quarantined,
         report.critical_risk
     )
+}
+
+/// A successful individual query proves freshness only for its complete scope.
+/// A refusal or an uncovered retained version prevents the aggregate frontier
+/// from advancing even when every HTTP request succeeded.
+fn trust_sync_frontier_block_reason(
+    force: bool,
+    report: &TrustSyncAuditRefreshReport,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if !force {
+        reasons.push("a forced network refresh is required".to_owned());
+    }
+    if report.network_errors > 0 {
+        reasons.push(format!(
+            "{} network or refresh error(s)",
+            report.network_errors
+        ));
+    }
+    if report.risk_lowering_rejections > 0 {
+        reasons.push(format!(
+            "{} OSV clearance rejection(s)",
+            report.risk_lowering_rejections
+        ));
+    }
+    if report.incomplete_version_scopes > 0 {
+        reasons.push(format!(
+            "{} trust card(s) have incomplete version scope",
+            report.incomplete_version_scopes
+        ));
+    }
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
 fn trust_sync_card_needs_network_refresh(
@@ -31204,6 +31439,13 @@ where
         };
         if !trust_sync_card_needs_network_refresh(&card, now_secs, state.cache_ttl_secs, force) {
             continue;
+        }
+        if !card.osv_scope_covered_by_card_version() {
+            report.incomplete_version_scopes = report.incomplete_version_scopes.saturating_add(1);
+            report.warnings.push(format!(
+                "{}@{}: a single-version OSV refresh does not cover the retained version scope or unresolved placements; findings are retained, but this sync cannot advance the revocation frontier",
+                package_name, card.extension.version
+            ));
         }
 
         match fetcher(package_name, Some(card.extension.version.as_str())) {
@@ -48907,16 +49149,19 @@ fn main() -> Result<()> {
                 }
                 // The revocation frontier advances only on a forced refresh in
                 // which every trust signal was fetched from the network without
-                // error; cached answers and partial failures prove nothing new
-                // about revocation freshness (bd-reality-20260923-26n9r.1).
-                if args.force && audit_report.network_errors == 0 {
+                // error and without a clearance refusal or uncovered retained
+                // version scope. Narrow answers cannot certify wider freshness
+                // (bd-reality-20260923-26n9r.1).
+                let frontier_block_reason =
+                    trust_sync_frontier_block_reason(args.force, &audit_report);
+                if frontier_block_reason.is_none() {
                     if let Err(err) =
                         supply_chain::trust_card_registry_store::record_revocation_frontier(
                             &state.path,
                             &state.trust_config,
                             now_secs,
                             &format!(
-                                "trust sync --force ({} trust card(s) refreshed from the network, 0 network errors)",
+                                "trust sync --force ({} trust card(s) refreshed from the network, 0 network errors, 0 clearance rejections, complete version scopes)",
                                 audit_report.refreshed_count
                             ),
                         )
@@ -48927,10 +49172,10 @@ fn main() -> Result<()> {
                             anyhow::anyhow!(err.to_string()),
                         );
                     }
-                } else if !args.json {
-                    eprintln!(
-                        "note: revocation frontier not advanced (requires `trust sync --force` with no network errors)"
-                    );
+                } else if !args.json
+                    && let Some(reason) = frontier_block_reason
+                {
+                    eprintln!("note: revocation frontier not advanced: {reason}");
                 }
                 for warning in &audit_report.warnings {
                     eprintln!("warning: {warning}");

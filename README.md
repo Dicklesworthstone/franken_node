@@ -3632,6 +3632,12 @@ unresolved placements. Even a complete clean audit still needs authenticated
 default-endpoint evidence and the existing exact-artifact checks to lower risk;
 quarantine, revocation, and independent behavioral findings retain their authority.
 
+`trust sync --json` reports `incomplete_version_scopes` when a single-card query
+cannot cover the retained version set. Such queries may add findings, but a
+forced sync advances the signed revocation freshness frontier only when there
+are no network errors, refused clearances, or incomplete version scopes. Use
+`trust scan --audit` against the captured project to check its installed versions.
+
 `--deep` fetches package metadata from the public npm registry
 (`registry.npmjs.org`) and dependent counts from `api.deps.dev`; those
 two hosts, over HTTPS, are the only ones the scan will contact, so
