@@ -7,6 +7,10 @@
 //! integrity, terminal declaration and nondeterminism transcript structure, not
 //! graph resolution, IR correctness, event values, provider outcomes, cleanup
 //! certification or replayability.
+//! Frozen captures also bind the package's portable entry identity and active
+//! conditions to its capsule and require a retained UTF-8 entry. JavaScript
+//! entry bytes must match their exact hashbang preparation; TypeScript
+//! preparation and graph reconstruction still require native replay.
 //! Run references and terminal events must agree with the capture when present.
 //! These are consistency checks on signed assertions, not independent signature
 //! verification of an original run receipt that the bundle does not contain.
@@ -933,11 +937,15 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
             "expected signed integer clock epoch milliseconds",
         ));
     }
-    if let Some(sources) = payload.get("module_sources") {
-        module_capsule::verify(sources)?;
-    }
     for field in ["package", "orchestrator", "runtime"] {
         object(&payload[field], ".payload.settings")?;
+    }
+    if let Some(sources) = payload.get("module_sources") {
+        module_capsule::verify_capture_binding(
+            sources,
+            &payload["package"],
+            &payload["orchestrator"],
+        )?;
     }
     nonblank(
         &payload["package"]["extension_id"],
@@ -1410,6 +1418,7 @@ pub(in crate::incident_bundle) mod tests {
         // The source capsule comes from the real producer. The surrounding
         // metadata remains a structural fixture, not an executed guest run.
         value["module_sources"] = module_capsule::tests::producer_sources();
+        value["package"] = module_capsule::tests::producer_package();
         let original = captured(&value);
         let metadata = verify(&original).unwrap().unwrap();
         assert!(
@@ -1940,6 +1949,7 @@ pub(in crate::incident_bundle) mod tests {
                 serde_json::from_str(initial["native_replay"]["payload_json"].as_str().unwrap())
                     .unwrap();
             payload["module_sources"] = sources;
+            payload["package"] = module_capsule::tests::producer_package();
             initial["native_replay"] = captured(&payload)["native_replay"].clone();
             initial
         };
@@ -1960,6 +1970,66 @@ pub(in crate::incident_bundle) mod tests {
                 !format!("{error:?}").contains("PRIVATE-SOURCE-SENTINEL"),
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn signed_frozen_captures_cannot_mix_entry_source_identity_or_conditions() {
+        use super::super::verify_incident_bundle;
+
+        let initial = with_run_context("completed");
+        let mut payload: Value =
+            serde_json::from_str(initial["native_replay"]["payload_json"].as_str().unwrap())
+                .unwrap();
+        payload["module_sources"] = module_capsule::tests::producer_sources();
+        payload["package"] = module_capsule::tests::producer_package();
+        let mut valid = initial.clone();
+        valid["native_replay"] = captured(&payload)["native_replay"].clone();
+        verify_incident_bundle(&signed_bundle(valid), &signing_key().verifying_key()).unwrap();
+
+        for case in [
+            "source",
+            "source-file",
+            "module-root",
+            "missing-origin",
+            "conditions",
+            "non-utf8",
+        ] {
+            let mut candidate = payload.clone();
+            match case {
+                "source" => {
+                    candidate["package"]["source"] = json!("throw 'PRIVATE-UNBOUND-ENTRY';")
+                }
+                "source-file" => {
+                    candidate["package"]["source_file"] =
+                        json!("/captured/PRIVATE-UNBOUND-ENTRY.mjs")
+                }
+                "module-root" => {
+                    candidate["package"]["module_root"] = json!("/PRIVATE-UNBOUND-ROOT")
+                }
+                "missing-origin" => candidate["package"]["module_root"] = Value::Null,
+                "conditions" => {
+                    candidate["orchestrator"]["module_conditions"] = json!(["development"])
+                }
+                "non-utf8" => {
+                    candidate["module_sources"] =
+                        module_capsule::tests::entry_bytes_sources("app.mjs", b"\xff")
+                }
+                _ => unreachable!(),
+            }
+            let mut initial = initial.clone();
+            initial["native_replay"] = captured(&candidate)["native_replay"].clone();
+            // Re-sign the complete bundle, payload digest and timeline. A bad
+            // outer signature must not mask the internal entry contradiction.
+            let error =
+                verify_incident_bundle(&signed_bundle(initial), &signing_key().verifying_key())
+                    .unwrap_err();
+            assert!(
+                matches!(&error, IncidentBundleError::Structure { path, .. }
+                    if path == "$.initial_state_snapshot.native_replay.payload.module_sources"),
+                "{case}: {error}"
+            );
+            assert!(!error.to_string().contains("PRIVATE-UNBOUND"));
         }
     }
 

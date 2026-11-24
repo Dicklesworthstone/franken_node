@@ -1315,9 +1315,7 @@ impl NativeSessionDrainAttestation {
         let threshold =
             chrono::TimeDelta::from_std(maximum_age.min(MAX_NATIVE_DRAIN_ATTESTATION_AGE))
                 .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
-        if self.observed_at > now
-            || now.signed_duration_since(self.observed_at) >= threshold
-        {
+        if self.observed_at > now || now.signed_duration_since(self.observed_at) >= threshold {
             return Err(FleetTransportError::stale_state(
                 "native supervisor drain attestation is future-dated or expired; obtain a fresh supervisor observation",
             ));
@@ -2315,7 +2313,8 @@ impl FleetGuardedPolicyReceipt {
                 .as_ref()
                 .and_then(|drain| drain.supervisor_attestation.as_ref())
             {
-                attestation.validate_freshness_with_limit(self.accepted_at, evidence.stale_after)?;
+                attestation
+                    .validate_freshness_with_limit(self.accepted_at, evidence.stale_after)?;
             }
             if node.zone_id == "all" {
                 return Err(FleetTransportError::serialization(
@@ -5882,13 +5881,9 @@ mod tests {
                 actions: vec![hold.clone()],
                 nodes: vec![node],
             };
-            let ordinary = super::fleet_native_drain_evidence(
-                &state,
-                &required,
-                now,
-                Duration::from_secs(30),
-            )
-            .unwrap();
+            let ordinary =
+                super::fleet_native_drain_evidence(&state, &required, now, Duration::from_secs(30))
+                    .unwrap();
             let held = super::fleet_native_session_hold_evidence(
                 &state,
                 &hold.action_id,

@@ -252,7 +252,8 @@ impl FleetHttpEpochBarrierResponse {
                 FleetTransportError::serialization("invalid epoch-barrier supervisor key")
             })?;
             attestation.verify(drain, &node.node_id, &node.zone_id, &root)?;
-            attestation.validate_freshness_with_limit(evidence.observed_at, evidence.stale_after)?;
+            attestation
+                .validate_freshness_with_limit(evidence.observed_at, evidence.stale_after)?;
         }
         if let Some(proof) = &self.commit_proof {
             proof.verify_integrity(evidence, certificate)?;

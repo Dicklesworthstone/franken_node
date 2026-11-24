@@ -698,7 +698,7 @@ fn timestamp_valid(value: &str) -> bool {
 
 // Parse the producer's absolute path lexically. An offline verifier must not
 // consult the original filesystem or interpret a Linux path as a Windows one.
-fn absolute_path_parts(value: &str) -> Option<Vec<&str>> {
+pub(crate) fn absolute_path_parts(value: &str) -> Option<Vec<&str>> {
     if value.is_empty() || value.as_bytes().contains(&0) {
         return None;
     }

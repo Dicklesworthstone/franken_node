@@ -14,9 +14,10 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::{MAX_PAYLOAD_BYTES, Result, ct_str_eq, exact, invalid, text};
+use super::{MAX_PAYLOAD_BYTES, Result, array, ct_str_eq, exact, invalid, text};
+use crate::native_session::absolute_path_parts;
 
 const FIELD: &str = ".payload.module_sources";
 const MAGIC: &[u8; 8] = b"FNSGCAP1";
@@ -27,6 +28,7 @@ const MAX_HEADER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INPUTS: usize = 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_DEPTH: usize = 64;
+const MAX_LINK_HOPS: usize = 40;
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_CAPTURE_BYTES: usize = 32 * 1024 * 1024;
@@ -156,7 +158,7 @@ pub struct SourceCapsuleSummary {
 /// The caller authenticates and bounds these bytes before inspection. Incident
 /// verification additionally supplies its separately captured graph commitment.
 pub(crate) fn inspect_authenticated(bytes: &[u8]) -> Result<SourceCapsuleSummary> {
-    verify_frame(bytes, None, None)
+    verify_frame(bytes, None, None).map(|frame| frame.summary)
 }
 
 /// Inspect retained pre-entry sources against the independently authenticated
@@ -167,14 +169,113 @@ pub(crate) fn inspect_admitted(
     graph_hash: &str,
     entrypoint: &str,
 ) -> Result<SourceCapsuleSummary> {
-    verify_frame(bytes, Some(graph_hash), Some(entrypoint))
+    verify_frame(bytes, Some(graph_hash), Some(entrypoint)).map(|frame| frame.summary)
 }
 
-fn verify_frame(
-    bytes: &[u8],
+// Byte-only inspection does not require a resolvable entry: an incomplete or
+// pre-entry graph remains useful authenticated forensic data.
+struct VerifiedFrame<'a> {
+    header: Header,
+    payload: &'a [u8],
+    summary: SourceCapsuleSummary,
+}
+
+impl VerifiedFrame<'_> {
+    /// Resolve only recorded physical observations, never the auditor's host.
+    /// Expand a link before interpreting '..' in its target or remaining path.
+    fn entry_file(&self) -> Result<(&str, &[u8])> {
+        let mut entries = BTreeMap::new();
+        let mut offset = 0_usize;
+        for input in &self.header.inputs {
+            let source = match &input.content {
+                Content::File { bytes, .. } => {
+                    let end = offset.checked_add(*bytes).ok_or_else(|| {
+                        invalid(FIELD, "source capsule entry byte length overflow")
+                    })?;
+                    let source = self.payload.get(offset..end).ok_or_else(|| {
+                        invalid(FIELD, "source capsule entry bytes are incomplete")
+                    })?;
+                    offset = end;
+                    Some(source)
+                }
+                _ => None,
+            };
+            entries.insert(input.path.as_str(), (&input.content, source));
+        }
+
+        let mut pending: VecDeque<_> = self.header.entrypoint.split('/').collect();
+        let mut resolved = Vec::new();
+        let mut links = 0_usize;
+        while let Some(component) = pending.pop_front() {
+            match component {
+                "" | "." => continue,
+                ".." => {
+                    if resolved.pop().is_none() {
+                        return Err(invalid(FIELD, "source capsule entry escapes its root"));
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let mut path = resolved.join("/");
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(component);
+            let (recorded_path, (content, source)) = entries
+                .get_key_value(path.as_str())
+                .ok_or_else(|| invalid(FIELD, "source capsule entry observation is missing"))?;
+            match content {
+                Content::Symlink { target, .. } => {
+                    links += 1;
+                    if links > MAX_LINK_HOPS {
+                        return Err(invalid(
+                            FIELD,
+                            "source capsule entry exceeds its link bound",
+                        ));
+                    }
+                    let components = target.split('/');
+                    if resolved.len() + components.clone().count() + pending.len() > MAX_PATH_DEPTH
+                        || path.len()
+                            + target.len()
+                            + pending.iter().map(|part| part.len() + 1).sum::<usize>()
+                            > MAX_PATH_BYTES
+                    {
+                        return Err(invalid(
+                            FIELD,
+                            "source capsule entry exceeds its path bound",
+                        ));
+                    }
+                    let mut target: VecDeque<_> = components.collect();
+                    target.append(&mut pending);
+                    pending = target;
+                }
+                Content::Directory => resolved.push(component),
+                Content::File { .. } if pending.is_empty() => {
+                    return source
+                        .map(|source| (*recorded_path, source))
+                        .ok_or_else(|| invalid(FIELD, "source capsule entry bytes are missing"));
+                }
+                _ => {
+                    return Err(invalid(
+                        FIELD,
+                        "source capsule entry is not a captured file",
+                    ));
+                }
+            }
+        }
+        Err(invalid(
+            FIELD,
+            "source capsule entry is not a captured file",
+        ))
+    }
+}
+
+fn verify_frame<'a>(
+    bytes: &'a [u8],
     graph_hash: Option<&str>,
     entrypoint: Option<&str>,
-) -> Result<SourceCapsuleSummary> {
+) -> Result<VerifiedFrame<'a>> {
     if bytes.len() < PREFIX_BYTES || &bytes[..8] != MAGIC {
         return Err(invalid(FIELD, "invalid source capsule framing"));
     }
@@ -343,9 +444,9 @@ fn verify_frame(
         };
         counts[kind] += 1;
     }
-    Ok(SourceCapsuleSummary {
-        schema_version: header.schema_version,
-        graph_input_hash: header.graph_hash,
+    let summary = SourceCapsuleSummary {
+        schema_version: header.schema_version.clone(),
+        graph_input_hash: header.graph_hash.clone(),
         graph_hash_recomputed: false,
         capsule_bytes: bytes.len(),
         payload_bytes: payload.len(),
@@ -362,10 +463,15 @@ fn verify_frame(
         .into(),
         condition_count: options.conditions.as_ref().map(Vec::len),
         additional_condition_count: options.additional_conditions.len(),
+    };
+    Ok(VerifiedFrame {
+        header,
+        payload,
+        summary,
     })
 }
 
-pub(super) fn verify(value: &Value) -> Result<()> {
+fn decode_sources(value: &Value) -> Result<(Vec<u8>, &str)> {
     let sources = exact(
         value,
         FIELD,
@@ -408,6 +514,112 @@ pub(super) fn verify(value: &Value) -> Result<()> {
             "source capsule digest does not match captured bytes",
         ));
     }
+    Ok((bytes, graph_hash))
+}
+
+// FrankenEngine keeps admitted JavaScript unchanged except for a leading
+// hashbang (possibly preceded by a BOM), which becomes byte-for-byte spaces up
+// to the first ECMAScript line terminator. Compare that result without copying
+// or evaluating the source. TypeScript preparation remains engine-owned.
+fn javascript_source_matches(source: &str, prepared: &str) -> bool {
+    if !source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(source)
+        .starts_with("#!")
+    {
+        return source == prepared;
+    }
+    let line_end = source
+        .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+        .unwrap_or(source.len());
+    prepared.len() == source.len()
+        && prepared.as_bytes()[..line_end]
+            .iter()
+            .all(|byte| *byte == b' ')
+        && prepared.as_bytes()[line_end..] == source.as_bytes()[line_end..]
+}
+
+/// Check native entry identity, package conditions and retained UTF-8 source.
+/// Admitted JavaScript must match its prepared entry bytes. TypeScript source
+/// preparation and graph reconstruction still require native replay.
+pub(super) fn verify_capture_binding(
+    value: &Value,
+    package: &Value,
+    orchestrator: &Value,
+) -> Result<()> {
+    let (bytes, graph_hash) = decode_sources(value)?;
+    let frame = verify_frame(&bytes, Some(graph_hash), None)?;
+    let root = absolute_path_parts(text(&package["module_root"], FIELD)?)
+        .ok_or_else(|| invalid(FIELD, "frozen capture requires an absolute module origin"))?;
+    let source_file = absolute_path_parts(text(&package["source_file"], FIELD)?)
+        .ok_or_else(|| invalid(FIELD, "frozen capture requires an absolute entry identity"))?;
+    if !source_file.starts_with(&root)
+        || source_file.len() <= root.len()
+        || source_file[root.len()..].join("/") != frame.header.entrypoint
+    {
+        return Err(invalid(
+            FIELD,
+            "source capsule entry differs from the captured package",
+        ));
+    }
+
+    let mut conditions = BTreeSet::new();
+    if let Some(value) = orchestrator.get("module_conditions") {
+        let values = array(value, FIELD)?;
+        if values.len() > 62 {
+            return Err(invalid(
+                FIELD,
+                "captured package conditions exceed their bound",
+            ));
+        }
+        for value in values {
+            let condition = text(value, FIELD)?;
+            if condition.is_empty()
+                || condition.len() > 128
+                || condition.chars().any(char::is_control)
+            {
+                return Err(invalid(FIELD, "captured package conditions are invalid"));
+            }
+            conditions.insert(condition);
+        }
+    }
+    if frame.header.options.conditions.is_some()
+        || !conditions.iter().copied().eq(frame
+            .header
+            .options
+            .additional_conditions
+            .iter()
+            .map(String::as_str))
+    {
+        return Err(invalid(
+            FIELD,
+            "source capsule conditions differ from captured settings",
+        ));
+    }
+
+    let (physical_path, source) = frame.entry_file()?;
+    let source = std::str::from_utf8(source)
+        .map_err(|_| invalid(FIELD, "source capsule entry is not valid UTF-8"))?;
+    let package_source = text(&package["source"], FIELD)?;
+    let declaration = [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|suffix| physical_path.ends_with(suffix));
+    let typed = !declaration
+        && [".ts", ".mts", ".cts"]
+            .iter()
+            .any(|suffix| physical_path.ends_with(suffix));
+    if !typed && !javascript_source_matches(source, package_source) {
+        return Err(invalid(
+            FIELD,
+            "source capsule entry bytes differ from captured execution",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn verify(value: &Value) -> Result<()> {
+    let (bytes, graph_hash) = decode_sources(value)?;
     verify_frame(&bytes, Some(graph_hash), None).map(|_| ())
 }
 
@@ -427,6 +639,472 @@ pub(super) mod tests {
 
     pub(crate) fn producer_sources() -> Value {
         producer_vectors()[0]["module_sources"].clone()
+    }
+
+    pub(crate) fn producer_package() -> Value {
+        let source = producer_vectors()[0]["project_files"]["app.mjs"].clone();
+        json!({
+            "extension_id":"test",
+            "source":source,
+            "capabilities":["builtin"],
+            "module_root":"/captured",
+            "source_file":"/captured/app.mjs"
+        })
+    }
+
+    fn entry_sources(
+        entrypoint: &str,
+        files: &[(&str, &str)],
+        directories: &[&str],
+        links: &[(&str, &str)],
+    ) -> Value {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("", (Content::Directory, None));
+        for path in directories {
+            inputs.insert(*path, (Content::Directory, None));
+        }
+        for (path, source) in files {
+            inputs.insert(
+                *path,
+                (
+                    Content::File {
+                        bytes: source.len(),
+                        sha256: hex::encode(Sha256::digest(source.as_bytes())),
+                    },
+                    Some(source.as_bytes()),
+                ),
+            );
+        }
+        for (path, target) in links {
+            inputs.insert(
+                *path,
+                (
+                    Content::Symlink {
+                        target: (*target).into(),
+                        sha256: hex::encode(Sha256::digest(target.as_bytes())),
+                    },
+                    None,
+                ),
+            );
+        }
+        let mut payload = Vec::new();
+        let inputs = inputs
+            .into_iter()
+            .map(|(path, (content, source))| {
+                if let Some(source) = source {
+                    payload.extend_from_slice(source);
+                }
+                Input {
+                    path: path.into(),
+                    content,
+                }
+            })
+            .collect();
+        sources_from_parts(
+            &Header {
+                schema_version: SCHEMA.into(),
+                graph_hash: format!("sha256:{}", "e".repeat(64)),
+                entrypoint: entrypoint.into(),
+                options: Options {
+                    symlink_policy: SymlinkPolicy::Contained,
+                    conditions: None,
+                    additional_conditions: Vec::new(),
+                },
+                inputs,
+            },
+            &payload,
+        )
+    }
+
+    pub(crate) fn entry_bytes_sources(entry: &str, raw: &[u8]) -> Value {
+        let (mut header, _) = decode(&entry_sources(entry, &[(entry, "")], &[], &[]));
+        header
+            .inputs
+            .iter_mut()
+            .find(|input| input.path == entry)
+            .unwrap()
+            .content = Content::File {
+            bytes: raw.len(),
+            sha256: hex::encode(Sha256::digest(raw)),
+        };
+        sources_from_parts(&header, raw)
+    }
+
+    #[test]
+    fn native_entry_binding_checks_real_producer_bytes_and_portable_origins() {
+        for (index, vector) in producer_vectors().into_iter().enumerate() {
+            let sources = &vector["module_sources"];
+            let source = vector["project_files"]["app.mjs"].as_str().unwrap();
+            let settings = if index == 1 {
+                json!({"module_conditions":["development","unused"]})
+            } else {
+                json!({})
+            };
+            for (root, file) in [
+                ("/captured", "/captured/app.mjs"),
+                ("/", "/app.mjs"),
+                ("C:\\captured", "C:\\captured\\app.mjs"),
+                ("\\\\host\\share", "\\\\host\\share\\app.mjs"),
+            ] {
+                let package = json!({"module_root":root,"source_file":file,"source":source});
+                verify_capture_binding(sources, &package, &settings).unwrap();
+            }
+            if index == 1 {
+                let package = json!({
+                    "module_root":"/captured",
+                    "source_file":"/captured/app.mjs",
+                    "source":source
+                });
+                verify_capture_binding(
+                    sources,
+                    &package,
+                    &json!({"module_conditions":["unused","development","development"]}),
+                )
+                .unwrap();
+            }
+            let (bytes, graph) = decode_sources(sources).unwrap();
+            let summary = inspect_authenticated(&bytes).unwrap();
+            assert_eq!(summary.graph_input_hash, graph);
+            assert!(!summary.graph_hash_recomputed);
+        }
+    }
+
+    #[test]
+    fn native_entry_conditions_bound_raw_settings_before_set_equivalence() {
+        let vector = producer_vectors()[1].clone();
+        let sources = &vector["module_sources"];
+        let package = json!({
+            "module_root":"/captured",
+            "source_file":"/captured/app.mjs",
+            "source":vector["project_files"]["app.mjs"]
+        });
+        let mut conditions = vec!["development"; 61];
+        conditions.push("unused");
+        verify_capture_binding(sources, &package, &json!({"module_conditions":conditions}))
+            .unwrap();
+        conditions.push("development");
+        let error =
+            verify_capture_binding(sources, &package, &json!({"module_conditions":conditions}))
+                .unwrap_err();
+        assert!(error.to_string().contains("conditions exceed their bound"));
+    }
+
+    #[test]
+    fn native_entry_binding_rejects_resigned_source_path_and_condition_contradictions() {
+        let sources = producer_sources();
+        let package = producer_package();
+        for (field, value) in [
+            ("source", json!("throw 'PRIVATE-DIFFERENT-SOURCE';")),
+            ("module_root", json!("/PRIVATE-OTHER-PROJECT")),
+            ("module_root", json!("captured")),
+            ("module_root", Value::Null),
+            ("source_file", json!("/captured/PRIVATE-OTHER-ENTRY.mjs")),
+            ("source_file", json!("/captured-other/app.mjs")),
+            ("source_file", json!("/captured/../app.mjs")),
+            ("source_file", Value::Null),
+        ] {
+            let mut altered = package.clone();
+            altered[field] = value;
+            let error = verify_capture_binding(&sources, &altered, &json!({})).unwrap_err();
+            assert!(!error.to_string().contains("PRIVATE-"));
+        }
+        for settings in [
+            json!({"module_conditions":["development"]}),
+            json!({"module_conditions":[""]}),
+            json!({"module_conditions":null}),
+            json!({"module_conditions":[1]}),
+        ] {
+            assert!(verify_capture_binding(&sources, &package, &settings).is_err());
+        }
+        let (mut header, payload) = decode(&sources);
+        header.options.conditions = Some(vec!["import".into(), "node".into()]);
+        let altered = sources_from_parts(&header, &payload);
+        verify(&altered).unwrap();
+        assert!(verify_capture_binding(&altered, &package, &json!({})).is_err());
+    }
+
+    #[test]
+    fn native_entry_links_expand_before_parent_segments_without_host_reads() {
+        let source = "module.exports = 'physical target';";
+        let sources = entry_sources(
+            "app.cjs",
+            &[
+                ("entry.cjs", "module.exports = 'wrong lexical target';"),
+                ("nested/entry.cjs", source),
+            ],
+            &["nested", "nested/deep"],
+            &[("app.cjs", "alias/../entry.cjs"), ("alias", "nested/deep")],
+        );
+        let package = json!({
+            "module_root":"/does-not-exist",
+            "source_file":"/does-not-exist/app.cjs",
+            "source":source
+        });
+        verify_capture_binding(&sources, &package, &json!({})).unwrap();
+        let mut wrong = package.clone();
+        wrong["source"] = json!("module.exports = 'wrong lexical target';");
+        assert!(verify_capture_binding(&sources, &wrong, &json!({})).is_err());
+
+        let chained = entry_sources(
+            "linked/app.cjs",
+            &[("nested/entry.cjs", source)],
+            &["nested"],
+            &[
+                ("linked", "nested"),
+                ("nested/app.cjs", "./bridge.cjs"),
+                ("nested/bridge.cjs", "entry.cjs"),
+            ],
+        );
+        let mut package = package;
+        package["source_file"] = json!("/does-not-exist/linked/app.cjs");
+        verify_capture_binding(&chained, &package, &json!({})).unwrap();
+    }
+
+    #[test]
+    fn native_entry_uses_the_physical_source_language_through_links() {
+        let raw = "export const n: number = 1;";
+        let prepared = "export const n = 1;";
+        let sources = entry_sources(
+            "alias.js",
+            &[("entry.ts", raw)],
+            &[],
+            &[("alias.js", "entry.ts")],
+        );
+        let mut package = json!({
+            "module_root":"/captured",
+            "source_file":"/captured/alias.js",
+            "source":prepared
+        });
+        // A JS-spelled link does not turn a physical TypeScript source into JS.
+        verify_capture_binding(&sources, &package, &json!({})).unwrap();
+        let sources = entry_sources(
+            "alias.ts",
+            &[("entry.js", "export const n = 2;")],
+            &[],
+            &[("alias.ts", "entry.js")],
+        );
+        package["source_file"] = json!("/captured/alias.ts");
+        // A TypeScript-spelled link cannot exempt physical JS from byte checks.
+        assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+    }
+
+    #[test]
+    fn native_entry_refuses_incomplete_metadata_and_nonterminating_links() {
+        let source = "export default 1;";
+        let sources = entry_sources("app.mjs", &[("app.mjs", source)], &[], &[]);
+        let package = json!({
+            "module_root":"/captured", "source_file":"/captured/app.mjs", "source":source
+        });
+        for content in [Content::Missing, Content::Directory, Content::FileMetadata] {
+            let (mut header, _) = decode(&sources);
+            header
+                .inputs
+                .iter_mut()
+                .find(|input| input.path == "app.mjs")
+                .unwrap()
+                .content = content;
+            let altered = sources_from_parts(&header, &[]);
+            // A pre-entry forensic capsule may honestly record this state.
+            verify(&altered).unwrap();
+            assert!(verify_capture_binding(&altered, &package, &json!({})).is_err());
+        }
+        let omitted = entry_sources("app.mjs", &[], &[], &[]);
+        verify(&omitted).unwrap();
+        assert!(verify_capture_binding(&omitted, &package, &json!({})).is_err());
+        for links in [
+            vec![("app.mjs", "../outside.mjs")],
+            vec![("app.mjs", "app.mjs")],
+            vec![("app.mjs", "loop.mjs"), ("loop.mjs", "app.mjs")],
+            vec![("app.mjs", "unknown.mjs")],
+        ] {
+            let linked = entry_sources("app.mjs", &[], &[], &links);
+            verify(&linked).unwrap();
+            assert!(verify_capture_binding(&linked, &package, &json!({})).is_err());
+        }
+
+        let package = json!({
+            "module_root":"/captured",
+            "source_file":"/captured/link/app.mjs",
+            "source":source
+        });
+        for target in [
+            "d/".repeat(MAX_PATH_DEPTH - 1) + "d",
+            "x".repeat(MAX_PATH_BYTES),
+        ] {
+            let linked = entry_sources("link/app.mjs", &[], &[], &[("link", &target)]);
+            verify(&linked).unwrap();
+            let error = verify_capture_binding(&linked, &package, &json!({})).unwrap_err();
+            assert!(error.to_string().contains("exceeds its path bound"));
+        }
+    }
+
+    #[test]
+    fn native_entry_link_budget_accepts_boundary_and_finite_repeated_links() {
+        let source = "export default 1;";
+        let mut owned = (0..MAX_LINK_HOPS)
+            .map(|index| {
+                (
+                    format!("chain-{index}"),
+                    if index + 1 == MAX_LINK_HOPS {
+                        "value.mjs".into()
+                    } else {
+                        format!("chain-{}", index + 1)
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let links = owned
+            .iter()
+            .map(|(path, target)| (path.as_str(), target.as_str()))
+            .collect::<Vec<_>>();
+        let sources = entry_sources("chain-0", &[("value.mjs", source)], &[], &links);
+        let mut package = json!({
+            "module_root":"/captured", "source_file":"/captured/chain-0", "source":source
+        });
+        verify_capture_binding(&sources, &package, &json!({})).unwrap();
+        owned.push(("too-many".into(), "chain-0".into()));
+        let links = owned
+            .iter()
+            .map(|(path, target)| (path.as_str(), target.as_str()))
+            .collect::<Vec<_>>();
+        let sources = entry_sources("too-many", &[("value.mjs", source)], &[], &links);
+        package["source_file"] = json!("/captured/too-many");
+        assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+
+        let repeated = entry_sources(
+            "link/link/value.mjs",
+            &[("value.mjs", source)],
+            &[],
+            &[("link", ".")],
+        );
+        package["source_file"] = json!("/captured/link/link/value.mjs");
+        verify_capture_binding(&repeated, &package, &json!({})).unwrap();
+    }
+
+    #[test]
+    fn native_entry_rejects_non_utf8_bytes_even_when_digests_are_valid() {
+        let cases: &[(&str, &[u8])] = &[
+            ("app.mjs", b"\xff"),
+            ("app.cjs", b"#!\xff"),
+            ("app.js", b"\xef\xbb\xbf\xff"),
+            ("app.ts", b"\xff"),
+            ("app.mts", b"\xff"),
+            ("app.cts", b"\xff"),
+        ];
+        for &(entry, raw) in cases {
+            let sources = entry_bytes_sources(entry, raw);
+            let package = json!({
+                "module_root":"/captured",
+                "source_file":format!("/captured/{entry}"),
+                "source":"export default 1;"
+            });
+            verify(&sources).unwrap();
+            let error = verify_capture_binding(&sources, &package, &json!({})).unwrap_err();
+            assert!(
+                error.to_string().contains("not valid UTF-8"),
+                "{entry}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_javascript_entry_matches_exact_hashbang_preparation_and_retains_bom() {
+        let cases = [
+            ("#!x\nexport default 1;", "   \nexport default 1;"),
+            ("#!x\rexport default 1;", "   \rexport default 1;"),
+            ("#!x\r\nexport default 1;", "   \r\nexport default 1;"),
+            (
+                "#!x\u{2028}export default 1;",
+                "   \u{2028}export default 1;",
+            ),
+            (
+                "#!x\u{2029}export default 1;",
+                "   \u{2029}export default 1;",
+            ),
+            (
+                "\u{feff}#!x\nexport default 1;",
+                "      \nexport default 1;",
+            ),
+            ("#!é\nexport default 1;", "    \nexport default 1;"),
+            ("\u{feff}export default 1;", "\u{feff}export default 1;"),
+            ("export default 1;", "export default 1;"),
+        ];
+        for entry in ["app.js", "app.mjs", "app.cjs"] {
+            for (raw, prepared) in cases {
+                let sources = entry_sources(entry, &[(entry, raw)], &[], &[]);
+                let mut package = json!({
+                    "module_root":"/captured",
+                    "source_file":format!("/captured/{entry}"),
+                    "source":prepared
+                });
+                verify_capture_binding(&sources, &package, &json!({})).unwrap();
+                package["source"] = json!(format!("{prepared}// changed"));
+                assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+                if raw != prepared {
+                    package["source"] = json!(raw);
+                    assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+                } else if let Some(without_bom) = raw.strip_prefix('\u{feff}') {
+                    package["source"] = json!(without_bom);
+                    assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+                }
+            }
+        }
+        assert!(javascript_source_matches("#!x", "   "));
+        assert!(!javascript_source_matches("#!x", "  "));
+        assert!(!javascript_source_matches("#!x", "\u{2028}"));
+    }
+
+    #[test]
+    fn native_declaration_entries_do_not_receive_the_typescript_transformation_exception() {
+        for entry in ["types.d.ts", "types.d.mts", "types.d.cts"] {
+            let raw = "declare const n: number;";
+            let sources = entry_sources(entry, &[(entry, raw)], &[], &[]);
+            let mut package = json!({
+                "module_root":"/captured",
+                "source_file":format!("/captured/{entry}"),
+                "source":raw
+            });
+            // Equal bytes do not prove that this declaration graph is admitted.
+            verify_capture_binding(&sources, &package, &json!({})).unwrap();
+            let (bytes, _) = decode_sources(&sources).unwrap();
+            assert!(!inspect_authenticated(&bytes).unwrap().graph_hash_recomputed);
+            package["source"] = json!("export const n = 1;");
+            assert!(verify_capture_binding(&sources, &package, &json!({})).is_err());
+        }
+    }
+
+    #[test]
+    fn native_entry_does_not_claim_to_reproduce_typescript_preparation() {
+        for (entry, raw, prepared) in [
+            (
+                "app.ts",
+                "export const n: number = 1;",
+                "export const n = 1;",
+            ),
+            (
+                "app.mts",
+                "export const n: number = 1;",
+                "export const n = 1;",
+            ),
+            (
+                "app.cts",
+                "const n: number = 1; module.exports = n;",
+                "const n = 1; module.exports = n;",
+            ),
+        ] {
+            let sources = entry_sources(entry, &[(entry, raw)], &[], &[]);
+            let package = json!({
+                "module_root":"/captured",
+                "source_file":format!("/captured/{entry}"),
+                "source":prepared
+            });
+            verify_capture_binding(&sources, &package, &json!({})).unwrap();
+            let (bytes, _) = decode_sources(&sources).unwrap();
+            assert!(!inspect_authenticated(&bytes).unwrap().graph_hash_recomputed);
+            let mut wrong_entry = package;
+            wrong_entry["source_file"] = json!("/captured/other.ts");
+            assert!(verify_capture_binding(&sources, &wrong_entry, &json!({})).is_err());
+        }
     }
 
     fn decode(value: &Value) -> (Header, Vec<u8>) {
