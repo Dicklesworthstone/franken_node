@@ -90,6 +90,10 @@ class BuildSourceIdentityTests(unittest.TestCase):
         revision = "0123456789abcdef" * 2 + "01234567"
         self.assert_revision(self.run_build_script(revision), revision)
 
+    def test_git_free_source_does_not_require_a_git_executable(self):
+        revision = "0123456789abcdef" * 2 + "01234567"
+        self.assert_revision(self.run_build_script(revision, PATH=str(self.workspace)), revision)
+
     def test_unbound_source_stays_unknown(self):
         self.assert_revision(self.run_build_script(), "unknown")
 
@@ -99,6 +103,20 @@ class BuildSourceIdentityTests(unittest.TestCase):
                       "a" * 40 + "\ncargo:rustc-env=INJECTED=1"]:
             with self.subTest(value=value):
                 self.assert_refused(self.run_build_script(value), "lowercase 40-hex Git commit SHA")
+
+    def test_malformed_revision_cannot_fall_back_to_a_valid_checkout(self):
+        self.initialize_git(self.workspace)
+        for value in ["", "A" * 40, "a" * 40 + "\ncargo:rustc-env=INJECTED=1"]:
+            with self.subTest(value=value):
+                self.assert_refused(self.run_build_script(value), "lowercase 40-hex Git commit SHA")
+
+    @unittest.skipUnless(os.name == "posix", "non-Unicode environment bytes require POSIX")
+    def test_non_unicode_declared_revision_is_not_treated_as_absent(self):
+        env = {os.fsencode(key): os.fsencode(value) for key, value in self.env.items()}
+        env[b"FRANKEN_NODE_SOURCE_GIT_SHA"] = b"\xff"
+        result = subprocess.run([str(self.binary)], cwd=self.crate, env=env,
+                                text=True, capture_output=True, timeout=15)
+        self.assert_refused(result, "FRANKEN_NODE_SOURCE_GIT_SHA is not UTF-8")
 
     def test_normal_checkout_embeds_full_head_and_watches_branch_updates(self):
         first = self.initialize_git(self.workspace)

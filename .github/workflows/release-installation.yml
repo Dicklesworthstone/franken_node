@@ -8,6 +8,7 @@ on:
       - 'install.ps1'
       - 'scripts/bootstrap_source.sh'
       - 'packaging/source-siblings.tsv'
+      - 'crates/franken-node/build.rs'
       - '.gitattributes'
       - 'tests/test_source_bootstrap.py'
       - 'tests/test_release_source_binding.py'
@@ -24,6 +25,7 @@ on:
       - 'install.ps1'
       - 'scripts/bootstrap_source.sh'
       - 'packaging/source-siblings.tsv'
+      - 'crates/franken-node/build.rs'
       - '.gitattributes'
       - 'tests/test_source_bootstrap.py'
       - 'tests/test_release_source_binding.py'
@@ -65,10 +67,15 @@ jobs:
           python3 --version > evidence/python-version.txt
           /bin/bash -n install.sh
           python3 -m unittest discover -s tests -p test_install_release_lifecycle.py -v 2>&1 | tee evidence/lifecycle-tests.log
+      - name: Install the pinned compiler for build-script provenance tests
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly-2026-09-21
       - name: Exercise pinned source checkout and installation with real Git
         shell: bash
         run: |
           set -euo pipefail
+          rustc --version --verbose > evidence/build-script-rustc-version.txt
           /bin/bash -n scripts/bootstrap_source.sh
           PATH="/bin:$PATH" python3 -m unittest discover -s tests -p test_source_bootstrap.py -v 2>&1 | tee evidence/source-bootstrap-tests.log
       - name: Exercise release source binding and original installer regressions
@@ -89,6 +96,7 @@ jobs:
             install.sh
             scripts/bootstrap_source.sh
             packaging/source-siblings.tsv
+            crates/franken-node/build.rs
             tests/test_source_bootstrap.py
             tests/test_release_source_binding.py
             tests/test_install_release_lifecycle.py
