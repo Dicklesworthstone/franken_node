@@ -11,6 +11,12 @@
 //! request into the service. The wire contract (paths, bodies, schema tag) is
 //! shared with the client in [`super::fleet_transport_http`].
 //!
+//! The listener awaits a bounded store queue without blocking its reactor.
+//! Deadlines and cancellation prevent queued work from starting. An operation
+//! that has already started remains owned by the store worker until it finishes;
+//! losing its response does not prove a mutation was aborted. Service shutdown
+//! refuses queued work and joins the active operation, including any storage wait.
+//!
 //! Heartbeats are stamped with the coordinator's clock on ingest, so node
 //! staleness is judged on one clock for the whole fleet regardless of client
 //! clock skew.
@@ -20,7 +26,8 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,6 +69,14 @@ pub const FLEET_HTTP_SHUTDOWN: &str = "FLEET_HTTP_SHUTDOWN";
 pub const FLEET_NODE_CREDENTIALS_SCHEMA: &str = "franken-node/fleet-node-credentials/v1";
 pub const MAX_FLEET_NODE_CREDENTIALS_BYTES: usize = 1 << 20;
 pub const MAX_FLEET_NODE_CREDENTIALS: usize = 1_024;
+
+// At most 8 MiB of admitted request bodies can wait behind the active store
+// operation (16 * the guarded-policy limit). Store operations remain serialized;
+// overload must not turn into an unbounded backlog of delayed control effects.
+const FLEET_STORE_QUEUE_CAPACITY: usize = 16;
+// Shorter than the listener's 30-second request budget. This bounds waiting,
+// not an in-flight fsync: once started, a lost answer has an unknown outcome.
+const FLEET_STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Coordinator-owned enrollment. Only token digests belong in this file; the
 /// random bearer tokens remain in the separately provisioned agents' key files.
@@ -424,7 +439,11 @@ pub struct FleetControlPlaneService {
     /// not `Send`, so one dedicated thread owns it for the service's lifetime
     /// and every request is executed there, serialized; that is also the
     /// single-writer discipline the WAL store wants.
-    store: Mutex<Option<mpsc::Sender<StoreJob>>>,
+    store: Mutex<Option<mpsc::SyncSender<StoreJob>>>,
+    /// Serialized with the worker's start decision. Shutdown cancels queued
+    /// operations but must still join any operation that already started.
+    store_closing: Arc<Mutex<bool>>,
+    store_request_timeout: Duration,
     /// Join handle for the store thread so dropping the service synchronously
     /// drains and closes `DurableFleetTransport` (releasing `fleet-state.db`
     /// locks before any successor coordinator incarnation opens `state_dir`).
@@ -440,6 +459,10 @@ pub struct FleetControlPlaneService {
 
 impl Drop for FleetControlPlaneService {
     fn drop(&mut self) {
+        *self
+            .store_closing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         let mut sender = match self.store.lock() {
             Ok(sender) => sender,
             Err(poisoned) => poisoned.into_inner(),
@@ -459,6 +482,240 @@ impl Drop for FleetControlPlaneService {
 
 type StoreJob = Box<dyn FnOnce(&mut DurableFleetTransport, &mut AuthenticatedNodes) + Send>;
 
+#[derive(Clone)]
+struct StoreRequestBudget {
+    deadline: Instant,
+    request_context: Option<(asupersync::Cx, Option<asupersync::Time>)>,
+}
+
+impl From<Instant> for StoreRequestBudget {
+    fn from(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            request_context: None,
+        }
+    }
+}
+
+impl StoreRequestBudget {
+    fn permits_start(&self) -> bool {
+        Instant::now() < self.deadline
+            && self.request_context.as_ref().is_none_or(|(cx, deadline)| {
+                deadline.is_none_or(|deadline| cx.now() < deadline) && cx.checkpoint().is_ok()
+            })
+    }
+}
+
+enum StoreExecution<T> {
+    Queued,
+    Running,
+    Completed(Result<T, FleetTransportError>),
+    Cancelled,
+    Stopped { started: bool },
+    Consumed,
+}
+
+struct StoreCompletion<T> {
+    execution: Mutex<StoreExecution<T>>,
+    ready: Condvar,
+}
+
+/// Only the worker owns this sender. Dropping a queued job or unwinding a
+/// failed worker wakes both synchronous and async callers without certifying
+/// whether an already-started database operation committed.
+struct StoreReply<T> {
+    completion: Arc<StoreCompletion<T>>,
+    notification: Option<asupersync::channel::oneshot::Sender<()>>,
+}
+
+impl<T> StoreReply<T> {
+    fn begin(&self, budget: &StoreRequestBudget) -> bool {
+        let mut execution = self
+            .completion
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(*execution, StoreExecution::Queued) {
+            return false;
+        }
+        if !budget.permits_start() {
+            *execution = StoreExecution::Cancelled;
+            return false;
+        }
+        *execution = StoreExecution::Running;
+        true
+    }
+
+    fn complete(mut self, result: Result<T, FleetTransportError>) {
+        *self
+            .completion
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = StoreExecution::Completed(result);
+        self.completion.ready.notify_all();
+        if let Some(notification) = self.notification.take() {
+            let _ = notification.send_blocking(());
+        }
+    }
+}
+
+impl<T> Drop for StoreReply<T> {
+    fn drop(&mut self) {
+        let mut execution = self
+            .completion
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *execution {
+            StoreExecution::Queued => *execution = StoreExecution::Stopped { started: false },
+            StoreExecution::Running => *execution = StoreExecution::Stopped { started: true },
+            _ => {}
+        }
+        drop(execution);
+        self.completion.ready.notify_all();
+    }
+}
+
+#[derive(Debug)]
+enum StoreRequestFailure {
+    Operation(FleetTransportError),
+    Busy,
+    CancelledBeforeStart,
+    OutcomeUnknown,
+    StoppedBeforeStart,
+}
+
+impl StoreRequestFailure {
+    fn into_transport(self) -> FleetTransportError {
+        match self {
+            Self::Operation(error) => error,
+            Self::Busy => FleetTransportError::lock_contention(
+                "fleet store queue is full; operation was not accepted",
+            ),
+            Self::CancelledBeforeStart => FleetTransportError::stale_state(
+                "fleet store request expired or was cancelled before execution; no operation started",
+            ),
+            Self::OutcomeUnknown => FleetTransportError::io(
+                "fleet store operation started but its answer is unavailable; outcome is unknown, inspect durable state before retrying",
+            ),
+            Self::StoppedBeforeStart => {
+                FleetTransportError::io("fleet store worker stopped before this operation started")
+            }
+        }
+    }
+
+    fn response(self) -> FleetHttpResponse {
+        let (status, outcome, code) = match &self {
+            Self::Operation(error) => return store_error(error),
+            Self::Busy => (503, "busy", "FLEET_HTTP_STORE_QUEUE_FULL"),
+            Self::CancelledBeforeStart => (
+                504,
+                "cancelled_before_start",
+                "FLEET_HTTP_STORE_NOT_STARTED",
+            ),
+            Self::OutcomeUnknown => (504, "outcome_unknown", "FLEET_HTTP_STORE_OUTCOME_UNKNOWN"),
+            Self::StoppedBeforeStart => (503, "store_stopped", "FLEET_HTTP_STORE_STOPPED"),
+        };
+        FleetHttpResponse::problem(status, outcome, code, self.into_transport().to_string())
+    }
+}
+
+struct StoreRequest<T> {
+    completion: Arc<StoreCompletion<T>>,
+    notification: asupersync::channel::oneshot::Receiver<()>,
+    deadline: Instant,
+}
+
+impl<T> StoreRequest<T> {
+    /// Completion wins a race with cancellation/deadline. Otherwise the exact
+    /// start state determines whether refusal is certain or outcome is unknown.
+    fn resolve(execution: &mut StoreExecution<T>) -> Result<T, StoreRequestFailure> {
+        match execution {
+            StoreExecution::Completed(_) => {
+                let StoreExecution::Completed(result) =
+                    std::mem::replace(execution, StoreExecution::Consumed)
+                else {
+                    unreachable!("completed result was inspected under the same mutex")
+                };
+                result.map_err(StoreRequestFailure::Operation)
+            }
+            StoreExecution::Queued => {
+                *execution = StoreExecution::Cancelled;
+                Err(StoreRequestFailure::CancelledBeforeStart)
+            }
+            StoreExecution::Cancelled => Err(StoreRequestFailure::CancelledBeforeStart),
+            StoreExecution::Running | StoreExecution::Stopped { started: true } => {
+                Err(StoreRequestFailure::OutcomeUnknown)
+            }
+            StoreExecution::Stopped { started: false } | StoreExecution::Consumed => {
+                Err(StoreRequestFailure::StoppedBeforeStart)
+            }
+        }
+    }
+
+    fn wait(self) -> Result<T, StoreRequestFailure> {
+        let mut execution = self
+            .completion
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while matches!(*execution, StoreExecution::Queued | StoreExecution::Running) {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, _) = self
+                .completion
+                .ready
+                .wait_timeout(execution, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            execution = next;
+        }
+        Self::resolve(&mut execution)
+    }
+
+    async fn wait_async(mut self, cx: &asupersync::Cx) -> Result<T, StoreRequestFailure> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            let _ =
+                asupersync::time::timeout(cx.now(), remaining, self.notification.recv(cx)).await;
+        }
+        Self::resolve(
+            &mut self
+                .completion
+                .execution
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
+
+impl<T> Drop for StoreRequest<T> {
+    fn drop(&mut self) {
+        let mut execution = self
+            .completion
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*execution, StoreExecution::Queued) {
+            // A cancelled HTTP future owns the queued request. Dropping it
+            // prevents a late side effect; Running remains worker-owned.
+            *execution = StoreExecution::Cancelled;
+        }
+    }
+}
+
+enum PendingFleetResponse {
+    Ready(FleetHttpResponse),
+    Store(StoreRequest<FleetHttpResponse>),
+}
+
+impl From<FleetHttpResponse> for PendingFleetResponse {
+    fn from(response: FleetHttpResponse) -> Self {
+        Self::Ready(response)
+    }
+}
+
 impl std::fmt::Debug for FleetControlPlaneService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FleetControlPlaneService")
@@ -476,6 +733,29 @@ impl FleetControlPlaneService {
     ///
     /// Fails on an unusable token or an unopenable store.
     pub fn open(state_dir: PathBuf, token: &str) -> Result<Self, FleetTransportError> {
+        Self::open_with_store_limits(
+            state_dir,
+            token,
+            FLEET_STORE_QUEUE_CAPACITY,
+            FLEET_STORE_REQUEST_TIMEOUT,
+        )
+    }
+
+    fn open_with_store_limits(
+        state_dir: PathBuf,
+        token: &str,
+        queue_capacity: usize,
+        request_timeout: Duration,
+    ) -> Result<Self, FleetTransportError> {
+        if queue_capacity == 0
+            || queue_capacity > FLEET_STORE_QUEUE_CAPACITY
+            || request_timeout.is_zero()
+            || request_timeout > FLEET_STORE_REQUEST_TIMEOUT
+        {
+            return Err(FleetTransportError::not_initialized(
+                "fleet store limits must be positive and within the service bounds",
+            ));
+        }
         validate_bearer_token(token).map_err(FleetTransportError::not_initialized)?;
         let epoch_key_material = Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes());
         let epoch_signing_key = EpochSigningKey::new(epoch_key_material.as_slice())
@@ -485,7 +765,8 @@ impl FleetControlPlaneService {
         let seqlock_page = Arc::new(SeqlockControlPage::new());
         let startup_seqlock_page = Arc::clone(&seqlock_page);
         let store_dir = state_dir.clone();
-        let (jobs, inbox) = mpsc::channel::<StoreJob>();
+        let (jobs, inbox) = mpsc::sync_channel::<StoreJob>(queue_capacity);
+        let store_closing = Arc::new(Mutex::new(false));
         let (ready, opened) = mpsc::sync_channel::<Result<(), FleetTransportError>>(1);
         let store_thread = std::thread::Builder::new()
             .name("fleet-control-plane-store".to_string())
@@ -568,6 +849,8 @@ impl FleetControlPlaneService {
         }
         Ok(Self {
             store: Mutex::new(Some(jobs)),
+            store_closing,
+            store_request_timeout: request_timeout,
             store_thread: Mutex::new(Some(store_thread)),
             state_dir,
             token: token.to_string(),
@@ -670,9 +953,54 @@ impl FleetControlPlaneService {
         self
     }
 
-    /// Answer one request.
+    /// Answer one request from a synchronous caller with a finite wait budget.
+    /// The live listener uses `handle_async` so storage never blocks its reactor.
     #[must_use]
     pub fn handle(&self, request: FleetHttpRequest<'_>) -> FleetHttpResponse {
+        match self.dispatch_request(request, Instant::now() + self.store_request_timeout) {
+            PendingFleetResponse::Ready(response) => response,
+            PendingFleetResponse::Store(pending) => {
+                pending.wait().unwrap_or_else(StoreRequestFailure::response)
+            }
+        }
+    }
+
+    /// Await the single owned store worker under the request's cancellation
+    /// context and the smaller of its HTTP deadline and store wait budget.
+    pub async fn handle_async(
+        &self,
+        cx: &asupersync::Cx,
+        http_deadline: Option<asupersync::Time>,
+        request: FleetHttpRequest<'_>,
+    ) -> FleetHttpResponse {
+        let budget = http_deadline.map_or(self.store_request_timeout, |deadline| {
+            Duration::from_nanos(deadline.as_nanos().saturating_sub(cx.now().as_nanos()))
+                .min(self.store_request_timeout)
+        });
+        if budget.is_zero() || cx.checkpoint().is_err() {
+            return StoreRequestFailure::CancelledBeforeStart.response();
+        }
+        match self.dispatch_request(
+            request,
+            StoreRequestBudget {
+                deadline: Instant::now() + budget,
+                request_context: Some((cx.clone(), http_deadline)),
+            },
+        ) {
+            PendingFleetResponse::Ready(response) => response,
+            PendingFleetResponse::Store(pending) => pending
+                .wait_async(cx)
+                .await
+                .unwrap_or_else(StoreRequestFailure::response),
+        }
+    }
+
+    fn dispatch_request(
+        &self,
+        request: FleetHttpRequest<'_>,
+        budget: impl Into<StoreRequestBudget>,
+    ) -> PendingFleetResponse {
+        let budget = budget.into();
         let path = request.path.split('?').next().unwrap_or_default();
         let path = if path.len() > 1 {
             path.trim_end_matches('/')
@@ -697,11 +1025,11 @@ impl FleetControlPlaneService {
                 "not_found",
                 "FLEET_HTTP_NOT_FOUND",
                 format!("no fleet route at `{path}`"),
-            );
+            ).into();
         }
         if path == FLEET_HTTP_HEALTH_PATH {
             if request.method != "GET" {
-                return method_not_allowed(request.method, path);
+                return method_not_allowed(request.method, path).into();
             }
             return FleetHttpResponse::json(
                 200,
@@ -712,7 +1040,7 @@ impl FleetControlPlaneService {
                     service: FLEET_HTTP_SERVICE_NAME.to_string(),
                     store: FLEET_HTTP_STORE_LABEL.to_string(),
                 },
-            );
+            ).into();
         }
 
         let Some(principal) = self.authenticate(request.authorization) else {
@@ -721,7 +1049,7 @@ impl FleetControlPlaneService {
                 "unauthorized",
                 "FLEET_HTTP_UNAUTHORIZED",
                 "a valid `Authorization: Bearer <token>` header is required",
-            );
+            ).into();
         };
         let request_limit = if matches!(
             path,
@@ -740,7 +1068,7 @@ impl FleetControlPlaneService {
                     "request body is {} bytes; the route limit is {request_limit}",
                     request.body.len()
                 ),
-            );
+            ).into();
         }
 
         if request.method == "POST" {
@@ -761,7 +1089,7 @@ impl FleetControlPlaneService {
                     "forbidden",
                     "FLEET_HTTP_CREDENTIAL_SCOPE",
                     "credential is not authorized for this fleet operation",
-                );
+                ).into();
             }
         }
         if matches!(&principal, FleetPrincipal::Node { .. })
@@ -773,14 +1101,14 @@ impl FleetControlPlaneService {
                 "forbidden",
                 "FLEET_HTTP_CREDENTIAL_SCOPE",
                 "whole-fleet inventory and convergence require an operator credential",
-            );
+            ).into();
         }
 
         let enrollment = self.node_credentials.clone();
 
         if let Some(encoded_epoch) = epoch_export {
             if request.method != "GET" {
-                return method_not_allowed(request.method, path);
+                return method_not_allowed(request.method, path).into();
             }
             let Some(epoch) = encoded_epoch
                 .parse::<u64>()
@@ -792,7 +1120,7 @@ impl FleetControlPlaneService {
                     "bad_request",
                     "FLEET_HTTP_INVALID_EPOCH",
                     "a retained epoch must be a canonical positive decimal u64",
-                );
+                ).into();
             };
             let Some(signer) = self.epoch_commit_signer.clone() else {
                 return FleetHttpResponse::problem(
@@ -800,10 +1128,10 @@ impl FleetControlPlaneService {
                     "conflict",
                     "FLEET_HTTP_COORDINATOR_SIGNING_KEY_REQUIRED",
                     "retained public epoch proof export requires its provisioned coordinator signing key",
-                );
+                ).into();
             };
             let key = Arc::clone(&self.epoch_signing_key);
-            return self.with_transport(move |transport, _| {
+            return self.with_transport(&budget, move |transport, _| {
                 let (evidence, certificate, proof) =
                     transport.export_epoch_commit(&key, &signer, epoch)?;
                 Ok(FleetHttpResponse::json(
@@ -821,7 +1149,7 @@ impl FleetControlPlaneService {
         }
 
         match (request.method, path) {
-            ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(move |transport, _| {
+            ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(&budget, move |transport, _| {
                 let mut actions = transport.list_actions()?;
                 principal.filter_actions(&mut actions);
                 Ok(FleetHttpResponse::json(
@@ -836,12 +1164,12 @@ impl FleetControlPlaneService {
             ("POST", FLEET_HTTP_ACTIONS_PATH) => {
                 let action: FleetActionRecord = match parse_body(request.body) {
                     Ok(action) => action,
-                    Err(response) => return response,
+                    Err(response) => return response.into(),
                 };
                 if let Err(err) = validate_action_record(&action) {
-                    return invalid_record(&err);
+                    return invalid_record(&err).into();
                 }
-                self.with_transport(move |transport, _| {
+                self.with_transport(&budget, move |transport, _| {
                     transport.publish_action(&action)?;
                     Ok(FleetHttpResponse::json(
                         201,
@@ -861,17 +1189,17 @@ impl FleetControlPlaneService {
                         "conflict",
                         "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
                         "guarded policy publication requires enrolled node credentials and fresh node-authenticated maintenance observations",
-                    );
+                    ).into();
                 };
                 let publication: GuardedFleetPolicyPublication = match parse_body(request.body) {
                     Ok(publication) => publication,
-                    Err(response) => return response,
+                    Err(response) => return response.into(),
                 };
                 if let Err(err) = publication.validate() {
-                    return invalid_record(&err);
+                    return invalid_record(&err).into();
                 }
                 let clock = self.clock;
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     // Project the exact authenticated observations within the
                     // durable transaction, on the same serialized store thread
                     // as heartbeat acceptance. Missing enrolled nodes remain
@@ -897,17 +1225,17 @@ impl FleetControlPlaneService {
                         "conflict",
                         "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
                         "guarded resume requires enrolled node credentials and fresh post-policy maintenance acknowledgements",
-                    );
+                    ).into();
                 };
                 let resume: GuardedFleetNativeSessionResume = match parse_body(request.body) {
                     Ok(resume) => resume,
-                    Err(response) => return response,
+                    Err(response) => return response.into(),
                 };
                 if let Err(error) = resume.validate() {
-                    return invalid_record(&error);
+                    return invalid_record(&error).into();
                 }
                 let clock = self.clock;
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     let receipt = transport
                         .resume_native_sessions_with_maintenance_guard_projected(
                             &resume,
@@ -930,7 +1258,7 @@ impl FleetControlPlaneService {
                         "conflict",
                         "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
                         "epoch-barrier quiescence certification requires enrolled per-node Ed25519 supervisor credentials",
-                    );
+                    ).into();
                 };
                 let mut roots = BTreeMap::new();
                 for node in &enrollment.nodes {
@@ -943,16 +1271,16 @@ impl FleetControlPlaneService {
                                 "enrolled participant `{}/{}` lacks a pinned supervisor_public_key_hex",
                                 node.zone_id, node.node_id
                             ),
-                        );
+                        ).into();
                     };
                     roots.insert((node.zone_id.clone(), node.node_id.clone()), key);
                 }
                 let barrier_req: FleetHttpEpochBarrierRequest = match parse_body(request.body) {
                     Ok(req) => req,
-                    Err(response) => return response,
+                    Err(response) => return response.into(),
                 };
                 if let Err(error) = barrier_req.validate() {
-                    return invalid_record(&error);
+                    return invalid_record(&error).into();
                 }
                 if barrier_req.operation_id.is_some() && self.epoch_commit_signer.is_none() {
                     return FleetHttpResponse::problem(
@@ -960,14 +1288,14 @@ impl FleetControlPlaneService {
                         "conflict",
                         "FLEET_HTTP_COORDINATOR_SIGNING_KEY_REQUIRED",
                         "retryable epoch operations require a provisioned coordinator signing key",
-                    );
+                    ).into();
                 }
                 let clock = self.clock;
                 let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
                 let epoch_commit_signer = self.epoch_commit_signer.clone();
                 let seqlock_page = Arc::clone(&self.seqlock_page);
                 let seqlock_path = self.state_dir.join("seqlock.page");
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     let (evidence, certificate, max_qv, already_committed) =
                         transport.certify_epoch_quiescence_projected(
                             &epoch_signing_key,
@@ -1041,7 +1369,7 @@ impl FleetControlPlaneService {
             }
             ("GET", FLEET_HTTP_NODES_PATH) => {
                 let clock = self.clock;
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     let mut nodes = transport.list_node_statuses()?;
                     if let Some(credentials) = &enrollment {
                         enrolled_node_view(&mut nodes, credentials, authenticated, clock())?;
@@ -1060,10 +1388,10 @@ impl FleetControlPlaneService {
             ("POST", FLEET_HTTP_NODES_PATH) => {
                 let mut status: NodeStatus = match parse_body(request.body) {
                     Ok(status) => status,
-                    Err(response) => return response,
+                    Err(response) => return response.into(),
                 };
                 if let Err(err) = validate_node_status(&status) {
-                    return invalid_record(&err);
+                    return invalid_record(&err).into();
                 }
                 if let FleetPrincipal::Node { zone_id, node_id } = &principal
                     && (status.zone_id != *zone_id || status.node_id != *node_id)
@@ -1073,17 +1401,17 @@ impl FleetControlPlaneService {
                         "forbidden",
                         "FLEET_HTTP_NODE_IDENTITY_MISMATCH",
                         "heartbeat identity does not match the enrolled credential",
-                    );
+                    ).into();
                 }
                 let recorded_at = (self.clock)();
                 if let Some(credentials) = &enrollment
                     && let Err(error) =
                         verify_supervisor_observation(&status, credentials, recorded_at)
                 {
-                    return invalid_record(&error);
+                    return invalid_record(&error).into();
                 }
                 status.last_seen = recorded_at;
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     let root = enrollment.as_ref().and_then(|credentials| {
                         credentials
                             .nodes
@@ -1117,7 +1445,7 @@ impl FleetControlPlaneService {
             }
             ("GET", FLEET_HTTP_STATE_PATH) => {
                 let clock = self.clock;
-                self.with_transport(move |transport, authenticated| {
+                self.with_transport(&budget, move |transport, authenticated| {
                     let mut state = transport.read_shared_state()?;
                     if let Some(credentials) = &enrollment {
                         enrolled_node_view(&mut state.nodes, credentials, authenticated, clock())?;
@@ -1132,23 +1460,25 @@ impl FleetControlPlaneService {
                     ))
                 })
             }
-            (method, path) => method_not_allowed(method, path),
+            (method, path) => method_not_allowed(method, path).into(),
         }
     }
 
-    /// Run `operation` against the durable store on the store thread and wait
-    /// for its answer.
+    /// Enqueue a bounded store operation without blocking the HTTP reactor.
     fn with_transport(
         &self,
+        budget: &StoreRequestBudget,
         operation: impl FnOnce(
             &mut DurableFleetTransport,
             &mut AuthenticatedNodes,
         ) -> Result<FleetHttpResponse, FleetTransportError>
         + Send
         + 'static,
-    ) -> FleetHttpResponse {
-        self.with_store(operation)
-            .unwrap_or_else(|error| store_error(&error))
+    ) -> PendingFleetResponse {
+        match self.enqueue_store(budget.clone(), operation) {
+            Ok(pending) => PendingFleetResponse::Store(pending),
+            Err(error) => error.response().into(),
+        }
     }
 
     fn with_store<T: Send + 'static>(
@@ -1160,31 +1490,70 @@ impl FleetControlPlaneService {
         + Send
         + 'static,
     ) -> Result<T, FleetTransportError> {
-        let (reply, answer) = mpsc::sync_channel(1);
-        let job: StoreJob = Box::new(move |transport, authenticated| {
-            let _ = reply.send(operation(transport, authenticated));
+        self.enqueue_store(Instant::now() + self.store_request_timeout, operation)
+            .and_then(StoreRequest::wait)
+            .map_err(StoreRequestFailure::into_transport)
+    }
+
+    fn enqueue_store<T: Send + 'static>(
+        &self,
+        budget: impl Into<StoreRequestBudget>,
+        operation: impl FnOnce(
+            &mut DurableFleetTransport,
+            &mut AuthenticatedNodes,
+        ) -> Result<T, FleetTransportError>
+        + Send
+        + 'static,
+    ) -> Result<StoreRequest<T>, StoreRequestFailure> {
+        let budget = budget.into();
+        if !budget.permits_start() {
+            return Err(StoreRequestFailure::CancelledBeforeStart);
+        }
+        let deadline = budget.deadline;
+        let completion = Arc::new(StoreCompletion {
+            execution: Mutex::new(StoreExecution::Queued),
+            ready: Condvar::new(),
         });
-        let sent = {
+        let (notification, receiver) = asupersync::channel::oneshot::channel();
+        let reply = StoreReply {
+            completion: Arc::clone(&completion),
+            notification: Some(notification),
+        };
+        let closing = Arc::clone(&self.store_closing);
+        let job: StoreJob = Box::new(move |transport, authenticated| {
+            let started = {
+                let closing = closing
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                !*closing && reply.begin(&budget)
+            };
+            if started {
+                reply.complete(operation(transport, authenticated));
+            }
+        });
+        {
             let sender = match self.store.lock() {
                 Ok(sender) => sender,
                 // Sending cannot leave the sender half-updated, so a poisoned
                 // lock is still safe to use.
                 Err(poisoned) => poisoned.into_inner(),
             };
-            sender
+            let sender = sender
                 .as_ref()
-                .ok_or(())
-                .and_then(|tx| tx.send(job).map_err(|_| ()))
-        };
-        if sent.is_err() {
-            return Err(FleetTransportError::io("fleet store thread has stopped"));
+                .ok_or(StoreRequestFailure::StoppedBeforeStart)?;
+            match sender.try_send(job) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => return Err(StoreRequestFailure::Busy),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(StoreRequestFailure::StoppedBeforeStart);
+                }
+            }
         }
-        match answer.recv() {
-            Ok(result) => result,
-            Err(_) => Err(FleetTransportError::io(
-                "fleet store thread stopped before answering",
-            )),
-        }
+        Ok(StoreRequest {
+            completion,
+            notification: receiver,
+            deadline,
+        })
     }
 }
 
@@ -1387,6 +1756,15 @@ pub fn serve_fleet_control_plane(
         config.max_requests,
     ));
 
+    // Construct every fallible runtime resource before starting the owned
+    // shutdown watcher; failed runtime creation must not leave it running.
+    let runtime =
+        RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| FleetHttpServerError::Runtime {
+                detail: err.to_string(),
+            })?;
+
     // Bridge the shutdown flag (set by a signal handler or the drill limit)
     // into the server's drain. The accept loop polls with a short timeout, so
     // it notices the drain promptly even while idle.
@@ -1406,12 +1784,6 @@ pub fn serve_fleet_control_plane(
         })
     };
 
-    let runtime =
-        RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| FleetHttpServerError::Runtime {
-                detail: err.to_string(),
-            })?;
     let serve_sink = Arc::clone(&on_event);
     let outcome = runtime.block_on(async move {
         let cx = Cx::current().ok_or_else(|| FleetHttpServerError::Runtime {
@@ -1459,7 +1831,7 @@ fn build_fleet_app(
         let control = Arc::clone(control);
         let on_event = Arc::clone(on_event);
         let server = Arc::clone(server);
-        move |_ctx: &RequestContext, request: &mut Request| {
+        move |ctx: &RequestContext, request: &mut Request| {
             let path = request.path().to_string();
             let authorization = request
                 .headers()
@@ -1467,23 +1839,35 @@ fn build_fleet_app(
                 .and_then(|value| std::str::from_utf8(value).ok())
                 .map(str::to_string);
             let body = request.take_body().into_bytes();
-            let response = service.handle(FleetHttpRequest {
-                method,
-                path: &path,
-                authorization: authorization.as_deref(),
-                body: &body,
-            });
-            on_event(&request_event(method, &path, &response));
-            control.record_request(max_requests);
-            if control.shutdown_requested() {
-                server.shutdown();
-            }
-            std::future::ready(
+            let cx = ctx.cx().clone();
+            let deadline = ctx.deadline();
+            let service = Arc::clone(&service);
+            let control = Arc::clone(&control);
+            let on_event = Arc::clone(&on_event);
+            let server = Arc::clone(&server);
+            async move {
+                let response = service
+                    .handle_async(
+                        &cx,
+                        deadline,
+                        FleetHttpRequest {
+                            method,
+                            path: &path,
+                            authorization: authorization.as_deref(),
+                            body: &body,
+                        },
+                    )
+                    .await;
+                on_event(&request_event(method, &path, &response));
+                control.record_request(max_requests);
+                if control.shutdown_requested() {
+                    server.shutdown();
+                }
                 Response::with_status(StatusCode::from_u16(response.status))
                     .header("content-type", b"application/json".to_vec())
                     .header("cache-control", b"no-store".to_vec())
-                    .body(ResponseBody::Bytes(response.body)),
-            )
+                    .body(ResponseBody::Bytes(response.body))
+            }
         }
     };
 
@@ -1526,6 +1910,325 @@ mod tests {
             .expect("open service")
             .with_clock(fixed_clock);
         (dir, service)
+    }
+
+    fn service_with_one_waiter() -> (tempfile::TempDir, FleetControlPlaneService) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = FleetControlPlaneService::open_with_store_limits(
+            dir.path().join("fleet"),
+            TOKEN,
+            1,
+            FLEET_STORE_REQUEST_TIMEOUT,
+        )
+        .expect("open bounded service")
+        .with_clock(fixed_clock);
+        (dir, service)
+    }
+
+    fn stall_store(service: &FleetControlPlaneService) -> (StoreRequest<()>, mpsc::Sender<()>) {
+        let (entered, started) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let pending = service
+            .enqueue_store(Instant::now() + FLEET_STORE_REQUEST_TIMEOUT, move |_, _| {
+                entered.send(()).expect("announce active operation");
+                proceed
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| FleetTransportError::io("test did not release store worker"))
+            })
+            .expect("admit blocking operation");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker reached controlled stall");
+        (pending, release)
+    }
+
+    fn wait_response(pending: PendingFleetResponse) -> FleetHttpResponse {
+        match pending {
+            PendingFleetResponse::Ready(response) => response,
+            PendingFleetResponse::Store(pending) => {
+                pending.wait().unwrap_or_else(StoreRequestFailure::response)
+            }
+        }
+    }
+
+    fn response_code(response: &FleetHttpResponse) -> String {
+        serde_json::from_slice::<serde_json::Value>(&response.body).expect("JSON response")["code"]
+            .as_str()
+            .expect("problem code")
+            .to_owned()
+    }
+
+    #[test]
+    fn bounded_store_overload_refuses_unaccepted_mutation_and_recovers() {
+        let (_dir, service) = service_with_one_waiter();
+        let (active, release) = stall_store(&service);
+        let auth = bearer();
+        let accepted = serde_json::to_vec(&quarantine_action("queued-action")).unwrap();
+        let rejected = serde_json::to_vec(&quarantine_action("overloaded-action")).unwrap();
+        let queued = service.dispatch_request(
+            request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &accepted),
+            Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+        );
+        let overloaded = service.handle(request(
+            "POST",
+            FLEET_HTTP_ACTIONS_PATH,
+            Some(&auth),
+            &rejected,
+        ));
+        release.send(()).unwrap();
+        active.wait().unwrap();
+        let accepted = wait_response(queued);
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert_eq!(overloaded.status, 503);
+        assert_eq!(response_code(&overloaded), "FLEET_HTTP_STORE_QUEUE_FULL");
+        assert_eq!(accepted.status, 201);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_id, "queued-action");
+    }
+
+    #[test]
+    fn queued_store_deadline_cancels_mutation_before_worker_can_start() {
+        let (_dir, service) = service();
+        let (active, release) = stall_store(&service);
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("expired-action")).unwrap();
+        let pending = service.dispatch_request(
+            request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+            Instant::now() + Duration::from_millis(20),
+        );
+        let response = wait_response(pending);
+        release.send(()).unwrap();
+        active.wait().unwrap();
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert_eq!(response.status, 504);
+        assert_eq!(response_code(&response), "FLEET_HTTP_STORE_NOT_STARTED");
+        assert!(actions.is_empty(), "expired work must never publish later");
+    }
+
+    #[test]
+    fn dropped_queued_request_cancels_work_without_affecting_the_next_request() {
+        let (_dir, service) = service();
+        let (active, release) = stall_store(&service);
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("abandoned-action")).unwrap();
+        let pending = service.dispatch_request(
+            request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+            Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+        );
+        drop(pending);
+        release.send(()).unwrap();
+        active.wait().unwrap();
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert!(
+            actions.is_empty(),
+            "abandoned HTTP future must cancel queued work"
+        );
+        let response = service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body));
+        assert_eq!(
+            response.status, 201,
+            "cancellation must not poison the worker"
+        );
+    }
+
+    #[test]
+    fn started_store_timeout_reports_unknown_outcome_and_retains_commit() {
+        let (_dir, service) = service_with_one_waiter();
+        let (entered, started) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let mut pending = service
+            .enqueue_store(
+                Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+                move |store, _| {
+                    entered.send(()).unwrap();
+                    proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                    store.publish_action(&quarantine_action("started-action"))
+                },
+            )
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Advance the observer's deadline only after the worker's start has
+        // been observed, independent of CI scheduling speed.
+        pending.deadline = Instant::now();
+        let outcome = pending.wait();
+        release.send(()).unwrap();
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert!(matches!(outcome, Err(StoreRequestFailure::OutcomeUnknown)));
+        assert_eq!(actions.len(), 1, "a timeout cannot undo a started commit");
+        assert_eq!(actions[0].action_id, "started-action");
+        assert_eq!(
+            response_code(&StoreRequestFailure::OutcomeUnknown.response()),
+            "FLEET_HTTP_STORE_OUTCOME_UNKNOWN"
+        );
+    }
+
+    #[test]
+    fn store_reply_completion_wins_timeout_and_worker_loss_is_not_an_abort() {
+        let (_dir, service) = service();
+        let complete = service
+            .enqueue_store(Instant::now() + FLEET_STORE_REQUEST_TIMEOUT, |_, _| Ok(7))
+            .unwrap();
+        // The following serialized operation proves that the first result is
+        // available before simulating an observer that reaches its deadline.
+        service.with_store(|_, _| Ok(())).unwrap();
+        let mut complete = complete;
+        complete.deadline = Instant::now();
+        assert_eq!(complete.wait().unwrap(), 7);
+
+        for started in [false, true] {
+            let completion = Arc::new(StoreCompletion {
+                execution: Mutex::new(if started {
+                    StoreExecution::<()>::Running
+                } else {
+                    StoreExecution::Queued
+                }),
+                ready: Condvar::new(),
+            });
+            let (notification, receiver) = asupersync::channel::oneshot::channel();
+            let reply = StoreReply {
+                completion: Arc::clone(&completion),
+                notification: Some(notification),
+            };
+            let pending = StoreRequest {
+                completion,
+                notification: receiver,
+                deadline: Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+            };
+            drop(reply);
+            let outcome = pending.wait();
+            if started {
+                assert!(matches!(outcome, Err(StoreRequestFailure::OutcomeUnknown)));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    Err(StoreRequestFailure::StoppedBeforeStart)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn async_store_wait_yields_reactor_and_drop_prevents_late_mutation() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        let (_dir, service) = service();
+        let (active, release) = stall_store(&service);
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("cancelled-async-action")).unwrap();
+        let health = runtime.block_on(async {
+            let cx = asupersync::Cx::current().expect("request runtime context");
+            let pending = service.handle_async(
+                &cx,
+                None,
+                request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+            );
+            let mut pending = std::pin::pin!(pending);
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(matches!(pending.as_mut().poll(&mut task), Poll::Pending));
+            // This executes on the same current-thread runtime while its
+            // database worker is blocked by a different request.
+            service
+                .handle_async(&cx, None, request("GET", FLEET_HTTP_HEALTH_PATH, None, &[]))
+                .await
+        });
+        release.send(()).unwrap();
+        active.wait().unwrap();
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert_eq!(health.status, 200);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn expired_http_deadline_never_enqueues_a_store_mutation() {
+        let (_dir, service) = service();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("expired-http-action")).unwrap();
+        let response = runtime.block_on(async {
+            let cx = asupersync::Cx::current().unwrap();
+            service
+                .handle_async(
+                    &cx,
+                    Some(cx.now()),
+                    request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+                )
+                .await
+        });
+        assert_eq!(response.status, 504);
+        assert_eq!(response_code(&response), "FLEET_HTTP_STORE_NOT_STARTED");
+        assert!(
+            service
+                .with_store(|store, _| store.list_actions())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn async_store_deadline_wakes_without_a_store_reply() {
+        let (_dir, service) = service();
+        let (active, release) = stall_store(&service);
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("async-expired-action")).unwrap();
+        let response = runtime.block_on(async {
+            let cx = asupersync::Cx::current().unwrap();
+            let PendingFleetResponse::Store(mut pending) = service.dispatch_request(
+                request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+                Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+            ) else {
+                panic!("request must be queued behind the blocked worker");
+            };
+            pending.deadline = Instant::now() + Duration::from_millis(20);
+            pending
+                .wait_async(&cx)
+                .await
+                .unwrap_or_else(StoreRequestFailure::response)
+        });
+        release.send(()).unwrap();
+        active.wait().unwrap();
+        let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+        assert_eq!(response.status, 504);
+        assert_eq!(response_code(&response), "FLEET_HTTP_STORE_NOT_STARTED");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn worker_observes_request_cancellation_before_waiter_is_repolled() {
+        let (_dir, service) = service();
+        let (active, release) = stall_store(&service);
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let auth = bearer();
+        let body = serde_json::to_vec(&quarantine_action("cancelled-context-action")).unwrap();
+        let (response, actions) = runtime.block_on(async {
+            let cx = asupersync::Cx::current().unwrap();
+            let pending = service.dispatch_request(
+                request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body),
+                StoreRequestBudget {
+                    deadline: Instant::now() + FLEET_STORE_REQUEST_TIMEOUT,
+                    request_context: Some((cx.clone(), None)),
+                },
+            );
+            cx.set_cancel_requested(true);
+            release.send(()).unwrap();
+            active.wait().unwrap();
+            // The serialized read runs after the queued job's start decision.
+            // Its waiter has never been polled or dropped since cancellation.
+            let actions = service.with_store(|store, _| store.list_actions()).unwrap();
+            (wait_response(pending), actions)
+        });
+        assert_eq!(response.status, 504);
+        assert_eq!(response_code(&response), "FLEET_HTTP_STORE_NOT_STARTED");
+        assert!(actions.is_empty());
     }
 
     fn bearer() -> String {
