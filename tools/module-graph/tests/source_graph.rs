@@ -1499,6 +1499,138 @@ module.exports={load,lookup};
 }
 
 #[test]
+fn computed_module_require_matches_node_and_replays_transitive_package_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    put(
+        &project,
+        "app.cjs",
+        r#"
+const value = module['require']('./value.cjs');
+console.log(((module)['re' + 'quire'])('pkg'), value);
+"#,
+    );
+    put(&project, "value.cjs", "module.exports=42;");
+    put(
+        &project,
+        "node_modules/pkg/package.json",
+        r#"{"main":"index.cjs"}"#,
+    );
+    put(
+        &project,
+        "node_modules/pkg/index.cjs",
+        r#"module.exports=module["requ\u0069re"]('./value.cjs');"#,
+    );
+    put(&project, "node_modules/pkg/value.cjs", "module.exports=17;");
+    let reference = Command::new("node")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .current_dir(&project)
+        .arg("app.cjs")
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    assert_eq!(reference.stdout, b"17 42\n");
+
+    let capsule = temp.path().join("computed-loader.fnsc");
+    let (code, captured) = export_capsule(&project, "app.cjs", &capsule, &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_eq!(captured["source_graph"]["fully_resolved"], true);
+    assert_eq!(
+        paths(&captured),
+        [
+            "app.cjs",
+            "node_modules/pkg/index.cjs",
+            "node_modules/pkg/value.cjs",
+            "value.cjs"
+        ]
+    );
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert!(
+        edges
+            .iter()
+            .all(|edge| edge["kind"] == "require" && edge["state"] == "resolved")
+    );
+    assert_node_edges(&project, &captured);
+
+    std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+    let unrelated = temp.path().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    let (code, replayed) = replay_capsule(
+        &capsule,
+        captured["capsule_hash"].as_str().unwrap(),
+        &unrelated,
+    );
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(replayed["replay_verified"], true);
+    assert_eq!(replayed["execution_performed"], false);
+    assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
+}
+
+#[test]
+fn computed_module_members_keep_unknown_loader_names_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    for (entry, source) in [
+        (
+            "app.cjs",
+            "const method='require'; module[method]('./hidden.cjs');",
+        ),
+        (
+            "app.cjs",
+            "module[flag ? 'require' : 'other']('./hidden.cjs');",
+        ),
+        (
+            "app.cjs",
+            "const load=module['require']; load('./hidden.cjs');",
+        ),
+        (
+            "app.cjs",
+            "module['require']=replacement; module['require']('./hidden.cjs');",
+        ),
+        ("app.cts", "(module as Module)[method]('./hidden.cjs');"),
+    ] {
+        put(root.path(), entry, source);
+        let (code, report) = run(root.path(), entry, &[]);
+        assert_eq!(code, 1, "{source}: {report}");
+        assert_eq!(report["source_graph"]["fully_resolved"], false);
+        assert!(
+            report["source_graph"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|notice| notice["code"] == "INDIRECT_REQUIRE"),
+            "{source}: {report}"
+        );
+        assert_eq!(report["execution_performed"], false);
+    }
+    put(
+        root.path(),
+        "app.cjs",
+        r#"
+const name='answer'; module['exports'][name]=42; console.log(module['id']);
+module.exports[name] = module['ex' + 'ports'][name];
+module[0]; module[1n]; module[(2)]; module[true]; module[false]; module[null];
+typeof module['require'];
+"#,
+    );
+    let (code, report) = run(root.path(), "app.cjs", &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["source_graph"]["fully_resolved"], true);
+    assert!(
+        report["source_graph"]["edges"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn immutable_commonjs_aliases_match_node_routes_and_replay_without_source_files() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
