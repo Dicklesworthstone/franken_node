@@ -3702,6 +3702,9 @@ pub struct FleetAgentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum OpsCommand {
+    /// Inspect inventory capacity or recover already signed supervisor outcomes.
+    #[command(subcommand, name = "session-inventory")]
+    SessionInventory(OpsSessionInventoryCommand),
     /// Inspect compile-time git SHA, ledger flush mtime, and persisted session files.
     HealthCheck(OpsHealthCheckArgs),
     /// Advise whether cargo/RCH validation should run, defer, dedupe, or fall back to source-only work.
@@ -3755,6 +3758,22 @@ pub enum OpsCommand {
     /// Audit live operator JSON output contracts alongside W3C trace correlation, anti-amplification bounds, control-frame decode guardrails, pre-staging budgets, and strict loop checkpoint guards.
     #[command(name = "contract-and-transport-audit")]
     ContractAndTransportAudit(OpsContractAndTransportAuditArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpsSessionInventoryCommand {
+    /// Inspect actual payload bytes and pending-outcome reservations.
+    Status(OpsSessionInventoryArgs),
+    /// Restore missing database outcomes from existing signed supervisor receipts.
+    /// Unobserved sessions remain pending; this never deletes evidence or releases a fence.
+    Recover(OpsSessionInventoryArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsSessionInventoryArgs {
+    /// Emit the accounting or authenticated recovery report as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -9324,6 +9343,39 @@ mod fleet_policy_rollout_cli_tests {
         assert_eq!(args.timeout_seconds, 90);
         assert_eq!(args.poll_interval_ms, 50);
         assert!(args.json);
+    }
+
+    #[test]
+    fn ops_session_inventory_parses_explicit_status_and_recovery() {
+        for verb in ["status", "recover"] {
+            let cli =
+                Cli::try_parse_from(["franken-node", "ops", "session-inventory", verb, "--json"])
+                    .unwrap();
+            let Command::Ops(OpsCommand::SessionInventory(command)) = cli.command else {
+                panic!("expected session-inventory command");
+            };
+            match command {
+                OpsSessionInventoryCommand::Status(args) => {
+                    assert_eq!(verb, "status");
+                    assert!(args.json);
+                }
+                OpsSessionInventoryCommand::Recover(args) => {
+                    assert_eq!(verb, "recover");
+                    assert!(args.json);
+                }
+            }
+        }
+        assert!(Cli::try_parse_from(["franken-node", "ops", "session-inventory"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "franken-node",
+                "ops",
+                "session-inventory",
+                "recover",
+                "--force",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

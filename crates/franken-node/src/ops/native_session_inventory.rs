@@ -48,6 +48,12 @@ const INVENTORY_SCHEMA: &str = "franken-node/native-session-inventory/v1";
 const FORENSIC_INVENTORY_SCHEMA: &str = "franken-node/native-session-forensic-inventory/v1";
 const MAX_FORENSIC_DIAGNOSTIC_BYTES: usize = 4096;
 const INVENTORY_FILE: &str = "native-sessions.db";
+const RECOVER_CAPACITY_COMMAND: &str = "franken-node ops session-inventory recover --json";
+const CAPACITY_QUERY: &str = "SELECT COUNT(*),
+    COALESCE(SUM(CASE WHEN outcome_json IS NULL THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(LENGTH(CAST(admission_json AS BLOB))
+        + COALESCE(LENGTH(CAST(outcome_json AS BLOB)), 0)), 0)
+    FROM native_sessions;";
 const MAX_STORED_SESSIONS: usize = crate::capacity_defaults::base::STANDARD;
 const MAX_IDENTITY_CAPTURES: usize = crate::capacity_defaults::base::LARGE;
 // Do not introduce an accounting ceiling below the existing admitted request:
@@ -679,6 +685,64 @@ pub struct NativeSessionInventoryReport {
     pub untracked_identity_captures: Vec<UntrackedNativeIdentityCapture>,
 }
 
+/// Exact database accounting, not a liveness or incident-clearance claim.
+/// Pending rows reserve the largest admissible outcome even when the database
+/// itself is small. Inspection never repairs a missing outcome projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionCapacityReport {
+    pub schema_version: String,
+    pub scope: String,
+    pub database_path: PathBuf,
+    pub store_present: bool,
+    pub retained_sessions: usize,
+    pub pending_null_outcomes: usize,
+    pub actual_bytes: usize,
+    pub reserved_bytes: usize,
+    pub max_retained_sessions: usize,
+    pub max_reserved_bytes: usize,
+    /// Maximum of row and byte utilization, rounded up to a whole percent.
+    pub pct_full: usize,
+    pub capacity_exceeded: bool,
+    pub recovery_command: String,
+    pub quiescence_certified: bool,
+}
+
+impl NativeSessionCapacityReport {
+    fn absent(protected_root: &Path) -> Self {
+        Self {
+            schema_version: "franken-node/native-session-capacity/v1".to_owned(),
+            scope: "local_inventory_accounting_not_liveness".to_owned(),
+            database_path: protected_root.join(INVENTORY_FILE),
+            store_present: false,
+            retained_sessions: 0,
+            pending_null_outcomes: 0,
+            actual_bytes: 0,
+            reserved_bytes: 0,
+            max_retained_sessions: MAX_STORED_SESSIONS,
+            max_reserved_bytes: MAX_RESERVED_BYTES,
+            pct_full: 0,
+            capacity_exceeded: false,
+            recovery_command: RECOVER_CAPACITY_COMMAND.to_owned(),
+            quiescence_certified: false,
+        }
+    }
+}
+
+/// Repair of the database's projection of already signed supervisor outcomes.
+/// No receipt is created, no session is removed, and no fleet fence is released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionCapacityRecoveryReport {
+    pub schema_version: String,
+    pub scope: String,
+    pub recovered_sessions: usize,
+    pub reclaimed_reserved_bytes: usize,
+    pub before: NativeSessionCapacityReport,
+    pub after: NativeSessionCapacityReport,
+    pub quiescence_certified: bool,
+}
+
 /// Authentication status of a retained supervisor observation. A pending
 /// admission does not establish whether a worker is alive or was interrupted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1147,9 +1211,21 @@ fn check_reservation_usage(
     max_bytes: usize,
 ) -> Result<()> {
     if count > max_records || bytes > max_bytes {
+        tracing::warn!(
+            event_code = "NSI_CAPACITY_DENIED",
+            retained_sessions = count,
+            reserved_bytes = bytes,
+            max_retained_sessions = max_records,
+            max_reserved_bytes = max_bytes,
+            recovery_command = RECOVER_CAPACITY_COMMAND,
+            "native-session admission capacity exhausted"
+        );
         bail!(
             "native-session inventory capacity exceeded: {count}/{max_records} retained sessions, \
-             {bytes}/{max_bytes} reserved bytes; refusing to discard retained sessions"
+             {bytes}/{max_bytes} reserved bytes; refusing to discard retained sessions; \
+             inspect_command=`franken-node ops session-inventory status --json`; \
+             fix_command=`{RECOVER_CAPACITY_COMMAND}` (existing signed outcomes only; \
+             unsigned pending sessions require investigation)"
         );
     }
     Ok(())
@@ -2062,6 +2138,7 @@ fn retained_outcome_recoveries<'a>(
     let key = root.verifying_key();
     let mut ensured_capture_dirs = false;
     let mut recoveries = Vec::new();
+    let mut recovered_bytes = 0_usize;
     for record in records.iter().filter(|record| record.outcome.is_none()) {
         if let Some(receipt) = read_outcome_receipt(protected_root, &record.admission, &key)? {
             if record.admission.identity_capture_path.parent() != Some(capture_directory.as_path())
@@ -2074,6 +2151,12 @@ fn retained_outcome_recoveries<'a>(
                 ensured_capture_dirs = true;
             }
             verify_admission_capture_with_root(protected_root, &record.admission, &key)?;
+            recovered_bytes = recovered_bytes
+                .checked_add(bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len())
+                .context("native-session recovery byte accounting overflowed")?;
+            if recovered_bytes > MAX_RESERVED_BYTES {
+                bail!("native-session signed recovery outcomes exceed the aggregate byte bound");
+            }
             recoveries.push((&record.admission, receipt.outcome));
         }
     }
@@ -3647,6 +3730,179 @@ fn attest_drain_at(
     })
 }
 
+/// Inspect retained payload bytes separately from pending-outcome reservations.
+/// This bounded aggregate query remains usable at capacity; it does not decode
+/// rows or treat unsigned database contents as lifecycle evidence.
+pub fn read_local_native_session_capacity() -> Result<NativeSessionCapacityReport> {
+    read_native_session_capacity_at(&inventory_root()?)
+}
+
+/// Recover only existing independently authenticated supervisor observations.
+/// Missing receipts remain pending regardless of age, PID state or operator
+/// invocation. Failed/interrupted outcomes retain their original uncertainty.
+pub fn recover_local_native_session_capacity() -> Result<NativeSessionCapacityRecoveryReport> {
+    recover_native_session_capacity_at(&inventory_root()?)
+}
+
+fn open_capacity_inventory_at(
+    protected_root: &Path,
+    read_only: bool,
+) -> Result<Option<Connection>> {
+    match std::fs::symlink_metadata(protected_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect native-session capacity root"),
+        Ok(_) => {}
+    }
+    if let Some(parent) = protected_root.parent() {
+        validate_existing_forensic_directory(parent)?;
+    }
+    validate_existing_forensic_directory(protected_root)?;
+    if !validate_forensic_inventory_paths(protected_root)? {
+        return Ok(None);
+    }
+    if read_only {
+        open_forensic_inventory(protected_root).map(Some)
+    } else {
+        open_inventory_unlocked(protected_root, false)
+    }
+}
+
+fn capacity_report_in_transaction(
+    protected_root: &Path,
+    tx: &Transaction<'_>,
+) -> Result<NativeSessionCapacityReport> {
+    let rows = tx.query(CAPACITY_QUERY)?;
+    let [row] = rows.as_slice() else {
+        bail!("native-session capacity query returned an invalid row count");
+    };
+    capacity_report_from_values(protected_root, row.values())
+}
+
+fn capacity_report_from_values(
+    protected_root: &Path,
+    values: &[SqliteValue],
+) -> Result<NativeSessionCapacityReport> {
+    let [
+        SqliteValue::Integer(count),
+        SqliteValue::Integer(pending),
+        SqliteValue::Integer(actual),
+    ] = values
+    else {
+        bail!("native-session capacity query returned invalid accounting");
+    };
+    let retained_sessions = usize::try_from(*count)?;
+    let pending_null_outcomes = usize::try_from(*pending)?;
+    let actual_bytes = usize::try_from(*actual)?;
+    let reserved_bytes = pending_null_outcomes
+        .checked_mul(MAX_OUTCOME_BYTES)
+        .and_then(|pending_bytes| actual_bytes.checked_add(pending_bytes))
+        .context("native-session reservation accounting overflowed")?;
+    let pct_full = retained_sessions
+        .saturating_mul(100)
+        .div_ceil(MAX_STORED_SESSIONS)
+        .max(
+            reserved_bytes
+                .saturating_mul(100)
+                .div_ceil(MAX_RESERVED_BYTES),
+        );
+    Ok(NativeSessionCapacityReport {
+        store_present: true,
+        retained_sessions,
+        pending_null_outcomes,
+        actual_bytes,
+        reserved_bytes,
+        pct_full,
+        capacity_exceeded: retained_sessions > MAX_STORED_SESSIONS
+            || reserved_bytes > MAX_RESERVED_BYTES,
+        ..NativeSessionCapacityReport::absent(protected_root)
+    })
+}
+
+fn read_native_session_capacity_at(protected_root: &Path) -> Result<NativeSessionCapacityReport> {
+    let Some(connection) = open_capacity_inventory_at(protected_root, true)? else {
+        return Ok(NativeSessionCapacityReport::absent(protected_root));
+    };
+    // The aggregate is one snapshot query through the existing read-only VFS.
+    // Do not change journal mode, repair permissions or create a transaction.
+    let rows = connection.query(CAPACITY_QUERY)?;
+    let [row] = rows.as_slice() else {
+        bail!("native-session capacity query returned an invalid row count");
+    };
+    capacity_report_from_values(protected_root, row.values())
+}
+
+fn recover_native_session_capacity_at(
+    protected_root: &Path,
+) -> Result<NativeSessionCapacityRecoveryReport> {
+    let initial = read_native_session_capacity_at(protected_root)?;
+    if !initial.store_present {
+        return Ok(NativeSessionCapacityRecoveryReport {
+            schema_version: "franken-node/native-session-capacity-recovery/v1".to_owned(),
+            scope: "existing_signed_supervisor_outcomes_only".to_owned(),
+            recovered_sessions: 0,
+            reclaimed_reserved_bytes: 0,
+            before: initial.clone(),
+            after: initial,
+            quiescence_certified: false,
+        });
+    }
+    tracing::info!(
+        event_code = "NSI_RECOVER_START",
+        "authenticating retained supervisor outcomes before inventory recovery"
+    );
+    let _write_lock = lock_inventory_file(protected_root, false)?
+        .context("native-session inventory disappeared before recovery")?;
+    let report = retry_snapshot_conflict(|| {
+        let connection = open_capacity_inventory_at(protected_root, false)?
+            .context("native-session inventory disappeared before recovery")?;
+        let mut tx = connection.transaction()?;
+        let before = capacity_report_in_transaction(protected_root, &tx)?;
+        // A stale projection may exceed its reservation budget even though
+        // its actual payload is small. Bound the real allocation before
+        // decoding, then enforce the original reservation cap before commit.
+        // Receipt recovery also has its own aggregate byte bound.
+        if before.retained_sessions > MAX_STORED_SESSIONS
+            || before.actual_bytes > MAX_RESERVED_BYTES
+        {
+            bail!("native-session inventory payload exceeds the bounded recovery scan");
+        }
+        let records = read_records_in_transaction_matching(&tx, false)?;
+        let recoveries = retained_outcome_recoveries(protected_root, &records)?;
+        // All candidate signatures and admission bindings have passed before
+        // the first update. Any conflicting row or failed commit rolls the
+        // entire projection repair back; immutable evidence is never changed.
+        for (admission, outcome) in &recoveries {
+            write_observed_outcome(&mut tx, admission, outcome)?;
+        }
+        check_bounds(&tx)?;
+        let after = capacity_report_in_transaction(protected_root, &tx)?;
+        let recovered_sessions = recoveries.len();
+        let reclaimed_reserved_bytes = before
+            .reserved_bytes
+            .checked_sub(after.reserved_bytes)
+            .context("native-session recovery increased its reserved byte budget")?;
+        tx.commit()?;
+        protect_sidecars(protected_root)?;
+        Ok(NativeSessionCapacityRecoveryReport {
+            schema_version: "franken-node/native-session-capacity-recovery/v1".to_owned(),
+            scope: "existing_signed_supervisor_outcomes_only".to_owned(),
+            recovered_sessions,
+            reclaimed_reserved_bytes,
+            before,
+            after,
+            quiescence_certified: false,
+        })
+    })?;
+    tracing::info!(
+        event_code = "NSI_RECOVER_COMPLETE",
+        recovered_sessions = report.recovered_sessions,
+        reclaimed_reserved_bytes = report.reclaimed_reserved_bytes,
+        pending_null_outcomes = report.after.pending_null_outcomes,
+        "recovered exact signed outcomes; missing observations and fleet fences remain unresolved"
+    );
+    Ok(report)
+}
+
 /// Read this user's protected native-session population. This is a local,
 /// bounded observation, never a fleet acknowledgement or quiescence proof.
 /// Existing project paths are canonicalized; a missing old absolute path can
@@ -3930,8 +4186,8 @@ fn append_native_session_forensic_observation(
                 return Ok(());
             }
         };
-    let journal = read_retained_native_session_effect_journal(protected_root, &nonce)
-        .and_then(|journal| {
+    let journal =
+        read_retained_native_session_effect_journal(protected_root, &nonce).and_then(|journal| {
             journal
                 .map(|jsonl| {
                     *retained_bytes = retained_bytes.saturating_add(jsonl.len());
@@ -6649,11 +6905,10 @@ mod tests {
                     _ => unreachable!(),
                 }
                 let before = forensic_state_snapshot(&root);
-                let report =
-                    read_native_session_forensics_at(&root, Some(&admission.project_root))
-                        .unwrap_or_else(|error| {
-                            panic!("fault {fault}, signed outcome {with_outcome}: {error:#}")
-                        });
+                let report = read_native_session_forensics_at(&root, Some(&admission.project_root))
+                    .unwrap_or_else(|error| {
+                        panic!("fault {fault}, signed outcome {with_outcome}: {error:#}")
+                    });
                 assert_eq!(report.store_present, fault != 0);
                 assert!(report.source_errors.iter().any(|error| {
                     error.kind == NativeSessionForensicErrorKind::InventoryUnreadable
@@ -6789,11 +7044,8 @@ mod tests {
                     temp.path().join("retired-admission-receipt.json"),
                 )
                 .unwrap(),
-                3 => std::fs::write(
-                    root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
-                    [99; 32],
-                )
-                .unwrap(),
+                3 => std::fs::write(root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH), [99; 32])
+                    .unwrap(),
                 _ => unreachable!(),
             }
             let before = forensic_state_snapshot(&root);
@@ -6833,7 +7085,10 @@ mod tests {
             panic!("valid admission must remain visible despite its bad outcome: {report:?}");
         };
         assert_eq!(record.admission, valid);
-        assert_eq!(record.status, NativeSessionForensicStatus::OutcomeUnverified);
+        assert_eq!(
+            record.status,
+            NativeSessionForensicStatus::OutcomeUnverified
+        );
         assert!(record.outcome.is_none());
         assert!(!record.outcome_recovered_from_receipt);
         assert!(report.source_errors.iter().any(|error| {
@@ -6857,8 +7112,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("evidence");
         let admission = fixture(&root, 181);
-        let mut guard =
-            NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
         guard.finished = true;
         drop(guard);
         let path = admission_record_path(&root, &admission.session_nonce);
@@ -6869,12 +7123,8 @@ mod tests {
             read_retained_forensic_selectors(&root, 1, bytes.len(), &mut report).unwrap(),
             BTreeSet::from([admission.session_nonce.clone()])
         );
-        assert!(
-            read_retained_forensic_selectors(&root, 0, bytes.len(), &mut report).is_err()
-        );
-        assert!(
-            read_retained_forensic_selectors(&root, 1, bytes.len() - 1, &mut report).is_err()
-        );
+        assert!(read_retained_forensic_selectors(&root, 0, bytes.len(), &mut report).is_err());
+        assert!(read_retained_forensic_selectors(&root, 1, bytes.len() - 1, &mut report).is_err());
         assert_eq!(forensic_state_snapshot(&root), before);
         let misbound = root.join(ADMISSION_RECORD_DIRECTORY).join("misbound.json");
         create_new_runtime_evidence_private_file(&misbound, &bytes).unwrap();
@@ -6936,8 +7186,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("evidence");
         let (admission, _) = frozen_source_fixture(&root, 183);
-        let mut guard =
-            NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
         let mut journal = guard.prepare_effect_journal().unwrap();
         let request_hash = format!("sha256:{}", "ef".repeat(32));
         journal.admit(0, "fs_write", &request_hash).unwrap();
@@ -6955,7 +7204,10 @@ mod tests {
             panic!("expected retained admission and journal: {report:?}");
         };
         assert_eq!(record.admission, admission);
-        assert_eq!(record.status, NativeSessionForensicStatus::PendingLivenessUnknown);
+        assert_eq!(
+            record.status,
+            NativeSessionForensicStatus::PendingLivenessUnknown
+        );
         assert!(record.outcome.is_none());
         let journal = record.durable_journal.as_ref().unwrap();
         assert_eq!(journal.admitted_provider_calls, 2);
@@ -8335,6 +8587,227 @@ mod tests {
         let decoded: NativeSessionOutcome = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, outcome);
         assert_eq!(MAX_RESERVED_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn capacity_status_and_recovery_do_not_provision_an_absent_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("absent").join("runtime-evidence");
+        let status = read_native_session_capacity_at(&root).unwrap();
+        assert!(!status.store_present);
+        assert_eq!(status.retained_sessions, 0);
+        assert_eq!(status.reserved_bytes, 0);
+        assert_eq!(status.pct_full, 0);
+        let recovered = recover_native_session_capacity_at(&root).unwrap();
+        assert_eq!(recovered.before, status);
+        assert_eq!(recovered.after, status);
+        assert_eq!(recovered.recovered_sessions, 0);
+        assert!(!recovered.quiescence_certified);
+        assert!(!root.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn explicit_capacity_recovery_preserves_uncertainty_receipts_and_fences() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let first = fixture(&root, 201);
+        let second = fixture(&root, 202);
+        let pending = fixture(&root, 203);
+        let project = first.project_root.clone();
+        let first_guard = NativeSessionInventoryGuard::admit(&root, first.clone(), 0).unwrap();
+        let second_guard = NativeSessionInventoryGuard::admit(&root, second.clone(), 0).unwrap();
+        let mut pending_guard =
+            NativeSessionInventoryGuard::admit(&root, pending.clone(), 0).unwrap();
+        pending_guard.worker_started();
+        let drain = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(drain.checkpoint.pending_sessions, 3);
+        let terminal = terminal_outcome();
+        let unknown = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::SupervisionIncomplete,
+            process: NativeSessionProcessObservation::Unproven,
+            containment_empty_observed: false,
+            effects: NativeSessionEffectObservation::Unknown,
+            panic_evidence: None,
+        };
+        abandon_after_receipt(&root, first_guard, &terminal);
+        abandon_after_receipt(&root, second_guard, &unknown);
+        let first_path = outcome_receipt_path(&root, &first.session_nonce);
+        let second_path = outcome_receipt_path(&root, &second.session_nonce);
+        let first_signed = std::fs::read(&first_path).unwrap();
+        let second_signed = std::fs::read(&second_path).unwrap();
+        let rows = read_inventory_at(&root, None).unwrap().records;
+        let status = read_native_session_capacity_at(&root).unwrap();
+        assert_eq!(status.pending_null_outcomes, 3);
+        assert_eq!(
+            status.reserved_bytes - status.actual_bytes,
+            3 * MAX_OUTCOME_BYTES
+        );
+        assert_eq!(read_inventory_at(&root, None).unwrap().records, rows);
+
+        let recovered = recover_native_session_capacity_at(&root).unwrap();
+        assert_eq!(recovered.before, status);
+        assert_eq!(recovered.recovered_sessions, 2);
+        assert_eq!(recovered.after.retained_sessions, 3);
+        assert_eq!(recovered.after.pending_null_outcomes, 1);
+        assert!(recovered.reclaimed_reserved_bytes > MAX_OUTCOME_BYTES);
+        assert!(!recovered.quiescence_certified);
+        let after = read_inventory_at(&root, None).unwrap();
+        assert_eq!(after.terminal_sessions, 1);
+        assert_eq!(after.unproven_process_sessions, 2);
+        assert_eq!(after.unknown_effect_sessions, 2);
+        let unresolved = after
+            .records
+            .iter()
+            .find(|record| record.admission.session_nonce == pending.session_nonce)
+            .unwrap();
+        assert!(unresolved.outcome.is_none());
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_signed);
+        assert_eq!(std::fs::read(&second_path).unwrap(), second_signed);
+        assert!(admission_ticket_at(&root, &project).is_err());
+        let repeated = recover_native_session_capacity_at(&root).unwrap();
+        assert_eq!(repeated.recovered_sessions, 0);
+        assert_eq!(repeated.reclaimed_reserved_bytes, 0);
+        assert_eq!(repeated.before, repeated.after);
+        assert_eq!(repeated.after, recovered.after);
+    }
+
+    #[test]
+    fn explicit_capacity_recovery_authenticates_the_entire_batch_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let first = fixture(&root, 204);
+        let second = fixture(&root, 205);
+        let first_guard = NativeSessionInventoryGuard::admit(&root, first.clone(), 0).unwrap();
+        let second_guard = NativeSessionInventoryGuard::admit(&root, second.clone(), 0).unwrap();
+        abandon_after_receipt(&root, first_guard, &terminal_outcome());
+        abandon_after_receipt(&root, second_guard, &terminal_outcome());
+        let first_path = outcome_receipt_path(&root, &first.session_nonce);
+        let second_path = outcome_receipt_path(&root, &second.session_nonce);
+        let second_signed = std::fs::read(&second_path).unwrap();
+        std::fs::write(&second_path, std::fs::read(&first_path).unwrap()).unwrap();
+        let original = read_inventory_at(&root, None).unwrap().records;
+        assert!(recover_native_session_capacity_at(&root).is_err());
+        assert_eq!(read_inventory_at(&root, None).unwrap().records, original);
+        std::fs::write(&second_path, second_signed).unwrap();
+        assert_eq!(
+            recover_native_session_capacity_at(&root)
+                .unwrap()
+                .recovered_sessions,
+            2
+        );
+    }
+
+    #[test]
+    fn explicit_capacity_recovery_unblocks_saturation_without_dropping_a_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let limit = MAX_RESERVED_BYTES / MAX_OUTCOME_BYTES;
+        for index in 0..limit {
+            let admission = fixture(&root, u8::try_from(index + 1).unwrap());
+            let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            guard.worker_started();
+            guard.finished = true;
+        }
+        let before = read_inventory_at(&root, None).unwrap().records;
+        let error = NativeSessionInventoryGuard::admit(&root, fixture(&root, 210), 0)
+            .err()
+            .expect("unsigned pending outcomes must retain their full reservation");
+        assert!(format!("{error:#}").contains(RECOVER_CAPACITY_COMMAND));
+        assert_eq!(
+            recover_native_session_capacity_at(&root)
+                .unwrap()
+                .recovered_sessions,
+            0
+        );
+        assert_eq!(read_inventory_at(&root, None).unwrap().records, before);
+        let outcome = terminal_outcome();
+        retain_outcome_receipt(&root, &before[0].admission, &outcome).unwrap();
+        let recovered = recover_native_session_capacity_at(&root).unwrap();
+        assert_eq!(recovered.recovered_sessions, 1);
+        assert_eq!(recovered.after.retained_sessions, limit);
+        assert_eq!(recovered.after.pending_null_outcomes, limit - 1);
+        let next = NativeSessionInventoryGuard::admit(&root, fixture(&root, 211), 0).unwrap();
+        let after = read_inventory_at(&root, None).unwrap();
+        assert_eq!(after.total_stored_sessions, limit + 1);
+        for record in before.iter().skip(1) {
+            assert!(after.records.contains(record));
+        }
+        assert_eq!(after.terminal_sessions, 1);
+        assert!(!after.quiescence_certified);
+        drop(next);
+    }
+
+    #[test]
+    fn capacity_status_counts_utf8_bytes_without_decoding_oversized_accounting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        ensure_runtime_evidence_directory(root.parent().unwrap(), true).unwrap();
+        ensure_runtime_evidence_directory(&root, true).unwrap();
+        let connection = open_inventory(&root, true).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json)
+             VALUES ('accounting-only', ?1, NULL);",
+            &[SqliteValue::Text("🦀".to_owned().into())],
+        )
+        .unwrap();
+        let report = capacity_report_in_transaction(&root, &tx).unwrap();
+        assert_eq!(report.actual_bytes, 4);
+        assert_eq!(report.reserved_bytes, MAX_OUTCOME_BYTES + 4);
+        assert_eq!(report.pending_null_outcomes, 1);
+        tx.commit().unwrap();
+        // Capacity inspection is explicitly accounting, not evidence parsing.
+        assert_eq!(read_native_session_capacity_at(&root).unwrap(), report);
+        assert!(recover_native_session_capacity_at(&root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capacity_commands_refuse_symlinked_evidence_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let target = outside.join("sentinel");
+        std::fs::write(&target, b"preserve").unwrap();
+        let root = temp.path().join("linked-evidence");
+        symlink(&outside, &root).unwrap();
+        assert!(read_native_session_capacity_at(&root).is_err());
+        assert!(recover_native_session_capacity_at(&root).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
+        assert!(!outside.join(INVENTORY_FILE).exists());
+    }
+
+    #[test]
+    fn capacity_recovery_repairs_an_oversaturated_projection_without_relaxing_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let limit = MAX_RESERVED_BYTES / MAX_OUTCOME_BYTES;
+        for index in 0..=limit {
+            let admission = fixture(&root, u8::try_from(index + 1).unwrap());
+            let guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+        }
+        // Model loss of database projections while the signed observations
+        // survive. This is not a claim of successful process cleanup.
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        connection
+            .execute("UPDATE native_sessions SET outcome_json = NULL;")
+            .unwrap();
+        let status = read_native_session_capacity_at(&root).unwrap();
+        assert!(status.capacity_exceeded);
+        assert!(status.reserved_bytes > MAX_RESERVED_BYTES);
+        assert!(status.actual_bytes < MAX_RESERVED_BYTES);
+        assert!(read_inventory_at(&root, None).is_err());
+        let recovered = recover_native_session_capacity_at(&root).unwrap();
+        assert_eq!(recovered.before, status);
+        assert_eq!(recovered.recovered_sessions, limit + 1);
+        assert_eq!(recovered.after.pending_null_outcomes, 0);
+        assert!(!recovered.after.capacity_exceeded);
+        assert_eq!(recovered.after.max_reserved_bytes, MAX_RESERVED_BYTES);
+        assert_eq!(recovered.after.max_retained_sessions, MAX_STORED_SESSIONS);
+        let _next = NativeSessionInventoryGuard::admit(&root, fixture(&root, 212), 0).unwrap();
     }
 
     #[test]

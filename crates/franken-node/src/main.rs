@@ -126,16 +126,15 @@ use crate::cli::{
     OpsResourceGovernorArgs, OpsStorageSchemaAuditArgs, OpsSwarmHandoffArgs, OpsSwarmScenarioArgs,
     OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
     ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapInvokeArgs, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs,
-    RuntimeCommand,
-    RuntimeLaneCommand, RuntimeRegionQuiescenceAuditArgs, RuntimeSupervisionAuditArgs,
-    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCardReputationArgs, TrustCommand, TrustEcosystemTelemetryArgs,
-    TrustFabricConvergenceAuditArgs, TrustGovernanceAuditArgs, TrustResolutionReceiptArgs,
-    TrustVefProveArgs, TrustZkAttestArgs, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
-    VerifySourceGraphArgs, VerifyTransparencyLogArgs, VerifyVefProofArgs, VerifyZkAttestationArgs,
-    load_doctor_policy_activation_input,
+    RemoteCapInvokeArgs, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
+    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, RuntimeRegionQuiescenceAuditArgs,
+    RuntimeSupervisionAuditArgs, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs,
+    SafeModeStatusArgs, TrustCardCommand, TrustCardReputationArgs, TrustCommand,
+    TrustEcosystemTelemetryArgs, TrustFabricConvergenceAuditArgs, TrustGovernanceAuditArgs,
+    TrustResolutionReceiptArgs, TrustVefProveArgs, TrustZkAttestArgs, VerifyCommand,
+    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
+    VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs, VerifyTransparencyLogArgs,
+    VerifyVefProofArgs, VerifyZkAttestationArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -9258,7 +9257,9 @@ fn read_remotecap_cli_database(connection: &fsqlite::Connection) -> Result<Remot
     use fsqlite::SqliteValue;
 
     let metadata = connection
-        .query("SELECT singleton, schema_version, legacy_import_complete FROM remotecap_meta LIMIT 2;")
+        .query(
+            "SELECT singleton, schema_version, legacy_import_complete FROM remotecap_meta LIMIT 2;",
+        )
         .context("failed reading RemoteCap revocation database metadata")?;
     anyhow::ensure!(
         metadata.len() == 1
@@ -9428,7 +9429,10 @@ mod remotecap_revocation_store_tests {
         std::fs::write(path.with_extension("db"), b"corrupt database").unwrap();
         assert!(load_remotecap_cli_state_from(&path).is_err());
         assert!(revoke_remotecap_cli_token_at(&path, &token_id(2)).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), br#"{"revoked_token_ids":[]}"#);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            br#"{"revoked_token_ids":[]}"#
+        );
     }
 
     #[test]
@@ -22216,7 +22220,12 @@ mod trust_command_tests {
             .unwrap();
             context.authorize_egress_at(endpoint, 1_001).unwrap();
         }
-        assert!(project.path().join(remotecap_cli_replay_store_path()).is_dir());
+        assert!(
+            project
+                .path()
+                .join(remotecap_cli_replay_store_path())
+                .is_dir()
+        );
         let mut restarted = TrustScanRemoteCapContext::for_project(
             project.path(),
             "trust-scan-live-authority-secret",
@@ -22257,13 +22266,20 @@ mod trust_command_tests {
                 1_002
             })
             .unwrap_err();
-        assert!(!sampled_clock, "sample the request clock only after authority resolves");
+        assert!(
+            !sampled_clock,
+            "sample the request clock only after authority resolves"
+        );
         assert!(is_remote_cap_denial(&error));
         assert_eq!(
             error.downcast_ref::<RemoteCapError>(),
             Some(&RemoteCapError::AuthorityStateUnavailable)
         );
-        assert!(!error.to_string().contains(&project.path().display().to_string()));
+        assert!(
+            !error
+                .to_string()
+                .contains(&project.path().display().to_string())
+        );
     }
 
     #[cfg(feature = "http-client")]
@@ -22277,7 +22293,10 @@ mod trust_command_tests {
             let destination = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             destination.set_nonblocking(true).unwrap();
             let url = format!("http://{}/query", source.local_addr().unwrap());
-            let location = format!("http://{}/outside-authority", destination.local_addr().unwrap());
+            let location = format!(
+                "http://{}/outside-authority",
+                destination.local_addr().unwrap()
+            );
             let server = std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let mut stream = loop {
@@ -22290,7 +22309,9 @@ mod trust_command_tests {
                         Err(error) => panic!("redirect fixture failed: {error}"),
                     }
                 };
-                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
                 let mut received = Vec::new();
                 let mut buffer = [0_u8; 1024];
                 while !received.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
@@ -24783,10 +24804,10 @@ fn handle_remotecap_invoke(_args: &RemoteCapInvokeArgs) -> Result<()> {
 
 #[cfg(all(feature = "engine", feature = "http-client"))]
 fn handle_remotecap_invoke(args: &RemoteCapInvokeArgs) -> Result<()> {
-    use observability::evidence_ledger::{DecisionKind, evidence_entry_hash_hex};
     use frankenengine_node::security::remote_cap_http::{
         PreparedRemoteCapHttpRequest, PreparedRemoteCapHttpTransport, RemoteCapHttpOutcome,
     };
+    use observability::evidence_ledger::{DecisionKind, evidence_entry_hash_hex};
 
     const INVOCATION_EVIDENCE_SCHEMA: &str = "franken-node/remotecap-invocation-evidence/v1";
     anyhow::ensure!(
@@ -25979,11 +26000,7 @@ struct TrustScanRemoteCapContext {
 }
 
 impl TrustScanRemoteCapContext {
-    fn for_project(
-        project_root: &Path,
-        signing_key: &str,
-        cap: Option<RemoteCap>,
-    ) -> Result<Self> {
+    fn for_project(project_root: &Path, signing_key: &str, cap: Option<RemoteCap>) -> Result<Self> {
         // Pin every authority path to the project selected by the command.
         // A scan may run from a different cwd or outlive a cwd change.
         let project_root = project_root
@@ -33571,6 +33588,69 @@ fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &st
         // coordinator; the local file transport is never a live fleet API.
         activated: loaded.transport_kind.live(),
         pending_convergences,
+    }
+}
+
+fn handle_ops_session_inventory(command: &cli::OpsSessionInventoryCommand) -> Result<()> {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = command;
+        anyhow::bail!("`ops session-inventory` requires a native-engine build");
+    }
+    #[cfg(feature = "engine")]
+    {
+        use ops::native_session_inventory::{
+            read_local_native_session_capacity, recover_local_native_session_capacity,
+        };
+        match command {
+            cli::OpsSessionInventoryCommand::Status(args) => {
+                let report = read_local_native_session_capacity()?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("Native-session inventory capacity");
+                    println!(
+                        "  sessions={}/{} pending_outcomes={} utilization={}%",
+                        report.retained_sessions,
+                        report.max_retained_sessions,
+                        report.pending_null_outcomes,
+                        report.pct_full,
+                    );
+                    println!(
+                        "  payload_bytes={} reserved_bytes={}/{}",
+                        report.actual_bytes, report.reserved_bytes, report.max_reserved_bytes,
+                    );
+                    println!("  database={}", report.database_path.display());
+                    println!("  recovery_command={}", report.recovery_command);
+                    println!("  scope={}; quiescence_certified=false", report.scope);
+                }
+            }
+            cli::OpsSessionInventoryCommand::Recover(args) => {
+                let report = recover_local_native_session_capacity()?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("Native-session signed-outcome recovery");
+                    println!(
+                        "  recovered={} reclaimed_reserved_bytes={} pending_outcomes={}",
+                        report.recovered_sessions,
+                        report.reclaimed_reserved_bytes,
+                        report.after.pending_null_outcomes,
+                    );
+                    println!(
+                        "  reserved_bytes={} -> {}; retained_sessions={}",
+                        report.before.reserved_bytes,
+                        report.after.reserved_bytes,
+                        report.after.retained_sessions,
+                    );
+                    println!("  scope={}; quiescence_certified=false", report.scope);
+                    println!(
+                        "  Missing signed outcomes remain pending; fleet fences are unchanged."
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -48375,7 +48455,9 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
     match (top, sub) {
         ("remotecap", Some("issue")) => ("franken-node/remotecap-error-cli/v1", "remotecap.issue"),
         ("remotecap", Some("use")) => ("franken-node/remotecap-error-cli/v1", "remotecap.use"),
-        ("remotecap", Some("invoke")) => ("franken-node/remotecap-error-cli/v1", "remotecap.invoke"),
+        ("remotecap", Some("invoke")) => {
+            ("franken-node/remotecap-error-cli/v1", "remotecap.invoke")
+        }
         ("remotecap", Some("verify")) => {
             ("franken-node/remotecap-error-cli/v1", "remotecap.verify")
         }
@@ -48440,6 +48522,9 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         }
         ("ops", Some("validation-closeout")) => {
             (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.validation-closeout")
+        }
+        ("ops", Some("session-inventory")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.session-inventory")
         }
         ("ops", Some("health-check")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.health-check"),
         ("ops", Some("resource-governor")) => {
@@ -51149,6 +51234,15 @@ fn main() -> Result<()> {
                 })();
                 if let Err(err) = result {
                     return ops_fail("ops.health-check", args.json, err);
+                }
+            }
+            OpsCommand::SessionInventory(command) => {
+                let json = match &command {
+                    cli::OpsSessionInventoryCommand::Status(args)
+                    | cli::OpsSessionInventoryCommand::Recover(args) => args.json,
+                };
+                if let Err(err) = handle_ops_session_inventory(&command) {
+                    return ops_fail("ops.session-inventory", json, err);
                 }
             }
             OpsCommand::ResourceGovernor(args) => {

@@ -1139,3 +1139,108 @@ fn contract_transport_and_provenance_cohort_audits_enforce_contracts() {
         false
     );
 }
+#[cfg(all(unix, feature = "engine"))]
+#[test]
+fn ops_session_inventory_empty_state_is_inspectable_without_provisioning_authority() {
+    let dir = TempDir::new().expect("tempdir");
+    let state_home = dir.path().join("operator-state");
+    for verb in ["status", "recover"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .current_dir(dir.path())
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env("XDG_STATE_HOME", &state_home)
+            .args(["ops", "session-inventory", verb, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["quiescence_certified"], false);
+        let status = if verb == "recover" {
+            assert_eq!(value["recovered_sessions"], 0);
+            assert_eq!(value["reclaimed_reserved_bytes"], 0);
+            assert_eq!(value["before"], value["after"]);
+            &value["after"]
+        } else {
+            &value
+        };
+        assert_eq!(status["store_present"], false);
+        assert_eq!(status["retained_sessions"], 0);
+        assert_eq!(status["pending_null_outcomes"], 0);
+        assert_eq!(status["actual_bytes"], 0);
+        assert_eq!(status["reserved_bytes"], 0);
+        assert_eq!(status["capacity_exceeded"], false);
+        assert_eq!(
+            status["recovery_command"],
+            "franken-node ops session-inventory recover --json"
+        );
+        assert!(
+            !state_home.exists(),
+            "inspection must not provision signing authority"
+        );
+    }
+
+    let human = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(dir.path())
+        .env("XDG_STATE_HOME", &state_home)
+        .args(["ops", "session-inventory", "status"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("payload_bytes=0 reserved_bytes=0/"));
+    assert!(text.contains("quiescence_certified=false"));
+    assert!(!state_home.exists());
+}
+
+#[cfg(all(unix, feature = "engine"))]
+#[test]
+fn ops_session_inventory_refuses_a_linked_runtime_evidence_root() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let dir = TempDir::new().expect("tempdir");
+    let state_home = dir.path().join("operator-state");
+    let product = state_home.join("franken-node");
+    std::fs::create_dir_all(&product).unwrap();
+    std::fs::set_permissions(&product, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("sentinel");
+    std::fs::write(&sentinel, b"preserve retained evidence").unwrap();
+    symlink(&outside, product.join("runtime-evidence")).unwrap();
+    for verb in ["status", "recover"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .current_dir(dir.path())
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env("XDG_STATE_HOME", &state_home)
+            .args(["ops", "session-inventory", verb, "--json"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(value.is_object());
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"preserve retained evidence"
+        );
+        assert!(!outside.join("native-sessions.db").exists());
+    }
+}
+
+#[test]
+fn ops_session_inventory_json_parse_errors_use_the_specific_ops_surface() {
+    let dir = TempDir::new().expect("tempdir");
+    let out = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(dir.path())
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .args(["ops", "session-inventory", "recover", "--force", "--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], "franken-node/ops-error-cli/v1");
+    assert_eq!(value["command"], "ops.session-inventory");
+}

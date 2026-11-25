@@ -1550,6 +1550,8 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 
 | Command | Purpose |
 |---|---|
+| `franken-node ops session-inventory status` | Inspect this operator's native-session inventory capacity: retained sessions, pending outcomes, actual JSON payload bytes, reserved bytes, utilization, and recovery command. Read-only; requires the native engine. Flags: `--json` (`franken-node/native-session-capacity/v1`). |
+| `franken-node ops session-inventory recover` | Authenticate retained signed supervisor outcomes and atomically restore missing database projections. Reports recovered sessions, reclaimed reservations, and before/after accounting. Missing receipts remain pending. Requires the native engine. Flags: `--json` (`franken-node/native-session-capacity-recovery/v1`). |
 | `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`; `session_count_source=persisted_session_files`). |
 | `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate. Default observation is a live procfs sample; `--process-snapshot` is a fixture. Human output names `source=`. Flags: `--json`. |
 | `franken-node ops validation-readiness` | Report validation evidence freshness from `--input`/`--receipt` snapshots, or an empty default snapshot when omitted. Human and `--json` name `input_source` and `live_broker=false`. Not a live broker. |
@@ -1564,6 +1566,37 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Human output names declared L1 `pass_rate`, `node_canonical_observation_passes`, `node_canonical_unscored_fail_ids`, and `child_process_native_eval_aborts` (those remain fail; not recategorized as pass). Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
 | `franken-node doctor evidence-readiness` | Report evidence readiness from an `--input` snapshot (not a live broker). `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node doctor process-spawn-readiness` | Securely resolve (or accept `--bubblewrap-path` for) a root-owned, non-setuid, non-writable Bubblewrap binary and run a bounded functional user/PID/cgroup/IPC/UTS namespace probe. Returns non-zero with `unavailable` or `unsupported`; readiness by itself does not grant `process_spawn` or replace the signed opt-in. Flags: `--bubblewrap-path`, `--json` (failures `franken-node/doctor-error-cli/v1`). |
+
+#### Native-session inventory capacity
+
+When a run refuses admission because its native-session inventory is full,
+inspect the operator-wide accounting and recover any retained signed outcomes:
+
+```bash
+franken-node ops session-inventory status --json
+franken-node ops session-inventory recover --json
+franken-node ops session-inventory status --json
+```
+
+`actual_bytes` counts the stored admission and outcome JSON payloads.
+`reserved_bytes` additionally reserves the maximum outcome size for each
+`pending_null_outcomes` entry. A small stored payload can therefore consume
+the full admission budget. `pct_full` reflects the larger of session-count
+and reserved-byte utilization; these counters do not establish worker liveness.
+
+`recover` authenticates existing supervisor outcome receipts against the
+existing local product authority and their exact admissions, then restores
+only missing database projections in one transaction. Invalid signatures or
+conflicting records refuse recovery. The report includes `recovered_sessions`,
+`reclaimed_reserved_bytes`, and complete `before`/`after` accounting.
+
+Missing receipts remain pending regardless of age or PID state. Recovered
+failed or interrupted outcomes retain their original uncertainty. Recovery
+does not archive or delete sessions, release fleet fences, raise capacity
+limits, or certify quiescence; `quiescence_certified` remains false.
+Cold-archive compaction and resolution of sessions without retained signed
+outcomes remain separate work, so this command cannot resolve every capacity
+exhaustion.
 
 ### Registry, bench, debug
 
