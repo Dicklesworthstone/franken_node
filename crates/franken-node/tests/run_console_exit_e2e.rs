@@ -5055,6 +5055,107 @@ fn run_directory_target_executes_package_main() {
 }
 
 #[test]
+fn run_directory_main_preserves_literal_paths_and_normalizes_terminal_separators() {
+    for frozen in ["false", "true"] {
+        for (files, expected) in [
+            (
+                vec![
+                    ("pkg/package.json", r#"{"main":" entry.js"}"#),
+                    ("pkg/ entry.js", "console.log('literal-main');\n"),
+                    ("pkg/entry.js", "console.log('wrong-trimmed-main');\n"),
+                    ("pkg/index.js", "console.log('wrong-index');\n"),
+                ],
+                "literal-main\n",
+            ),
+            (
+                vec![
+                    ("pkg/package.json", r#"{"main":"lib/"}"#),
+                    ("pkg/lib.js", "console.log('file-main');\n"),
+                    ("pkg/lib/index.js", "console.log('wrong-directory-main');\n"),
+                ],
+                "file-main\n",
+            ),
+            (
+                vec![
+                    ("pkg/package.json", r#"{"main":"lib/."}"#),
+                    ("pkg/lib.js", "console.log('file-main');\n"),
+                    ("pkg/lib/index.js", "console.log('wrong-directory-main');\n"),
+                ],
+                "file-main\n",
+            ),
+            (
+                vec![
+                    ("pkg/package.json", r#"{"main":"lib"}"#),
+                    ("pkg/lib/package.json", r#"{"main":"alternate.js"}"#),
+                    ("pkg/lib/alternate.js", "console.log('wrong-nested-main');\n"),
+                    ("pkg/lib/index.js", "console.log('directory-index');\n"),
+                ],
+                "directory-index\n",
+            ),
+        ] {
+            let outcome = run_project_target_with_setup(&files, "pkg/", |_, command| {
+                command.env("FRANKEN_NODE_RUNTIME_FROZEN_MODULES", frozen);
+            });
+            assert_eq!(
+                outcome.exit_code,
+                Some(0),
+                "frozen={frozen}: {}",
+                outcome.stderr
+            );
+            assert_eq!(outcome.stdout, expected, "frozen={frozen}");
+        }
+    }
+}
+
+#[test]
+fn native_data_and_addon_entries_never_execute_as_javascript_or_fall_back() {
+    for (extension, format) in [("json", "JSON data"), ("node", "native addon")] {
+        let source_path = format!("pkg/entry.{extension}");
+        for target in ["pkg/", source_path.as_str()] {
+            let outcome = run_project_target_with_setup(
+                &[
+                    ("pkg/package.json", r#"{"main":"entry"}"#),
+                    (source_path.as_str(), "console.log('wrong-data-execution');\n"),
+                    ("pkg/index.js", "console.log('wrong-index-fallback');\n"),
+                ],
+                target,
+                |_, command| {
+                    command.env("FRANKEN_NODE_RUNTIME_FROZEN_MODULES", "false");
+                },
+            );
+            assert_ne!(outcome.exit_code, Some(0), "{target}");
+            assert!(outcome.stdout.is_empty(), "{target}: {}", outcome.stdout);
+            assert!(
+                outcome
+                    .stderr
+                    .contains(&format!("does not support {format} entrypoints")),
+                "{target}: {}",
+                outcome.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn run_directory_main_dot_refuses_an_outside_winner_without_executing_fallback() {
+    let outcome = run_directory_target(
+        &[
+            ("pkg/package.json", r#"{"main":"."}"#),
+            ("pkg/index.js", "console.log('wrong-inside-fallback');\n"),
+            ("pkg.js", "console.log('outside-winner');\n"),
+        ],
+        "pkg/",
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(outcome.stdout.is_empty(), "{}", outcome.stdout);
+    assert!(
+        outcome.stderr.contains("escapes selected project root"),
+        "{}",
+        outcome.stderr
+    );
+}
+
+#[test]
 fn run_inferred_js_prefers_exact_file_then_js_before_directory() {
     for (files, expected) in [
         (

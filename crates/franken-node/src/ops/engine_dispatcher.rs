@@ -9901,6 +9901,10 @@ impl EngineDispatcher {
         manifests: &mut Vec<RunPackageManifest>,
         package_bin: Option<&str>,
     ) -> std::result::Result<PathBuf, String> {
+        use crate::supply_chain::module_resolution_graph::{
+            COMMONJS_FILE_EXTENSIONS, CommonJsDirectoryStep, commonjs_directory_steps,
+        };
+
         let manifest = read_run_package_manifest(dir, dir, manifests, package_bin)?;
         if let Some(name) = package_bin {
             let selected = manifest
@@ -9925,40 +9929,95 @@ impl EngineDispatcher {
             // invoke a shell, or resolve a command through the host PATH.
             return Ok(dir.join(relative));
         }
-        if let Some(manifest) = manifest
-            && let Some(main) = manifest
-                .main
-                .as_deref()
-                .map(str::trim)
-                .filter(|main| !main.is_empty())
-        {
-            let main_path = Path::new(main);
-            if main_path.components().any(|component| {
-                !matches!(
-                    component,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            }) {
-                return Err(format!(
-                    "package.json `main` {main:?} must be a relative path inside {}",
-                    dir.display()
-                ));
+
+        let main = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.main.as_deref())
+            .filter(|main| !main.is_empty());
+        let main_path = main
+            .map(|main| {
+                let relative = Path::new(main);
+                if relative.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                }) {
+                    return Err(format!(
+                        "package.json `main` {main:?} must be a relative path inside {}",
+                        dir.display()
+                    ));
+                }
+                // Normalize dot components and terminal separators before
+                // appending suffixes. Do not trim literal filename whitespace.
+                let relative: PathBuf = relative
+                    .components()
+                    .filter_map(|component| match component {
+                        std::path::Component::Normal(name) => Some(name),
+                        _ => None,
+                    })
+                    .collect();
+                let base = if relative.as_os_str().is_empty() {
+                    dir.to_path_buf()
+                } else {
+                    dir.join(relative)
+                };
+                validate_guest_source_spelling(&base).map_err(|error| error.to_string())?;
+                Ok(base)
+            })
+            .transpose()?;
+        let is_file = |candidate: &Path| -> std::result::Result<bool, String> {
+            match std::fs::metadata(candidate) {
+                Ok(metadata) if metadata.is_file() => Ok(true),
+                Ok(metadata) if metadata.is_dir() => Ok(false),
+                Ok(_) => Err(format!(
+                    "run entrypoint candidate {} is not a regular file or directory",
+                    candidate.display()
+                )),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(error) => Err(format!(
+                    "inspect run entrypoint candidate {}: {error}",
+                    candidate.display()
+                )),
             }
-            let base = dir.join(main_path);
-            let mut with_js = base.clone().into_os_string();
-            with_js.push(".js");
-            for candidate in [base.clone(), PathBuf::from(with_js), base.join("index.js")] {
-                if candidate.is_file() {
+        };
+
+        for step in commonjs_directory_steps(main) {
+            let base = match step {
+                CommonJsDirectoryStep::MainFile(_) => main_path
+                    .as_ref()
+                    .expect("a main lookup step has a main path")
+                    .clone(),
+                CommonJsDirectoryStep::MainIndex(_) => main_path
+                    .as_ref()
+                    .expect("a main lookup step has a main path")
+                    .join("index"),
+                CommonJsDirectoryStep::PackageIndex => dir.join("index"),
+            };
+            if matches!(step, CommonJsDirectoryStep::MainFile(_)) && is_file(&base)? {
+                return Ok(base);
+            }
+            // Even main="." must preserve the winning file candidate. The
+            // caller's canonical containment check then refuses an outside
+            // sibling instead of silently executing a lower-priority index.
+            for extension in COMMONJS_FILE_EXTENSIONS {
+                let mut candidate = base.clone().into_os_string();
+                candidate.push(extension);
+                let candidate = PathBuf::from(candidate);
+                if is_file(&candidate)? {
                     return Ok(candidate);
                 }
             }
         }
-        let index = dir.join("index.js");
-        if index.is_file() {
-            return Ok(index);
-        }
         Err(format!(
-            "{} has no entrypoint: package.json has no resolvable `main` and index.js is missing",
+            "{} has no entrypoint: package.json has no resolvable `main` and no index.js, index.json or index.node",
             dir.display()
         ))
     }
@@ -14249,6 +14308,23 @@ impl EngineDispatcher {
             tracing::warn!(%warning, "Dependency trust warning at native worker admission");
         }
         let execution_app_path = project_paths.entrypoint();
+        let unsupported_entry_format = match execution_app_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("json") => Some("JSON data"),
+            Some("node") => Some("native addon"),
+            _ => None,
+        };
+        if let Some(format) = unsupported_entry_format {
+            return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                format!(
+                    "Native runtime does not support {format} entrypoints: {}",
+                    execution_app_path.display()
+                ),
+                &mut telemetry_guard,
+            ));
+        }
         let module_root = project_paths
             .project_root()
             .to_str()
@@ -22887,6 +22963,178 @@ exec "$2" pinned-worker-image"#,
                 .unwrap();
             std::fs::write(&manifest, r#"{"bin":{"cli":"alias.js"}}"#).unwrap();
             assert!(resolve("cli").is_err());
+        }
+    }
+
+    #[test]
+    fn run_directory_paths_preserve_literal_main_and_commonjs_candidate_order() {
+        for (manifest, files, expected) in [
+            (r#"{}"#, vec!["index.js", "index.json", "index.node"], "index.js"),
+            (r#"{"main":true}"#, vec!["index.js"], "index.js"),
+            (r#"{"main":""}"#, vec!["index.node"], "index.node"),
+            (
+                r#"{"main":" entry.js "}"#,
+                vec![" entry.js ", "entry.js", "index.js"],
+                " entry.js ",
+            ),
+            (r#"{"main":" "}"#, vec![" ", "index.js"], " "),
+            (r#"{"main":"start"}"#, vec!["start", "start.js"], "start"),
+            (
+                r#"{"main":"start"}"#,
+                vec!["start.js", "start.json", "start.node", "start/index.js"],
+                "start.js",
+            ),
+            (
+                r#"{"main":"start"}"#,
+                vec!["start.json", "start.node", "index.js"],
+                "start.json",
+            ),
+            (r#"{"main":"start"}"#, vec!["start.node", "index.js"], "start.node"),
+            (
+                r#"{"main":"lib"}"#,
+                vec!["lib/index.js", "lib/index.json", "lib/alternate.js", "index.js"],
+                "lib/index.js",
+            ),
+            (
+                r#"{"main":"lib"}"#,
+                vec!["lib/index.json", "lib/index.node", "index.js"],
+                "lib/index.json",
+            ),
+            (r#"{"main":"lib"}"#, vec!["lib/index.node", "index.js"], "lib/index.node"),
+            (r#"{"main":"lib/"}"#, vec!["lib.js", "lib/index.js"], "lib.js"),
+            (r#"{"main":"lib/."}"#, vec!["lib.js", "lib/index.js"], "lib.js"),
+            (
+                r#"{"main":"missing"}"#,
+                vec!["index.json", "index.node"],
+                "index.json",
+            ),
+            (r#"{"main":"."}"#, vec!["index.js"], "index.js"),
+        ] {
+            let directory = tempfile::tempdir().expect("directory resolution fixture");
+            let root = directory.path().canonicalize().expect("canonical project");
+            std::fs::write(root.join("package.json"), manifest).expect("project metadata");
+            for file in files {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                    .expect("fixture directories");
+                // Preflight must select metadata without reading or parsing
+                // these deliberately invalid guest source bytes.
+                std::fs::write(path, [0xff]).expect("candidate file");
+            }
+            if root.join("lib").is_dir() {
+                std::fs::write(
+                    root.join("lib/package.json"),
+                    r#"{"main":"alternate.js"}"#,
+                )
+                .expect("nested package metadata");
+            }
+            let selected = RunProjectPaths::resolve(Path::new("."), &root)
+                .expect("directory entrypoint");
+            assert_eq!(selected.entrypoint(), root.join(expected), "{manifest}");
+            assert_eq!(selected.project_root(), root, "{manifest}");
+        }
+    }
+
+    #[test]
+    fn run_directory_paths_revalidate_main_and_fallback_precedence() {
+        for initial in ["start.json", "index.js"] {
+            let directory = tempfile::tempdir().expect("directory precedence fixture");
+            let root = directory.path();
+            std::fs::write(root.join("package.json"), r#"{"main":"start"}"#)
+                .expect("project metadata");
+            std::fs::write(root.join(initial), [0xff]).expect("initial candidate");
+            let selected = RunProjectPaths::resolve(Path::new("."), root)
+                .expect("original entrypoint");
+            std::fs::write(root.join("start.js"), [0xff]).expect("new winning candidate");
+            let error = selected
+                .verify_target_with_operator_project(Path::new("."), root, None, None)
+                .expect_err("a new main winner invalidates preflight");
+            assert!(error.to_string().contains("authority changed after preflight"));
+        }
+
+        let directory = tempfile::tempdir().expect("manifest commitment fixture");
+        let root = directory.path();
+        std::fs::write(root.join("package.json"), r#"{"main":"entry.js"}"#)
+            .expect("original metadata");
+        std::fs::write(root.join("entry.js"), [0xff]).expect("entrypoint");
+        let selected = RunProjectPaths::resolve(Path::new("."), root).expect("original entrypoint");
+        std::fs::write(root.join("package.json"), r#"{"main":"./entry.js"}"#)
+            .expect("equivalent main spelling");
+        let error = selected
+            .verify_target_with_operator_project(Path::new("."), root, None, None)
+            .expect_err("equivalent paths do not replace original manifest bytes");
+        assert!(error.to_string().contains("authority changed after preflight"));
+    }
+
+    #[test]
+    fn run_directory_paths_keep_main_inside_the_selected_authority() {
+        let directory = tempfile::tempdir().expect("directory authority fixture");
+        let root = directory.path().canonicalize().expect("canonical invocation");
+        let project = root.join("package");
+        std::fs::create_dir(&project).expect("selected project");
+        std::fs::write(project.join("index.js"), [0xff]).expect("fallback source");
+        for main in [
+            "../outside.js",
+            "/outside.js",
+            ".franken-node/main.js",
+            "franken_node.toml",
+        ] {
+            let manifest = serde_json::json!({ "main": main }).to_string();
+            std::fs::write(project.join("package.json"), manifest).expect("project metadata");
+            assert!(
+                RunProjectPaths::resolve(Path::new("package/"), &root).is_err(),
+                "unsafe main must not select the fallback: {main:?}"
+            );
+        }
+        std::fs::write(project.join("package.json"), r#"{"main":"#)
+            .expect("malformed project metadata");
+        assert!(RunProjectPaths::resolve(Path::new("package/"), &root).is_err());
+
+        std::fs::write(project.join("package.json"), r#"{"main":"."}"#)
+            .expect("same-directory main");
+        let selected = RunProjectPaths::resolve(Path::new("package/"), &root)
+            .expect("inside index without an outside winner");
+        assert_eq!(selected.entrypoint(), project.join("index.js"));
+        std::fs::write(root.join("package.js"), [0xff]).expect("outside winning candidate");
+        let error = RunProjectPaths::resolve(Path::new("package/"), &root)
+            .expect_err("main dot must not bypass the selected outside winner");
+        assert!(error.to_string().contains("escapes selected project root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_directory_paths_do_not_skip_links_or_nonregular_candidates() {
+        use rustix::fs::{Mode, mkfifoat};
+        use std::os::unix::fs::symlink;
+
+        for candidate in ["outside-link", "loop", "fifo"] {
+            let directory = tempfile::tempdir().expect("directory candidate fixture");
+            let root = directory.path();
+            let project = root.join("package");
+            std::fs::create_dir(&project).expect("selected project");
+            std::fs::write(project.join("package.json"), r#"{"main":"entry"}"#)
+                .expect("project metadata");
+            std::fs::write(project.join("entry.json"), b"{}").expect("lower-priority main");
+            std::fs::write(project.join("index.js"), [0xff]).expect("fallback source");
+            match candidate {
+                "outside-link" => {
+                    std::fs::write(root.join("outside.js"), [0xff]).expect("outside source");
+                    symlink("../outside.js", project.join("entry.js")).expect("outside link");
+                }
+                "loop" => {
+                    symlink("entry.js", project.join("entry.js")).expect("symlink loop");
+                }
+                "fifo" => {
+                    let descriptor = std::fs::File::open(&project).expect("project directory");
+                    mkfifoat(&descriptor, "entry.js", Mode::RUSR | Mode::WUSR)
+                        .expect("nonregular candidate");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                RunProjectPaths::resolve(Path::new("package/"), root).is_err(),
+                "{candidate} must not silently select another entrypoint"
+            );
         }
     }
 

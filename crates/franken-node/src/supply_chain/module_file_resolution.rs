@@ -13,6 +13,7 @@
 use super::package_targets::{
     BranchStep, MapKind, PackageMap, ResolutionError, Selection, TargetKind,
 };
+use super::{COMMONJS_FILE_EXTENSIONS, CommonJsDirectoryStep, commonjs_directory_steps};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, readlinkat_raw, statat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -1309,7 +1310,7 @@ impl Resolver {
         if self.probe(path)?.is_file() {
             return Ok(Some(path.into()));
         }
-        for extension in [".js", ".json", ".node"] {
+        for extension in COMMONJS_FILE_EXTENSIONS {
             let candidate = format!("{path}{extension}");
             if self.probe(&candidate)?.is_file() {
                 return Ok(Some(candidate));
@@ -1333,24 +1334,28 @@ impl Resolver {
         if !self.probe(directory)?.is_dir() {
             return Ok(None);
         }
-        if let Some(main) = self
+        let main = self
             .manifest(directory)?
-            .and_then(|m| m.main.clone())
-            .filter(|s| !s.is_empty())
-        {
-            let target = normalize(directory, &main)?;
-            if let Some(found) = self.as_file(&target)? {
-                return Ok(Some(found));
+            .and_then(|manifest| manifest.main.clone())
+            .filter(|main| !main.is_empty());
+        for step in commonjs_directory_steps(main.as_deref()) {
+            let found = match step {
+                CommonJsDirectoryStep::MainFile(main) => {
+                    self.as_file(&normalize(directory, main)?)?
+                }
+                CommonJsDirectoryStep::MainIndex(main) => {
+                    self.index(&normalize(directory, main)?)?
+                }
+                CommonJsDirectoryStep::PackageIndex => self.index(directory)?,
+            };
+            if found.is_some() {
+                return Ok(found);
             }
-            if let Some(found) = self.index(&target)? {
-                return Ok(Some(found));
-            }
-            if let Some(found) = self.index(directory)? {
-                return Ok(Some(found));
-            }
-            return Err(mode.missing(&target));
         }
-        self.index(directory)
+        if let Some(main) = main {
+            return Err(mode.missing(&normalize(directory, &main)?));
+        }
+        Ok(None)
     }
     fn legacy(&mut self, path: &str, mode: ResolutionMode) -> Result<Option<String>> {
         if let Some(found) = self.as_file(path)? {
@@ -4149,6 +4154,53 @@ import 'tool/value.mjs/';"#,
             rejected(root.path(), "app.js", "pkg", ResolutionMode::Import),
             "ERR_MODULE_NOT_FOUND"
         );
+    }
+
+    #[test]
+    fn directory_resolution_preserves_literal_main_and_commonjs_candidate_order() {
+        for (main, files, expected) in [
+            (" entry.js ", vec![" entry.js ", "entry.js", "index.js"], " entry.js "),
+            (" ", vec![" ", "index.js"], " "),
+            ("start", vec!["start", "start.js", "start.json"], "start"),
+            ("start", vec!["start.js", "start.json", "start.node"], "start.js"),
+            ("start", vec!["start.json", "start.node", "index.js"], "start.json"),
+            ("start", vec!["start.node", "index.js"], "start.node"),
+            (
+                "lib",
+                vec!["lib/index.js", "lib/index.json", "lib/alternate.js", "index.js"],
+                "lib/index.js",
+            ),
+            ("lib", vec!["lib/index.json", "lib/index.node"], "lib/index.json"),
+            ("lib", vec!["lib/index.node", "index.js"], "lib/index.node"),
+            ("lib/", vec!["lib.js", "lib/index.js"], "lib.js"),
+            ("lib/.", vec!["lib.js", "lib/index.js"], "lib.js"),
+            ("missing", vec!["index.js", "index.json"], "index.js"),
+            ("missing", vec!["index.json", "index.node"], "index.json"),
+            ("", vec!["index.node"], "index.node"),
+        ] {
+            let root = fixture();
+            let manifest = serde_json::json!({ "main": main }).to_string();
+            put(
+                root.path(),
+                "node_modules/pkg/package.json",
+                manifest.as_bytes(),
+            );
+            for file in files {
+                let path = format!("node_modules/pkg/{file}");
+                put(root.path(), &path, path.as_bytes());
+            }
+            if root.path().join("node_modules/pkg/lib").is_dir() {
+                put(
+                    root.path(),
+                    "node_modules/pkg/lib/package.json",
+                    br#"{"main":"alternate.js"}"#,
+                );
+            }
+            let captured = run(root.path(), "app.js", "pkg", ResolutionMode::Require);
+            let expected = format!("node_modules/pkg/{expected}");
+            assert_eq!(captured.report.path, expected, "main={main:?}");
+            assert_eq!(captured.source_bytes(), expected.as_bytes(), "main={main:?}");
+        }
     }
 
     #[test]

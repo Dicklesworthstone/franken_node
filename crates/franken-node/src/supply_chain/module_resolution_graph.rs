@@ -28,6 +28,33 @@ pub mod package_targets;
 #[path = "module_dependency_topology.rs"]
 pub mod dependency_topology;
 
+/// CommonJS LOAD_AS_FILE and LOAD_INDEX probe these suffixes in this order.
+/// Callers retain their own containment, capture and resource-limit checks.
+pub(crate) const COMMONJS_FILE_EXTENSIONS: [&str; 3] = [".js", ".json", ".node"];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CommonJsDirectoryStep<'a> {
+    MainFile(&'a str),
+    MainIndex(&'a str),
+    PackageIndex,
+}
+
+/// Node's directory lookup order, shared by live entrypoint selection and
+/// captured module resolution. A main value is a literal path: whitespace is
+/// meaningful, while an empty string falls back to the package index.
+pub(crate) fn commonjs_directory_steps(
+    main: Option<&str>,
+) -> impl Iterator<Item = CommonJsDirectoryStep<'_>> {
+    let main = main.filter(|main| !main.is_empty());
+    [
+        main.map(CommonJsDirectoryStep::MainFile),
+        main.map(CommonJsDirectoryStep::MainIndex),
+        Some(CommonJsDirectoryStep::PackageIndex),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 /// Workspace negation has different documented semantics in npm and Bun.
 /// The selected lock authority chooses the dialect; selectors never do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
