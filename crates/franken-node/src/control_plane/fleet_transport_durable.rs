@@ -45,12 +45,13 @@ use super::fleet_transport::{
     FleetEpochCommitSigner, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
     FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
-    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
+    MAX_NATIVE_DRAIN_ATTESTATION_AGE, NativeSessionDrainCheckpoint, NodeStatus,
     certify_fleet_epoch_quiescence, fleet_action_log_checkpoint,
     fleet_epoch_operation_request_sha256, fleet_epoch_quiescence_manifest_hash, validate_action_id,
-    validate_action_record,
-    validate_fleet_native_session_publication, validate_fleet_policy_publication,
-    validate_guarded_fleet_policy_publication, validate_node_status,
+    validate_action_record, validate_fleet_native_session_publication,
+    validate_fleet_policy_publication, validate_guarded_fleet_policy_publication,
+    validate_node_status,
 };
 use super::fleet_transport::{
     FLEET_GUARDED_RESUME_RECEIPT_SCHEMA, FleetGuardedResumeReceipt,
@@ -103,6 +104,67 @@ impl SignedFleetEpochCommit {
         Ok(())
     }
 }
+
+/// Retain the earliest expiry of the exact observations admitted by a guarded
+/// transaction. Signature verification, serialization and database writes can
+/// outlast a freshness window; a later heartbeat cannot renew a signed drain.
+/// Compute the deadline before that work so the final commit check is O(1).
+fn fleet_observations_expire_at<'a>(
+    stale_after: Duration,
+    observations: impl Iterator<
+        Item = (
+            Option<DateTime<Utc>>,
+            Option<&'a NativeSessionDrainCheckpoint>,
+        ),
+    >,
+) -> Result<DateTime<Utc>, FleetTransportError> {
+    let heartbeat_age = chrono::TimeDelta::from_std(stale_after)
+        .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
+    let supervisor_age =
+        chrono::TimeDelta::from_std(stale_after.min(MAX_NATIVE_DRAIN_ATTESTATION_AGE))
+            .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
+    let mut expires_at: Option<DateTime<Utc>> = None;
+    for (heartbeat, drain) in observations {
+        let heartbeat = heartbeat.ok_or_else(|| {
+            FleetTransportError::stale_state("guarded commit requires an observed heartbeat")
+        })?;
+        let mut deadline = heartbeat.checked_add_signed(heartbeat_age).ok_or_else(|| {
+            FleetTransportError::stale_state("fleet heartbeat expiry is out of range")
+        })?;
+        if let Some(attestation) = drain.and_then(|drain| drain.supervisor_attestation.as_ref()) {
+            let signed_deadline = attestation
+                .observed_at
+                .checked_add_signed(supervisor_age)
+                .ok_or_else(|| {
+                    FleetTransportError::stale_state("fleet supervisor expiry is out of range")
+                })?;
+            deadline = deadline.min(signed_deadline);
+        }
+        expires_at = Some(expires_at.map_or(deadline, |expiry| expiry.min(deadline)));
+    }
+    expires_at.ok_or_else(|| {
+        FleetTransportError::stale_state("guarded commit requires a nonempty observed population")
+    })
+}
+
+fn validate_fleet_observation_commit_time(
+    accepted_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    commit_at: DateTime<Utc>,
+) -> Result<(), FleetTransportError> {
+    if commit_at < accepted_at {
+        return Err(FleetTransportError::stale_state(
+            "fleet coordinator clock regressed before guarded commit",
+        ));
+    }
+    if commit_at >= expires_at {
+        return Err(FleetTransportError::stale_state(
+            "fleet observations expired before guarded commit; obtain fresh acknowledgements",
+        ));
+    }
+    Ok(())
+}
+
 /// bd-ymbjw: fsqlite surfaces WAL write-write races as immediate
 /// "database is busy (snapshot conflict …)" errors. Unlike a plain lock wait,
 /// a snapshot conflict is not resolved by `busy_timeout` — the failing
@@ -806,8 +868,10 @@ impl DurableFleetTransport {
     ///
     /// Both callbacks are rerun after a snapshot conflict. `now` is sampled
     /// after the node projection, so a retried admission cannot reuse an older
-    /// freshness decision. Original committed receipts are returned unchanged
-    /// apart from the explicit retry flag, including after a later resume.
+    /// freshness decision. A final check immediately before commit also rejects
+    /// observations that expired during verification or persistence work.
+    /// Original committed receipts are returned unchanged apart from the
+    /// explicit retry flag, including after a later resume.
     pub fn publish_policy_with_maintenance_guard_projected(
         &mut self,
         request: &GuardedFleetPolicyPublication,
@@ -900,6 +964,13 @@ impl DurableFleetTransport {
                 accepted_at,
                 max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
+            )?;
             let receipt = FleetGuardedPolicyReceipt {
                 schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
                 action: request.action.clone(),
@@ -927,6 +998,7 @@ impl DurableFleetTransport {
             )
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
             enforce_table_capacity(&tx, "fleet_guarded_policy_publications", MAX_ACTION_LOG_ENTRIES)?;
+            validate_fleet_observation_commit_time(accepted_at, observations_expire_at, now())?;
             tx.commit()
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok(receipt)
@@ -1023,6 +1095,13 @@ impl DurableFleetTransport {
             let evidence = validate_guarded_fleet_native_session_resume(
                 request, &state, accepted_at, max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
+            )?;
             let receipt = FleetGuardedResumeReceipt {
                 schema_version: FLEET_GUARDED_RESUME_RECEIPT_SCHEMA.to_owned(),
                 request: request.clone(), evidence, accepted_at, observation_scope,
@@ -1038,10 +1117,13 @@ impl DurableFleetTransport {
             ).map_err(|error| FleetTransportError::io(error.to_string()))?;
             enforce_table_capacity(&tx, "fleet_guarded_native_resumes", MAX_ACTION_LOG_ENTRIES)?;
             // Serialization and signature verification may be expensive. A
-            // deadline that elapsed during them must roll back the release.
-            if now() >= request.expires_at {
+            // deadline that elapsed during them must roll back the release,
+            // including observation expiry before the request itself expires.
+            let commit_at = now();
+            if commit_at >= request.expires_at {
                 return Err(FleetTransportError::stale_state("guarded resume authorization expired before commit"));
             }
+            validate_fleet_observation_commit_time(accepted_at, observations_expire_at, commit_at)?;
             tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok(receipt)
         })
@@ -1279,7 +1361,8 @@ impl DurableFleetTransport {
     /// Authenticate, certify and durably commit against one serialized action,
     /// node and epoch snapshot. A failed/conflicted transaction discards its
     /// provisional coordinator; retry rechecks the live hold and fresh nodes.
-    /// The clock refreshes params.now after node projection on every attempt.
+    /// The clock refreshes params.now after node projection on every attempt,
+    /// then checks the accepted observations' expiry immediately before commit.
     /// An existing operation returns its original historical commit before
     /// projecting current nodes. Recovery never renews supervisor observations
     /// or proves that the presently admitted population remains quiescent.
@@ -1359,7 +1442,8 @@ impl DurableFleetTransport {
                     Self::query_epoch_operation(connection, key, epoch, operation_id)?
             {
                 let certificate = &retained.certificate;
-                if certificate.operation_request_sha256.as_deref() != params.operation_request_sha256
+                if certificate.operation_request_sha256.as_deref()
+                    != params.operation_request_sha256
                     || certificate.initiator != params.initiator
                     || certificate.reason != params.reason
                     || certificate.trace_id != params.trace_id
@@ -1421,6 +1505,13 @@ impl DurableFleetTransport {
                     ..params
                 },
             )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
+            )?;
             let transition = coordinator
                 .last_signed_transition()
                 .cloned()
@@ -1463,6 +1554,11 @@ impl DurableFleetTransport {
                 ],
             )
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            validate_fleet_observation_commit_time(
+                certificate.certified_at,
+                observations_expire_at,
+                now(),
+            )?;
             tx.commit()
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok((evidence, certificate, quarantine_version, false))

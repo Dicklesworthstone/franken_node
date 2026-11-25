@@ -1390,6 +1390,13 @@ convergence timeout when `--stale-after-secs` is omitted; the coordinator caps
 the effective freshness window at 300 seconds. Local file transport cannot
 provide this certification.
 
+The coordinator rechecks the earliest heartbeat and signed-drain expiry
+immediately before committing the epoch. If verification or persistence work
+consumes that validity window, or the coordinator clock moves backward, the
+staged epoch and certificate are rolled back. Obtain fresh signed observations
+before retrying an uncommitted operation; a new heartbeat alone cannot renew an
+older drain signature.
+
 Success emits `franken-node/fleet-quiescence-cli/v1` JSON containing the complete
 validated `evidence` and `certificate`, including participant identities, signed
 drain observations, retained hold IDs, the action-log commitment, and the old and
