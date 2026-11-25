@@ -4116,7 +4116,7 @@ pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
     validate_transport_identifier(node_id, "node_id", MAX_NODE_ID_LEN)
 }
 
-pub(crate) fn validate_action_id(action_id: &str) -> Result<&str, FleetTransportError> {
+pub fn validate_action_id(action_id: &str) -> Result<&str, FleetTransportError> {
     validate_transport_identifier(action_id, "action_id", MAX_ACTION_ID_LEN)
 }
 
@@ -4859,6 +4859,13 @@ pub struct FleetEpochQuiescenceCertificate {
     pub initiator: String,
     pub reason: String,
     pub trace_id: String,
+    /// Stable caller-owned identity and exact request commitment. Both are
+    /// covered by the epoch manifest and coordinator signatures; historical
+    /// and one-shot certificates omit both fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_request_sha256: Option<String>,
     pub certified_at: DateTime<Utc>,
     pub action_log_checkpoint: FleetActionLogCheckpoint,
     pub fleet_quiescence_certified: bool,
@@ -5005,6 +5012,21 @@ impl FleetEpochCommitStatement {
         certificate: &FleetEpochQuiescenceCertificate,
     ) -> Result<(), FleetTransportError> {
         validate_transport_identifier(&self.coordinator_id, "coordinator_id", MAX_NODE_ID_LEN)?;
+        match (
+            certificate.operation_id.as_deref(),
+            certificate.operation_request_sha256.as_deref(),
+        ) {
+            (Some(id), Some(digest)) => {
+                validate_action_id(id)?;
+                canonical_epoch_hex::<32>(digest)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(FleetTransportError::serialization(
+                    "fleet epoch operation identity and request commitment must occur together",
+                ));
+            }
+        }
         if self.schema_version != FLEET_EPOCH_COMMIT_STATEMENT_SCHEMA
             || self.pre_epoch.checked_add(1) != Some(self.committed_epoch)
             || self.pre_epoch != certificate.pre_epoch
@@ -5176,6 +5198,48 @@ pub struct FleetEpochBarrierParams<'a> {
     pub now: DateTime<Utc>,
     pub stale_after: Duration,
     pub trace_id: &'a str,
+    pub operation_id: Option<&'a str>,
+    pub operation_request_sha256: Option<&'a str>,
+    pub expected_action_log: Option<&'a FleetActionLogCheckpoint>,
+}
+
+/// Commit to the caller's original intent, including its requested freshness
+/// window and optional exact action-log precondition. Compute this before
+/// coordinator freshness caps are applied so an ID cannot silently change intent.
+pub fn fleet_epoch_operation_request_sha256(
+    operation_id: &str,
+    initiator: &str,
+    reason: &str,
+    trace_id: &str,
+    stale_after: Duration,
+    expected_action_log: Option<&FleetActionLogCheckpoint>,
+) -> Result<String, FleetTransportError> {
+    validate_action_id(operation_id)?;
+    if let Some(checkpoint) = expected_action_log {
+        checkpoint.validate()?;
+    }
+    #[derive(Serialize)]
+    struct Request<'a> {
+        operation_id: &'a str,
+        initiator: &'a str,
+        reason: &'a str,
+        trace_id: &'a str,
+        stale_after: Duration,
+        expected_action_log: Option<&'a FleetActionLogCheckpoint>,
+    }
+    let payload = canonical_fleet_convergence_receipt_payload(&Request {
+        operation_id,
+        initiator,
+        reason,
+        trace_id,
+        stale_after,
+        expected_action_log,
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"franken-node/fleet-epoch-operation/v1\0");
+    digest.update((payload.len() as u64).to_be_bytes());
+    digest.update(payload);
+    Ok(hex::encode(digest.finalize()))
 }
 
 /// Drive `ProductEpochCoordinator` (`EpochTransitionBarrier` + `EpochStore`) over
@@ -5199,7 +5263,30 @@ pub fn certify_fleet_epoch_quiescence(
         now,
         stale_after,
         trace_id,
+        operation_id,
+        operation_request_sha256,
+        expected_action_log,
     } = params;
+    match (operation_id, operation_request_sha256) {
+        (Some(id), Some(digest)) => {
+            validate_action_id(id)?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(FleetTransportError::serialization(
+                    "fleet epoch operation requires a canonical SHA-256 request commitment",
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(FleetTransportError::serialization(
+                "fleet epoch operation identity and request commitment must occur together",
+            ));
+        }
+    }
     if enrolled_supervisor_roots.is_empty() {
         return Err(FleetTransportError::not_initialized(
             "fleet epoch quiescence certification requires enrolled per-node supervisor keys",
@@ -5211,6 +5298,14 @@ pub fn certify_fleet_epoch_quiescence(
         ));
     }
     let action_log_checkpoint = fleet_action_log_checkpoint(&state.actions)?;
+    if let Some(expected) = expected_action_log {
+        expected.validate()?;
+        if expected != &action_log_checkpoint {
+            return Err(FleetTransportError::stale_state(
+                "fleet epoch operation action-log precondition changed before certification",
+            ));
+        }
+    }
     if action_log_checkpoint.action_count == 0 {
         return Err(FleetTransportError::stale_state(
             "fleet epoch quiescence certification requires at least one retained fleet action",
@@ -5349,6 +5444,8 @@ pub fn certify_fleet_epoch_quiescence(
         initiator: initiator.to_string(),
         reason: reason.to_string(),
         trace_id: trace_id.to_string(),
+        operation_id: operation_id.map(str::to_owned),
+        operation_request_sha256: operation_request_sha256.map(str::to_owned),
         certified_at: now,
         action_log_checkpoint,
         fleet_quiescence_certified: true,
@@ -9158,6 +9255,9 @@ mod tests {
                 now,
                 stale_after: std::time::Duration::from_secs(30),
                 trace_id: "trace-epoch-1",
+                operation_id: None,
+                operation_request_sha256: None,
+                expected_action_log: None,
             },
         )
         .expect("two enrolled signed quiesced nodes must certify");
@@ -9199,6 +9299,9 @@ mod tests {
                 now,
                 stale_after: std::time::Duration::from_secs(30),
                 trace_id: "trace-epoch-2",
+                operation_id: None,
+                operation_request_sha256: None,
+                expected_action_log: None,
             },
         )
         .expect_err("indeterminate session must abort epoch barrier");
@@ -9244,6 +9347,9 @@ mod tests {
                 now,
                 stale_after: Duration::from_secs(30),
                 trace_id: "trace-commit-proof",
+                operation_id: None,
+                operation_request_sha256: None,
+                expected_action_log: None,
             },
         )
         .unwrap();
@@ -9256,6 +9362,57 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn fleet_epoch_operation_hash_binds_original_freshness_and_preconditions() {
+        let (evidence, certificate, signer) = fleet_epoch_commit_fixture();
+        let checkpoint = &certificate.action_log_checkpoint;
+        let request = |id, initiator, reason, trace, seconds, expected| {
+            super::fleet_epoch_operation_request_sha256(
+                id,
+                initiator,
+                reason,
+                trace,
+                Duration::from_secs(seconds),
+                expected,
+            )
+            .unwrap()
+        };
+        let original = request("op-7", "operator", "maintenance", "trace", 301, None);
+        assert_eq!(original.len(), 64);
+        for changed in [
+            request("op-8", "operator", "maintenance", "trace", 301, None),
+            request("op-7", "other", "maintenance", "trace", 301, None),
+            request("op-7", "operator", "different", "trace", 301, None),
+            request("op-7", "operator", "maintenance", "other", 301, None),
+            request("op-7", "operator", "maintenance", "trace", 302, None),
+            request(
+                "op-7",
+                "operator",
+                "maintenance",
+                "trace",
+                301,
+                Some(checkpoint),
+            ),
+        ] {
+            assert_ne!(original, changed);
+        }
+        let authorization = signer.authorize(&evidence, &certificate).unwrap();
+        let proof = signer
+            .attest_committed(authorization, &evidence, &certificate)
+            .unwrap();
+        let mut identified = certificate.clone();
+        identified.operation_id = Some("op-7".into());
+        identified.operation_request_sha256 = Some(original);
+        assert!(proof.verify_integrity(&evidence, &identified).is_err());
+        let authorization = signer.authorize(&evidence, &identified).unwrap();
+        let proof = signer
+            .attest_committed(authorization, &evidence, &identified)
+            .unwrap();
+        proof.verify_integrity(&evidence, &identified).unwrap();
+        identified.operation_id = Some("op-8".into());
+        assert!(proof.verify_integrity(&evidence, &identified).is_err());
     }
 
     #[test]
@@ -9460,6 +9617,9 @@ mod tests {
                     now,
                     stale_after: Duration::from_secs(30),
                     trace_id: "replayed-supervisor-clock",
+                    operation_id: None,
+                    operation_request_sha256: None,
+                    expected_action_log: None,
                 },
             );
             if age_nanos < 30_000_000_000 {
@@ -9554,6 +9714,9 @@ mod tests {
                     now,
                     stale_after: Duration::from_secs(30),
                     trace_id: scenario,
+                    operation_id: None,
+                    operation_request_sha256: None,
+                    expected_action_log: None,
                 },
             )
             .expect_err(scenario);

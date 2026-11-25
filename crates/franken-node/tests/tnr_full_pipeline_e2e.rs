@@ -2457,6 +2457,8 @@ fn composed_operator_acceptance_scenario_end_to_end() {
             reason: "quarantine-advance".to_string(),
             trace_id: "composed-barrier-missing".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect_err("missing node-b must abort barrier")
         .to_string();
@@ -2476,6 +2478,8 @@ fn composed_operator_acceptance_scenario_end_to_end() {
             reason: "quarantine-advance".to_string(),
             trace_id: "composed-barrier-commit".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect("enrolled supervisors certify epoch barrier");
     assert!(certified.evidence.fleet_quiescence_certified);

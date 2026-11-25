@@ -8633,8 +8633,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     };
     use frankenengine_node::control_plane::fleet_transport::{
         FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
-        NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, SeqlockControlPage,
-        fleet_application_checkpoint,
+        FleetEpochCommitSigner, NativeSessionDrainAttestation, NativeSessionDrainCheckpoint,
+        SeqlockControlPage, fleet_application_checkpoint,
     };
     use frankenengine_node::control_plane::fleet_transport_http::{
         FleetHttpEpochBarrierRequest, HttpFleetTransport,
@@ -8672,7 +8672,15 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         FleetControlPlaneService::open(state_dir.clone(), operator_token)
             .expect("open service")
             .with_node_credentials(creds)
-            .expect("attach enrolled node credentials"),
+            .expect("attach enrolled node credentials")
+            .with_epoch_commit_signer(
+                FleetEpochCommitSigner::new(
+                    "coordinator-cli",
+                    SigningKey::from_bytes(&[0x53; 32]),
+                )
+                .expect("coordinator signing identity"),
+            )
+            .expect("attach independent coordinator signer"),
     );
     let control = FleetHttpServerControl::new();
     let server_control = Arc::clone(&control);
@@ -8708,6 +8716,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             .args([
                 "fleet",
                 "certify-quiescence",
+                "--id",
+                trace_id,
                 "--initiator",
                 "cli-maintenance-operator",
                 "--reason",
@@ -8829,6 +8839,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             reason: "quarantine-epoch-advance".to_string(),
             trace_id: "trace-http-missing".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect_err("missing node-b must abort epoch barrier")
         .to_string();
@@ -8853,6 +8865,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             reason: "quarantine-epoch-advance".to_string(),
             trace_id: "trace-http-unfenced".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect_err("a released admission fence must not certify quiescence")
         .to_string();
@@ -8872,6 +8886,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             reason: "quarantine-epoch-advance".to_string(),
             trace_id: "trace-http-commit".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect("both enrolled supervisors attested terminal drains");
     assert!(certified.evidence.fleet_quiescence_certified);
@@ -8889,7 +8905,8 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
 
     // The installed command must reach the authenticated mutation and retain
     // the full validated certificate, rather than reporting a local hold as
-    // distributed quiescence. Every successful request advances one epoch.
+    // distributed quiescence. Each new operation advances exactly one epoch;
+    // retrying its stable ID recovers the original committed observation.
     let output = certify_cli(&operator_token_path, "trace-cli-certified");
     assert!(
         output.status.success(),
@@ -8910,6 +8927,9 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     assert_eq!(report["certificate"]["pre_epoch"], 1);
     assert_eq!(report["certificate"]["committed_epoch"], 2);
     assert_eq!(report["certificate"]["trace_id"], "trace-cli-certified");
+    assert_eq!(report["certificate"]["operation_id"], "trace-cli-certified");
+    assert_eq!(report["already_committed"], false);
+    assert!(report["commit_proof"].is_object());
     assert_eq!(
         report["certificate"]["initiator"],
         "cli-maintenance-operator"
@@ -8937,6 +8957,19 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         "certification must retain the holds"
     );
 
+    let retried_output = certify_cli(&operator_token_path, "trace-cli-certified");
+    assert!(
+        retried_output.status.success(),
+        "CLI retry failed: {} {}",
+        String::from_utf8_lossy(&retried_output.stdout),
+        String::from_utf8_lossy(&retried_output.stderr),
+    );
+    let retried = json_stdout(&retried_output, "live certification CLI exact retry");
+    assert_eq!(retried["already_committed"], true);
+    assert_eq!(retried["certificate"], report["certificate"]);
+    assert_eq!(retried["evidence"], report["evidence"]);
+    assert_eq!(retried["commit_proof"], report["commit_proof"]);
+
     let seqlock = SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
         .expect("seqlock page persisted on epoch commit");
     assert_eq!(seqlock.control_epoch, 2);
@@ -8957,12 +8990,25 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             },
         })
         .expect("publish resume");
+    let historical_output = certify_cli(&operator_token_path, "trace-cli-certified");
+    assert!(
+        historical_output.status.success(),
+        "historical CLI receipt must remain recoverable: {} {}",
+        String::from_utf8_lossy(&historical_output.stdout),
+        String::from_utf8_lossy(&historical_output.stderr),
+    );
+    let historical = json_stdout(&historical_output, "CLI history after admission resume");
+    assert_eq!(historical["already_committed"], true);
+    assert_eq!(historical["certificate"], report["certificate"]);
+    assert_eq!(historical["evidence"], report["evidence"]);
     let resumed_err = operator
         .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
             initiator: "ops-root".to_string(),
             reason: "reject resumed hold".to_string(),
             trace_id: "trace-http-resumed".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: None,
+            expected_action_log: None,
         })
         .expect_err("a resumed hold must invalidate the old held observation")
         .to_string();
@@ -8985,7 +9031,7 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
 #[test]
 fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_indeterminate_drains()
 {
-    use std::sync::Arc;
+    use std::{io::Write as _, net::TcpStream, sync::Arc};
 
     use ed25519_dalek::{Signer, SigningKey};
     use frankenengine_node::control_plane::fleet_http_server::{
@@ -8994,8 +9040,8 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     };
     use frankenengine_node::control_plane::fleet_transport::{
         FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
-        NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, SeqlockControlPage,
-        fleet_application_checkpoint,
+        FleetEpochCommitSigner, NativeSessionDrainAttestation, NativeSessionDrainCheckpoint,
+        SeqlockControlPage, fleet_action_log_checkpoint, fleet_application_checkpoint,
     };
     use frankenengine_node::control_plane::fleet_transport_durable::count_active_quarantine_actions;
     use frankenengine_node::control_plane::fleet_transport_http::{
@@ -9010,6 +9056,7 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     let node_b_token = "node-b-restart-token-0123456789abcdef012345";
     let sup_a = SigningKey::from_bytes(&[0x51; 32]);
     let sup_b = SigningKey::from_bytes(&[0x62; 32]);
+    let coordinator_key = SigningKey::from_bytes(&[0x73; 32]);
 
     let make_creds = || {
         let creds_json = serde_json::to_vec(&serde_json::json!({
@@ -9038,7 +9085,12 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
             FleetControlPlaneService::open(state_dir, operator_token)
                 .expect("open service")
                 .with_node_credentials(make_creds())
-                .expect("attach enrolled node credentials"),
+                .expect("attach enrolled node credentials")
+                .with_epoch_commit_signer(
+                    FleetEpochCommitSigner::new("coordinator-restart", coordinator_key.clone())
+                        .expect("coordinator signing identity"),
+                )
+                .expect("attach independent coordinator signer"),
         );
         let service_for_server = Arc::clone(&service);
         let control = FleetHttpServerControl::new();
@@ -9173,9 +9225,8 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
         })
         .expect("publish hold 1");
 
-    let expected_1 =
-        fleet_application_checkpoint(&operator_1.list_actions().expect("actions 1"), "east")
-            .expect("checkpoint 1");
+    let actions_1 = operator_1.list_actions().expect("actions 1");
+    let expected_1 = fleet_application_checkpoint(&actions_1, "east").expect("checkpoint 1");
     agent_a_1
         .upsert_node_status(&make_heartbeat("node-a", &sup_a, &expected_1, 1, 2, 0, 8))
         .expect("node-a heartbeat 1");
@@ -9183,19 +9234,64 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
         .upsert_node_status(&make_heartbeat("node-b", &sup_b, &expected_1, 1, 4, 0, 8))
         .expect("node-b heartbeat 1");
 
-    let cert_1 = operator_1
-        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
-            initiator: "ops-root".to_string(),
-            reason: "epoch-1-commit".to_string(),
-            trace_id: "trace-restart-epoch-1".to_string(),
-            stale_after: Duration::from_secs(30),
-        })
-        .expect("commit epoch 1");
+    let request_1 = FleetHttpEpochBarrierRequest {
+        initiator: "ops-root".to_string(),
+        reason: "epoch-1-commit".to_string(),
+        trace_id: "trace-restart-epoch-1".to_string(),
+        stale_after: Duration::from_secs(301),
+        operation_id: Some("epoch-restart-operation-1".to_string()),
+        expected_action_log: Some(fleet_action_log_checkpoint(&actions_1).expect("full log 1")),
+    };
+    // Send a real HTTP mutation and lose its response at the caller. Observe
+    // only the coordinator's commit cache; no response is read from this socket.
+    let body = serde_json::to_vec(&request_1).expect("first request body");
+    let mut lost_response = TcpStream::connect(
+        base_url_1.strip_prefix("http://").expect("loopback coordinator"),
+    )
+    .expect("connect lost-response request");
+    lost_response
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("bound lost-response request write");
+    write!(
+        lost_response,
+        "POST /v2/fleet/epoch-barrier HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {operator_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+    )
+    .expect("send lost-response request headers");
+    lost_response.write_all(&body).expect("send lost-response body");
+    let commit_deadline = Instant::now() + Duration::from_secs(5);
+    while service_1.seqlock_page().read_safepoint().control_epoch != 1 {
+        assert!(
+            Instant::now() < commit_deadline,
+            "coordinator did not commit the request whose response was lost",
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(lost_response);
+
+    // Export is read-only and supplies the independent comparison oracle. It
+    // does not renew the original observations or execute another barrier.
+    let cert_1 = operator_1.export_epoch_commit(1).expect("export original commit");
     assert_eq!(cert_1.certificate.pre_epoch, 0);
     assert_eq!(cert_1.certificate.committed_epoch, 1);
+    assert_eq!(
+        cert_1.certificate.operation_id.as_deref(),
+        Some("epoch-restart-operation-1"),
+    );
+    cert_1
+        .commit_proof
+        .as_ref()
+        .expect("independent commit proof")
+        .verify_with_coordinator(
+            &cert_1.evidence,
+            &cert_1.certificate,
+            "coordinator-restart",
+            &coordinator_key.verifying_key(),
+        )
+        .expect("authenticate committed certificate against the enrolled coordinator");
     assert_eq!(service_1.seqlock_page().read_safepoint().control_epoch, 1);
 
-    // Shut down Coordinator Incarnation 1 and delete the derived seqlock cache file
+    // Shut down Coordinator Incarnation 1 and corrupt its derived seqlock cache
     // to prove Incarnation 2 rehydrates authority strictly from durable SQLite.
     control_1.request_shutdown();
     assert!(server_1.join().expect("server 1").expect("server 1 exit") > 0);
@@ -9228,15 +9324,53 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     let mut agent_b_2 = HttpFleetTransport::new(&base_url_2, node_b_token, Duration::from_secs(5))
         .expect("agent b 2");
 
-    // Fault cut A: retained pre-restart heartbeats MUST NOT certify epoch 1 -> 2
-    // before enrolled agents re-authenticate to the new coordinator incarnation.
+    // An exact retry recovers the old signed commit before any node has
+    // authenticated to this coordinator incarnation. It must not require a
+    // second barrier or substitute fresh evidence for the response we lost.
+    let recovered_1 = operator_2
+        .certify_epoch_barrier(&request_1)
+        .expect("recover lost committed response after coordinator restart");
+    assert!(recovered_1.already_committed);
+    assert_eq!(recovered_1.certificate, cert_1.certificate);
+    assert_eq!(recovered_1.evidence, cert_1.evidence);
+    assert_eq!(recovered_1.commit_proof, cert_1.commit_proof);
+    assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
+
+    // The operation ID owns the exact original request, including a freshness
+    // window that clamps to the same 300-second policy limit and whether the
+    // caller supplied a checkpoint. A convenient conflicting retry cannot
+    // acquire the first request's durable receipt.
+    for field in 0..7 {
+        let mut conflict = request_1.clone();
+        match field {
+            0 => conflict.initiator.push_str("-other"),
+            1 => conflict.reason.push_str("-other"),
+            2 => conflict.trace_id.push_str("-other"),
+            3 => conflict.stale_after = Duration::from_secs(302),
+            4 => conflict.expected_action_log = None,
+            5 => {
+                conflict.expected_action_log.as_mut().unwrap().actions_sha256 = "ff".repeat(32);
+            }
+            6 => {
+                conflict.expected_action_log.as_mut().unwrap().action_count += 1;
+            }
+            _ => unreachable!(),
+        }
+        let error = operator_2
+            .certify_epoch_barrier(&conflict)
+            .expect_err("conflicting reuse must not recover the original commit")
+            .to_string();
+        assert!(error.contains("HTTP 409"), "field={field}: {error}");
+        assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
+    }
+
+    // Fault cut A: a different operation must evaluate current authority.
+    // Retained pre-restart heartbeats cannot certify epoch 1 -> 2 before
+    // enrolled agents re-authenticate to the new coordinator incarnation.
+    let mut fresh_after_restart = request_1.clone();
+    fresh_after_restart.operation_id = Some("epoch-new-operation-after-restart".to_string());
     let unauthenticated_restart_err = operator_2
-        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
-            initiator: "ops-root".to_string(),
-            reason: "reject-pre-restart-retained-heartbeats".to_string(),
-            trace_id: "trace-restart-unauth".to_string(),
-            stale_after: Duration::from_secs(30),
-        })
+        .certify_epoch_barrier(&fresh_after_restart)
         .expect_err("retained pre-restart heartbeats must not certify a post-restart barrier")
         .to_string();
     assert!(
@@ -9302,6 +9436,10 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
             reason: "reject-indeterminate-obligation".to_string(),
             trace_id: "trace-restart-indeterminate".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: Some("epoch-indeterminate-operation".to_string()),
+            expected_action_log: Some(
+                fleet_action_log_checkpoint(&actions_after_partial_release).unwrap(),
+            ),
         })
         .expect_err("unknown pre-crash obligation must block certified quiescence")
         .to_string();
@@ -9311,19 +9449,45 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     );
     assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
 
+    // Recovery still returns only the old population after the action log
+    // changes and a later admission becomes indeterminate. The new operation
+    // above remains refused; replaying an old receipt does not certify it.
+    let historical = operator_2
+        .certify_epoch_barrier(&request_1)
+        .expect("retain exact historical commit despite new indeterminate population");
+    assert!(historical.already_committed);
+    assert_eq!(historical.certificate, cert_1.certificate);
+    assert_eq!(historical.evidence, cert_1.evidence);
+    assert_eq!(historical.commit_proof, cert_1.commit_proof);
+    assert_eq!(historical.certificate.participants[0].admitted_sessions, 2);
+    assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
+
     // Once node-a resolves its obligation under the held fence and signs generation 3,
     // Coordinator Incarnation 2 advances monotonically from recovered epoch 1 -> 2.
     agent_a_2
         .upsert_node_status(&make_heartbeat("node-a", &sup_a, &expected_2, 3, 3, 0, 8))
         .expect("node-a resolved heartbeat");
+    let mut stale_checkpoint = request_1.clone();
+    stale_checkpoint.operation_id = Some("epoch-stale-checkpoint-operation".to_string());
+    let error = operator_2
+        .certify_epoch_barrier(&stale_checkpoint)
+        .expect_err("a new operation must reject the obsolete reviewed action snapshot")
+        .to_string();
+    assert!(error.contains("HTTP 409"), "{error}");
+    assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
     let cert_2 = operator_2
         .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
             initiator: "ops-root".to_string(),
             reason: "post-restart-epoch-2-commit".to_string(),
             trace_id: "trace-restart-epoch-2".to_string(),
             stale_after: Duration::from_secs(30),
+            operation_id: Some("epoch-restart-operation-2".to_string()),
+            expected_action_log: Some(
+                fleet_action_log_checkpoint(&actions_after_partial_release).unwrap(),
+            ),
         })
         .expect("commit epoch 2 after restart and obligation resolution");
+    assert!(!cert_2.already_committed);
     assert!(cert_2.evidence.fleet_quiescence_certified);
     assert_eq!(
         cert_2.evidence.scope,
@@ -9340,6 +9504,33 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
             .expect("epoch 2 shared seqlock page")
             .control_epoch,
         2
+    );
+
+    // Recovering epoch 1 after epoch 2 must not republish epoch 1's stale
+    // seqlock cache or acquire a third epoch, even though the receipt is valid.
+    let cache_before_retry = std::fs::read(state_dir.join("seqlock.page")).unwrap();
+    let historical_again = operator_2
+        .certify_epoch_barrier(&request_1)
+        .expect("old operation remains recoverable after a later commit");
+    assert!(historical_again.already_committed);
+    assert_eq!(historical_again.certificate, cert_1.certificate);
+    assert_eq!(historical_again.evidence, cert_1.evidence);
+    assert_eq!(historical_again.commit_proof, cert_1.commit_proof);
+    let current = service_2.seqlock_page().read_safepoint();
+    assert_eq!(current.control_epoch, 2);
+    assert_eq!(current.quarantine_version, 8);
+    assert_eq!(current.active_hold_count, 1);
+    assert_eq!(current.action_count, 4);
+    assert_eq!(
+        std::fs::read(state_dir.join("seqlock.page")).unwrap(),
+        cache_before_retry,
+        "historical receipt recovery must not rewrite the derived control cache",
+    );
+    assert!(operator_2.export_epoch_commit(3).is_err());
+    assert_eq!(
+        operator_2.list_actions().unwrap(),
+        actions_after_partial_release,
+        "certification retries must not change holds or action history",
     );
 
     control_2.request_shutdown();

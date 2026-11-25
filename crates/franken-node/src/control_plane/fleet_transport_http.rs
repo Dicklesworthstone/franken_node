@@ -33,12 +33,14 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
     FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA,
-    FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionRecord, FleetEpochCommitProof,
+    FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionLogCheckpoint,
+    FleetActionRecord, FleetEpochCommitProof,
     FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
     FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
     MAX_GUARDED_POLICY_REQUEST_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
-    MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus, validate_action_id,
+    MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus,
+    fleet_epoch_operation_request_sha256, validate_action_id,
     validate_action_record, validate_node_status,
 };
 use super::fleet_transport::{FleetGuardedResumeReceipt, GuardedFleetNativeSessionResume};
@@ -111,10 +113,55 @@ pub struct FleetHttpState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetHttpEpochBarrierRequest {
+    /// Stable identity for retrying exactly one epoch commit. Recovery returns
+    /// historical evidence; it never certifies the current session population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// Optional full action snapshot required for the first commit. A retry
+    /// retains this original precondition even when the live log has advanced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_action_log: Option<FleetActionLogCheckpoint>,
     pub initiator: String,
     pub reason: String,
     pub trace_id: String,
     pub stale_after: Duration,
+}
+
+impl FleetHttpEpochBarrierRequest {
+    pub(crate) fn validate(&self) -> Result<(), FleetTransportError> {
+        if self.initiator.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || self.trace_id.trim().is_empty()
+            || self.stale_after.is_zero()
+        {
+            return Err(FleetTransportError::serialization(
+                "epoch-barrier requests require an initiator, reason, trace and positive freshness window",
+            ));
+        }
+        if let Some(operation_id) = &self.operation_id {
+            validate_action_id(operation_id)?;
+        }
+        if let Some(expected) = &self.expected_action_log {
+            expected.validate()?;
+        }
+        Ok(())
+    }
+
+    fn operation_request_sha256(&self) -> Result<Option<String>, FleetTransportError> {
+        self.operation_id
+            .as_deref()
+            .map(|operation_id| {
+                fleet_epoch_operation_request_sha256(
+                    operation_id,
+                    &self.initiator,
+                    &self.reason,
+                    &self.trace_id,
+                    self.stale_after,
+                    self.expected_action_log.as_ref(),
+                )
+            })
+            .transpose()
+    }
 }
 
 /// `POST /v2/fleet/epoch-barrier` response body.
@@ -122,6 +169,10 @@ pub struct FleetHttpEpochBarrierRequest {
 #[serde(deny_unknown_fields)]
 pub struct FleetHttpEpochBarrierResponse {
     pub schema_version: String,
+    /// True for recovery/export of a historical commit. Its timestamp and
+    /// supervisor evidence are unchanged and establish no present quiescence.
+    #[serde(default)]
+    pub already_committed: bool,
     pub evidence: FleetNativeDrainEvidence,
     pub certificate: FleetEpochQuiescenceCertificate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +185,32 @@ impl FleetHttpEpochBarrierResponse {
     /// enrollment authority still comes from the configured coordinator, never
     /// from keys supplied by this response.
     fn validate_for_request(
+        &self,
+        request: &FleetHttpEpochBarrierRequest,
+    ) -> Result<(), FleetTransportError> {
+        request.validate()?;
+        self.validate_observation(request)?;
+        if self.certificate.operation_id != request.operation_id
+            || self.certificate.operation_request_sha256 != request.operation_request_sha256()?
+            || (self.already_committed && request.operation_id.is_none())
+            || (request.operation_id.is_some() && self.commit_proof.is_none())
+            || request
+                .expected_action_log
+                .as_ref()
+                .is_some_and(|expected| expected != &self.certificate.action_log_checkpoint)
+        {
+            return Err(FleetTransportError::stale_state(
+                "epoch-barrier response does not bind the exact requested operation or action snapshot",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check the historical observation independently of its original request.
+    /// Export knows the epoch, not the unclamped freshness or optional original
+    /// precondition; its signed operation digest must not be reconstructed from
+    /// a fabricated request.
+    fn validate_observation(
         &self,
         request: &FleetHttpEpochBarrierRequest,
     ) -> Result<(), FleetTransportError> {
@@ -170,6 +247,29 @@ impl FleetHttpEpochBarrierResponse {
             ));
         }
         certificate.action_log_checkpoint.validate()?;
+        match (
+            certificate.operation_id.as_deref(),
+            certificate.operation_request_sha256.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(operation_id), Some(digest)) => {
+                validate_action_id(operation_id)?;
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(FleetTransportError::serialization(
+                        "epoch operation request digest must be lowercase SHA-256",
+                    ));
+                }
+            }
+            _ => {
+                return Err(FleetTransportError::serialization(
+                    "epoch operation identity and request digest must be present together",
+                ));
+            }
+        }
         let threshold = chrono::TimeDelta::from_std(evidence.stale_after)
             .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
         let mut previous_identity = None;
@@ -273,7 +373,9 @@ impl FleetHttpEpochBarrierResponse {
                 "coordinator did not return an independently signed commit for the requested epoch",
             ));
         }
-        self.validate_for_request(&FleetHttpEpochBarrierRequest {
+        self.validate_observation(&FleetHttpEpochBarrierRequest {
+            operation_id: self.certificate.operation_id.clone(),
+            expected_action_log: None,
             initiator: self.certificate.initiator.clone(),
             reason: self.certificate.reason.clone(),
             trace_id: self.certificate.trace_id.clone(),
@@ -897,12 +999,16 @@ impl HttpFleetTransport {
                 "a committed fleet epoch must be positive",
             ));
         }
-        let response: FleetHttpEpochBarrierResponse = self.get_json_with_limit(
+        let mut response: FleetHttpEpochBarrierResponse = self.get_json_with_limit(
             &format!("{FLEET_HTTP_EPOCH_COMMITS_PREFIX}{epoch}"),
             true,
             MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
         )?;
         response.validate_for_export(epoch)?;
+        // This read-only route retrieves an existing commit. Older servers
+        // omit the unsigned transport hint; the verified epoch and proof
+        // establish its identity independently of that presentation field.
+        response.already_committed = true;
         Ok(response)
     }
 
@@ -911,15 +1017,7 @@ impl HttpFleetTransport {
         &self,
         request: &FleetHttpEpochBarrierRequest,
     ) -> Result<FleetHttpEpochBarrierResponse, FleetTransportError> {
-        if request.initiator.trim().is_empty()
-            || request.reason.trim().is_empty()
-            || request.trace_id.trim().is_empty()
-            || request.stale_after.is_zero()
-        {
-            return Err(FleetTransportError::serialization(
-                "epoch-barrier requests require an initiator, reason, trace and positive freshness window",
-            ));
-        }
+        request.validate()?;
         let response: FleetHttpEpochBarrierResponse = self.post_json_with_limits(
             FLEET_HTTP_EPOCH_BARRIER_PATH,
             request,
@@ -1004,6 +1102,8 @@ mod tests {
             key.verifying_key(),
         )]);
         let request = FleetHttpEpochBarrierRequest {
+            operation_id: None,
+            expected_action_log: None,
             initiator: "operator".to_string(),
             reason: "advance while admissions are closed".to_string(),
             trace_id: "trace-epoch-client".to_string(),
@@ -1020,6 +1120,9 @@ mod tests {
             &state,
             &roots,
             FleetEpochBarrierParams {
+                operation_id: None,
+                operation_request_sha256: None,
+                expected_action_log: None,
                 initiator: &request.initiator,
                 reason: &request.reason,
                 now,
@@ -1032,6 +1135,7 @@ mod tests {
             request,
             FleetHttpEpochBarrierResponse {
                 schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                already_committed: false,
                 evidence,
                 certificate,
                 commit_proof: None,
@@ -1045,6 +1149,83 @@ mod tests {
         response.validate_for_request(&request).unwrap();
         assert_eq!(response.certificate.pre_epoch, 7);
         assert_eq!(response.certificate.committed_epoch, 8);
+    }
+
+    #[test]
+    fn epoch_operation_response_binds_unclamped_request_and_exports_original_proof() {
+        let (mut request, mut response) = certified_epoch_response();
+        request.operation_id = Some("retryable-client-operation".to_owned());
+        request.expected_action_log = Some(response.certificate.action_log_checkpoint.clone());
+        request.stale_after = Duration::from_secs(301);
+        response.evidence.stale_after = MAX_GUARDED_POLICY_STALE_AFTER;
+        response.certificate.operation_id = request.operation_id.clone();
+        response.certificate.operation_request_sha256 =
+            request.operation_request_sha256().unwrap();
+        let signer = super::super::fleet_transport::FleetEpochCommitSigner::new(
+            "coordinator-test",
+            ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        )
+        .unwrap();
+        let authorization = signer
+            .authorize(&response.evidence, &response.certificate)
+            .unwrap();
+        response.commit_proof = Some(
+            signer
+                .attest_committed(authorization, &response.evidence, &response.certificate)
+                .unwrap(),
+        );
+        response.schema_version = FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA.to_owned();
+        response.validate_for_request(&request).unwrap();
+        response.validate_for_export(8).unwrap();
+        response.already_committed = true;
+        response.validate_for_request(&request).unwrap();
+        response.validate_for_export(8).unwrap();
+
+        for field in 0..4 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.operation_id = Some("another-operation".to_owned()),
+                1 => changed.expected_action_log = None,
+                2 => changed.stale_after = Duration::from_secs(302),
+                _ => changed.operation_id = None,
+            }
+            assert!(
+                response.validate_for_request(&changed).is_err(),
+                "changed original request field {field} must not recover another intent"
+            );
+        }
+
+        response.commit_proof = None;
+        response.schema_version = FLEET_HTTP_API_SCHEMA.to_owned();
+        assert!(
+            response.validate_for_request(&request).is_err(),
+            "retryable operations require an independently signed retained commit"
+        );
+        response.certificate.operation_request_sha256 = None;
+        assert!(response.validate_for_request(&request).is_err());
+    }
+
+    #[test]
+    fn epoch_operation_client_checks_ids_and_snapshot_preconditions_before_network_io() {
+        let (mut request, mut response) = certified_epoch_response();
+        request.operation_id = Some("../invalid".to_owned());
+        assert!(request.validate().is_err());
+        request.operation_id = None;
+        request.expected_action_log = Some(response.certificate.action_log_checkpoint.clone());
+        request.expected_action_log.as_mut().unwrap().actions_sha256 = "invalid".to_owned();
+        assert!(request.validate().is_err());
+        request.expected_action_log = Some(response.certificate.action_log_checkpoint.clone());
+        request.expected_action_log.as_mut().unwrap().actions_sha256 = "00".repeat(32);
+        request.validate().unwrap();
+        assert!(response.validate_for_request(&request).is_err());
+        request.expected_action_log = Some(response.certificate.action_log_checkpoint.clone());
+        response.validate_for_request(&request).unwrap();
+
+        response.already_committed = true;
+        assert!(
+            response.validate_for_request(&request).is_err(),
+            "one-shot certification cannot be silently answered with historical recovery"
+        );
     }
 
     #[test]
@@ -1097,6 +1278,9 @@ mod tests {
         assert_eq!(fixture["live_execution_performed"], false);
         let response: FleetHttpEpochBarrierResponse =
             serde_json::from_value(fixture["http_response"].clone()).unwrap();
+        // Historical servers omitted the unsigned transport hint. Existing
+        // independently signed exports retain their verification contract.
+        assert!(!response.already_committed);
         response.validate_for_export(8).unwrap();
         let root_bytes: [u8; 32] = hex::decode(
             fixture["coordinator_trust"]["coordinator_public_key_hex"]

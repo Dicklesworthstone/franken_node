@@ -801,7 +801,7 @@ fn authenticated_runtime_epoch_store(project: &Path, commit_epoch: bool) -> std:
         Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes()).as_slice(),
     )
     .unwrap();
-    let (_, certificate, _) = transport
+    let (_, certificate, _, _) = transport
         .certify_epoch_quiescence_projected(
             &key,
             None,
@@ -812,6 +812,9 @@ fn authenticated_runtime_epoch_store(project: &Path, commit_epoch: bool) -> std:
                 now,
                 stale_after: std::time::Duration::from_secs(30),
                 trace_id: "runtime-epoch-test",
+                operation_id: None,
+                operation_request_sha256: None,
+                expected_action_log: None,
             },
             || now,
             |_| Ok(()),

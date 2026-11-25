@@ -46,7 +46,9 @@ use super::fleet_transport::{
     FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
     MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
-    certify_fleet_epoch_quiescence, fleet_epoch_quiescence_manifest_hash, validate_action_record,
+    certify_fleet_epoch_quiescence, fleet_action_log_checkpoint,
+    fleet_epoch_operation_request_sha256, fleet_epoch_quiescence_manifest_hash, validate_action_id,
+    validate_action_record,
     validate_fleet_native_session_publication, validate_fleet_policy_publication,
     validate_guarded_fleet_policy_publication, validate_node_status,
 };
@@ -1096,7 +1098,11 @@ impl DurableFleetTransport {
         let epoch = encoded
             .parse::<u64>()
             .map_err(|_| FleetTransportError::serialization("invalid durable epoch head value"))?;
-        if epoch == 0 || epoch.to_string() != encoded || count != epoch {
+        if epoch == 0
+            || epoch.to_string() != encoded
+            || count != epoch
+            || epoch > MAX_ACTION_LOG_ENTRIES as u64
+        {
             return Err(FleetTransportError::stale_state(
                 "durable fleet epoch head and retained history disagree",
             ));
@@ -1141,6 +1147,26 @@ impl DurableFleetTransport {
             ));
         }
         Ok(commit)
+    }
+
+    /// Operation identity lives in the authenticated certificate. A disposable
+    /// index cannot establish absence: losing an index entry must never cause
+    /// the same operation to advance twice. Walk contiguous, bounded history
+    /// one record at a time instead of loading every evidence package at once.
+    /// Recent retries normally find their operation at the head.
+    fn query_epoch_operation(
+        connection: &Connection,
+        key: &EpochSigningKey,
+        head: u64,
+        operation_id: &str,
+    ) -> Result<Option<SignedFleetEpochCommit>, FleetTransportError> {
+        for epoch in (1..=head).rev() {
+            let commit = Self::query_epoch_commit(connection, key, epoch)?;
+            if commit.certificate.operation_id.as_deref() == Some(operation_id) {
+                return Ok(Some(commit));
+            }
+        }
+        Ok(None)
     }
 
     fn validate_head_signer(
@@ -1254,6 +1280,9 @@ impl DurableFleetTransport {
     /// node and epoch snapshot. A failed/conflicted transaction discards its
     /// provisional coordinator; retry rechecks the live hold and fresh nodes.
     /// The clock refreshes params.now after node projection on every attempt.
+    /// An existing operation returns its original historical commit before
+    /// projecting current nodes. Recovery never renews supervisor observations
+    /// or proves that the presently admitted population remains quiescent.
     pub fn certify_epoch_quiescence_projected(
         &mut self,
         key: &EpochSigningKey,
@@ -1267,9 +1296,56 @@ impl DurableFleetTransport {
             FleetNativeDrainEvidence,
             FleetEpochQuiescenceCertificate,
             u64,
+            bool,
         ),
         FleetTransportError,
     > {
+        let expected_action_log = params.expected_action_log;
+        if let Some(operation_id) = params.operation_id {
+            validate_action_id(operation_id)?;
+            if signer.is_none() {
+                return Err(FleetTransportError::not_initialized(
+                    "retryable epoch operations require a provisioned coordinator signing key",
+                ));
+            }
+        }
+        if let Some(expected) = expected_action_log {
+            expected.validate()?;
+        }
+        if params.initiator.trim().is_empty()
+            || params.reason.trim().is_empty()
+            || params.trace_id.trim().is_empty()
+            || params.stale_after.is_zero()
+        {
+            return Err(FleetTransportError::serialization(
+                "epoch-barrier requests require an initiator, reason, trace and positive freshness window",
+            ));
+        }
+        let request_sha256 = params
+            .operation_id
+            .map(|operation_id| {
+                fleet_epoch_operation_request_sha256(
+                    operation_id,
+                    params.initiator,
+                    params.reason,
+                    params.trace_id,
+                    params.stale_after,
+                    expected_action_log,
+                )
+            })
+            .transpose()?;
+        if params
+            .operation_request_sha256
+            .is_some_and(|digest| Some(digest) != request_sha256.as_deref())
+        {
+            return Err(FleetTransportError::action_conflict(
+                "epoch operation digest differs from its exact request",
+            ));
+        }
+        let params = FleetEpochBarrierParams {
+            operation_request_sha256: request_sha256.as_deref(),
+            ..params
+        };
         self.ensure_initialized()?;
         self.with_connection(|connection| {
             let mut tx = connection
@@ -1278,11 +1354,54 @@ impl DurableFleetTransport {
             serialize_fleet_mutation(&tx)?;
             let epoch = self.query_epoch_head(connection, key)?;
             Self::validate_head_signer(connection, key, epoch, signer)?;
+            if let Some(operation_id) = params.operation_id
+                && let Some(retained) =
+                    Self::query_epoch_operation(connection, key, epoch, operation_id)?
+            {
+                let certificate = &retained.certificate;
+                if certificate.operation_request_sha256.as_deref() != params.operation_request_sha256
+                    || certificate.initiator != params.initiator
+                    || certificate.reason != params.reason
+                    || certificate.trace_id != params.trace_id
+                    || retained.evidence.stale_after
+                        != params.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER)
+                    || expected_action_log
+                        .is_some_and(|expected| expected != &certificate.action_log_checkpoint)
+                {
+                    return Err(FleetTransportError::action_conflict(
+                        "epoch operation ID already binds a different request or action snapshot",
+                    ));
+                }
+                let authorization = retained.coordinator_authorization.as_ref().ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "retained epoch operation lacks its independent coordinator authorization",
+                    )
+                })?;
+                let signer = signer.ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "retained epoch operation requires its provisioned coordinator signing key",
+                    )
+                })?;
+                authorization.verify(signer, &retained.evidence, certificate)?;
+                tx.commit()
+                    .map_err(|error| FleetTransportError::io(error.to_string()))?;
+                // No current node projection took place. Zero is not a new
+                // quarantine observation; recovery must leave the current
+                // control cache untouched.
+                return Ok((retained.evidence, retained.certificate, 0, true));
+            }
             let mut state = FleetSharedState {
                 schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
                 actions: Self::query_actions(connection)?,
                 nodes: Self::query_nodes(connection)?,
             };
+            if let Some(expected) = expected_action_log
+                && expected != &fleet_action_log_checkpoint(&state.actions)?
+            {
+                return Err(FleetTransportError::stale_state(
+                    "epoch-barrier action snapshot changed before certification",
+                ));
+            }
             project_nodes(&mut state.nodes)?;
             let quarantine_version = state
                 .nodes
@@ -1298,6 +1417,7 @@ impl DurableFleetTransport {
                 roots,
                 FleetEpochBarrierParams {
                     now: now(),
+                    stale_after: params.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
                     ..params
                 },
             )?;
@@ -1345,7 +1465,7 @@ impl DurableFleetTransport {
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
             tx.commit()
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
-            Ok((evidence, certificate, quarantine_version))
+            Ok((evidence, certificate, quarantine_version, false))
         })
     }
 

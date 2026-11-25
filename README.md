@@ -1374,6 +1374,7 @@ franken-node fleet hold --zone all --id epoch-maintenance-2026-11-20 \
   --reason "replace the admitted runtime across the fleet" --wait --json
 franken-node fleet certify-quiescence --initiator release-operator \
   --reason "all enrolled native populations drained before replacement" \
+  --id certify-rollout-2026-11-20 \
   --trace-id rollout-2026-11-20 --stale-after-secs 30 --json
 
 # Complete maintenance while the hold stays active, then reopen admission.
@@ -1398,11 +1399,21 @@ coordinator; this report is not a separate public-key attestation by an
 independent verifier. The certificate covers the recorded native-session
 population, not uncensused reference processes or remote effect completion.
 
-Certification leaves all holds active. Each successful request commits a new
-epoch; `--trace-id` is an audit correlation value, not an idempotency key. Keep the
-returned certificate with the maintenance record. If the response is lost,
-inspect the coordinator's durable `runtime epoch` state before deliberately
-requesting another transition.
+Certification leaves all holds active. Supply `--id` for retryable maintenance:
+repeat the exact same command after a lost response or coordinator restart to
+recover the original committed epoch, evidence, and public proof. This requires
+the coordinator's separately provisioned signing key. The operation ID and a
+SHA-256 commitment to the original request are covered by the certificate's
+coordinator signatures. Changing the initiator, reason, trace, requested freshness,
+or action-log precondition under that ID fails without advancing the epoch.
+When `--trace-id` is omitted, it defaults to `--id`, making the command repeatable.
+
+A retry reports `already_committed: true`. Its original timestamp and population
+remain historical: recovery neither renews quiescence nor asserts that admission
+is still held, and it does not roll back a newer committed epoch. New work needs
+a new operation ID and fresh signed observations. Without `--id`, each successful
+request still commits a new epoch; `--trace-id` alone is only audit correlation.
+Keep the returned certificate with the maintenance record.
 
 Use the hold as an atomic precondition when publishing an executable fleet policy:
 

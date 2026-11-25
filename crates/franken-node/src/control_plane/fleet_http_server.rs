@@ -811,6 +811,7 @@ impl FleetControlPlaneService {
                     "ok",
                     &FleetHttpEpochBarrierResponse {
                         schema_version: FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA.to_owned(),
+                        already_committed: true,
                         evidence,
                         certificate,
                         commit_proof: Some(proof),
@@ -950,28 +951,41 @@ impl FleetControlPlaneService {
                     Ok(req) => req,
                     Err(response) => return response,
                 };
+                if let Err(error) = barrier_req.validate() {
+                    return invalid_record(&error);
+                }
+                if barrier_req.operation_id.is_some() && self.epoch_commit_signer.is_none() {
+                    return FleetHttpResponse::problem(
+                        409,
+                        "conflict",
+                        "FLEET_HTTP_COORDINATOR_SIGNING_KEY_REQUIRED",
+                        "retryable epoch operations require a provisioned coordinator signing key",
+                    );
+                }
                 let clock = self.clock;
                 let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
                 let epoch_commit_signer = self.epoch_commit_signer.clone();
                 let seqlock_page = Arc::clone(&self.seqlock_page);
                 let seqlock_path = self.state_dir.join("seqlock.page");
                 self.with_transport(move |transport, authenticated| {
-                    let (evidence, certificate, max_qv) = transport.certify_epoch_quiescence_projected(
-                        &epoch_signing_key,
-                        epoch_commit_signer.as_deref(),
-                        &roots,
-                        super::fleet_transport::FleetEpochBarrierParams {
-                            initiator: &barrier_req.initiator,
-                            reason: &barrier_req.reason,
-                            now: clock(),
-                            stale_after: barrier_req
-                                .stale_after
-                                .min(MAX_GUARDED_POLICY_STALE_AFTER),
-                            trace_id: &barrier_req.trace_id,
-                        },
-                        clock,
-                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
-                    )?;
+                    let (evidence, certificate, max_qv, already_committed) =
+                        transport.certify_epoch_quiescence_projected(
+                            &epoch_signing_key,
+                            epoch_commit_signer.as_deref(),
+                            &roots,
+                            super::fleet_transport::FleetEpochBarrierParams {
+                                operation_id: barrier_req.operation_id.as_deref(),
+                                operation_request_sha256: None,
+                                expected_action_log: barrier_req.expected_action_log.as_ref(),
+                                initiator: &barrier_req.initiator,
+                                reason: &barrier_req.reason,
+                                now: clock(),
+                                stale_after: barrier_req.stale_after,
+                                trace_id: &barrier_req.trace_id,
+                            },
+                            clock,
+                            |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
+                        )?;
                     let commit_proof = epoch_commit_signer
                         .as_ref()
                         .map(|signer| {
@@ -980,32 +994,34 @@ impl FleetControlPlaneService {
                                 .map(|(_, _, proof)| proof)
                         })
                         .transpose()?;
-                    let checkpoint = &certificate.action_log_checkpoint;
-                    let mut digest_prefix = [0_u8; 32];
-                    if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
-                        && decoded.len() == 32
-                    {
-                        digest_prefix.copy_from_slice(&decoded);
+                    if !already_committed {
+                        let checkpoint = &certificate.action_log_checkpoint;
+                        let mut digest_prefix = [0_u8; 32];
+                        if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
+                            && decoded.len() == 32
+                        {
+                            digest_prefix.copy_from_slice(&decoded);
+                        }
+                        let active_hold_count = certificate
+                            .participants
+                            .iter()
+                            .flat_map(|participant| participant.active_hold_ids.iter())
+                            .collect::<BTreeSet<_>>()
+                            .len() as u64;
+                        seqlock_page.publish(
+                            certificate.committed_epoch,
+                            max_qv,
+                            active_hold_count,
+                            checkpoint.action_count,
+                            digest_prefix,
+                        );
+                        seqlock_page.write_shared_page(&seqlock_path).map_err(|error| {
+                            FleetTransportError::io(format!(
+                                "fleet epoch {} committed durably, but control cache publication failed: {error}",
+                                certificate.committed_epoch
+                            ))
+                        })?;
                     }
-                    let active_hold_count = certificate
-                        .participants
-                        .iter()
-                        .flat_map(|participant| participant.active_hold_ids.iter())
-                        .collect::<BTreeSet<_>>()
-                        .len() as u64;
-                    seqlock_page.publish(
-                        certificate.committed_epoch,
-                        max_qv,
-                        active_hold_count,
-                        checkpoint.action_count,
-                        digest_prefix,
-                    );
-                    seqlock_page.write_shared_page(&seqlock_path).map_err(|error| {
-                        FleetTransportError::io(format!(
-                            "fleet epoch {} committed durably, but control cache publication failed: {error}",
-                            certificate.committed_epoch
-                        ))
-                    })?;
                     Ok(FleetHttpResponse::json(
                         200,
                         "ok",
@@ -1015,6 +1031,7 @@ impl FleetControlPlaneService {
                             } else {
                                 FLEET_HTTP_API_SCHEMA
                             }.to_owned(),
+                            already_committed,
                             evidence,
                             certificate,
                             commit_proof,
@@ -1643,6 +1660,8 @@ mod tests {
             FLEET_HTTP_EPOCH_BARRIER_PATH,
             Some(&bearer()),
             &serde_json::to_vec(&FleetHttpEpochBarrierRequest {
+                operation_id: None,
+                expected_action_log: None,
                 initiator: "operator".to_string(),
                 reason: "held-population epoch transition".to_string(),
                 trace_id: trace.to_string(),
@@ -1739,6 +1758,209 @@ mod tests {
             Some(&bearer()),
             b"",
         ))
+    }
+
+    fn retryable_epoch_request(
+        service: &FleetControlPlaneService,
+        operation_id: &str,
+    ) -> FleetHttpEpochBarrierRequest {
+        let response = service.handle(request(
+            "GET",
+            FLEET_HTTP_STATE_PATH,
+            Some(&bearer()),
+            b"",
+        ));
+        assert_eq!(response.status, 200);
+        let state: FleetHttpState = serde_json::from_slice(&response.body).unwrap();
+        FleetHttpEpochBarrierRequest {
+            operation_id: Some(operation_id.to_owned()),
+            expected_action_log: Some(
+                super::super::fleet_transport::fleet_action_log_checkpoint(&state.state.actions)
+                    .unwrap(),
+            ),
+            initiator: "epoch-operation-test".to_owned(),
+            reason: "certify the retained held population".to_owned(),
+            trace_id: format!("trace-{operation_id}"),
+            stale_after: std::time::Duration::from_secs(30),
+        }
+    }
+
+    fn post_epoch_operation(
+        service: &FleetControlPlaneService,
+        operation: &FleetHttpEpochBarrierRequest,
+    ) -> FleetHttpResponse {
+        service.handle(request(
+            "POST",
+            FLEET_HTTP_EPOCH_BARRIER_PATH,
+            Some(&bearer()),
+            &serde_json::to_vec(operation).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn epoch_operation_retry_recovers_signed_history_without_regressing_the_live_cache() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_held_population(&root, Some(coordinator_signer()));
+        let first_request = retryable_epoch_request(&service, "operation-one");
+        let first = post_epoch_operation(&service, &first_request);
+        assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+        let first: FleetHttpEpochBarrierResponse = serde_json::from_slice(&first.body).unwrap();
+        assert!(!first.already_committed);
+        assert_eq!(first.certificate.committed_epoch, 1);
+        assert_eq!(
+            first.certificate.operation_id.as_deref(),
+            Some("operation-one")
+        );
+        assert!(first.commit_proof.is_some());
+
+        let second_request = retryable_epoch_request(&service, "operation-two");
+        let second = post_epoch_operation(&service, &second_request);
+        assert_eq!(second.status, 200, "{}", String::from_utf8_lossy(&second.body));
+        let second: FleetHttpEpochBarrierResponse = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second.certificate.committed_epoch, 2);
+        let live_cache = service.seqlock_page().read_safepoint();
+
+        let retry = post_epoch_operation(&service, &first_request);
+        assert_eq!(retry.status, 200);
+        let retry: FleetHttpEpochBarrierResponse = serde_json::from_slice(&retry.body).unwrap();
+        assert!(retry.already_committed);
+        assert_eq!(retry.evidence, first.evidence);
+        assert_eq!(retry.certificate, first.certificate);
+        assert_eq!(retry.commit_proof, first.commit_proof);
+        assert_eq!(service.seqlock_page().read_safepoint(), live_cache);
+        drop(service);
+
+        let service = FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN)
+            .unwrap()
+            .with_clock(fixed_clock)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap()
+            .with_epoch_commit_signer(coordinator_signer())
+            .unwrap();
+        let recovered_cache = service.seqlock_page().read_safepoint();
+        assert_eq!(recovered_cache.control_epoch, 2);
+        let recovered = post_epoch_operation(&service, &first_request);
+        assert_eq!(
+            recovered.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&recovered.body)
+        );
+        let recovered: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&recovered.body).unwrap();
+        assert!(recovered.already_committed);
+        assert_eq!(recovered.evidence, first.evidence);
+        assert_eq!(recovered.certificate, first.certificate);
+        assert_eq!(recovered.commit_proof, first.commit_proof);
+        assert_eq!(service.seqlock_page().read_safepoint(), recovered_cache);
+        let new_request = retryable_epoch_request(&service, "operation-three");
+        assert_eq!(
+            post_epoch_operation(&service, &new_request).status,
+            409,
+            "recovery must not reauthenticate nodes or certify a new population"
+        );
+        assert_eq!(service.seqlock_page().read_safepoint(), recovered_cache);
+    }
+
+    #[test]
+    fn epoch_operation_id_binds_original_intent_before_freshness_clamping() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (_dir, service) = service_with_held_population(&root, Some(coordinator_signer()));
+        let mut original = retryable_epoch_request(&service, "exact-epoch-intent");
+        original.stale_after = std::time::Duration::from_secs(301);
+        let first = post_epoch_operation(&service, &original);
+        assert_eq!(first.status, 200);
+        let first: FleetHttpEpochBarrierResponse = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(
+            first.evidence.stale_after,
+            MAX_GUARDED_POLICY_STALE_AFTER
+        );
+        let cache = service.seqlock_page().read_safepoint();
+        for field in 0..6 {
+            let mut changed = original.clone();
+            match field {
+                0 => changed.initiator.push_str("-other"),
+                1 => changed.reason.push_str("-other"),
+                2 => changed.trace_id.push_str("-other"),
+                3 => changed.stale_after = std::time::Duration::from_secs(302),
+                4 => changed.expected_action_log = None,
+                _ => {
+                    changed.expected_action_log.as_mut().unwrap().actions_sha256 =
+                        "00".repeat(32);
+                }
+            }
+            let refused = post_epoch_operation(&service, &changed);
+            assert_eq!(
+                refused.status,
+                409,
+                "changed field {field}: {}",
+                String::from_utf8_lossy(&refused.body)
+            );
+            assert_eq!(service.seqlock_page().read_safepoint(), cache);
+        }
+        let retry = post_epoch_operation(&service, &original);
+        assert_eq!(retry.status, 200);
+        let retry: FleetHttpEpochBarrierResponse = serde_json::from_slice(&retry.body).unwrap();
+        assert!(retry.already_committed);
+        assert_eq!(retry.certificate, first.certificate);
+        assert_eq!(export_epoch(&service, 2).status, 409);
+    }
+
+    #[test]
+    fn epoch_operation_requires_signing_authority_and_the_expected_first_snapshot() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (_dir, service) = service_with_held_population(&root, None);
+        let original = retryable_epoch_request(&service, "guarded-epoch-start");
+        assert_eq!(post_epoch_operation(&service, &original).status, 409);
+        assert_eq!(service.seqlock_page().read_safepoint().control_epoch, 0);
+        let service = service
+            .with_epoch_commit_signer(coordinator_signer())
+            .unwrap();
+        let mut wrong_snapshot = original.clone();
+        wrong_snapshot.expected_action_log.as_mut().unwrap().actions_sha256 = "00".repeat(32);
+        assert_eq!(post_epoch_operation(&service, &wrong_snapshot).status, 409);
+        assert_eq!(export_epoch(&service, 1).status, 409);
+        let mut bad_id = original.clone();
+        bad_id.operation_id = Some("../outside".to_owned());
+        assert_eq!(post_epoch_operation(&service, &bad_id).status, 400);
+        assert_eq!(export_epoch(&service, 1).status, 409);
+
+        let accepted = post_epoch_operation(&service, &original);
+        assert_eq!(
+            accepted.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&accepted.body)
+        );
+        let accepted: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&accepted.body).unwrap();
+        assert_eq!(accepted.certificate.committed_epoch, 1);
+    }
+
+    #[test]
+    fn epoch_operation_recovers_after_a_committed_cache_publication_failure() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_held_population(&root, Some(coordinator_signer()));
+        let operation = retryable_epoch_request(&service, "cache-failure-epoch");
+        std::fs::create_dir(dir.path().join("fleet/seqlock.page")).unwrap();
+        let failed = post_epoch_operation(&service, &operation);
+        assert_eq!(failed.status, 500);
+        assert!(String::from_utf8_lossy(&failed.body).contains("committed durably"));
+
+        let recovered = post_epoch_operation(&service, &operation);
+        assert_eq!(
+            recovered.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&recovered.body)
+        );
+        let recovered: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&recovered.body).unwrap();
+        assert!(recovered.already_committed);
+        assert_eq!(recovered.certificate.committed_epoch, 1);
+        assert!(recovered.commit_proof.is_some());
+        assert_eq!(export_epoch(&service, 2).status, 409);
+        assert_eq!(service.seqlock_page().read_safepoint().control_epoch, 1);
     }
 
     #[test]
