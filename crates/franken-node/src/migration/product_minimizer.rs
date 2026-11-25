@@ -19,7 +19,7 @@ use super::{
     output_destination, payload_hash, product_oracle, runtime_invocations, same_runtime, stored,
     summary,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};

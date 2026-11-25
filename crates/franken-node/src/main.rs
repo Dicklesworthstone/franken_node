@@ -24784,7 +24784,7 @@ fn handle_remotecap_invoke(_args: &RemoteCapInvokeArgs) -> Result<()> {
 #[cfg(all(feature = "engine", feature = "http-client"))]
 fn handle_remotecap_invoke(args: &RemoteCapInvokeArgs) -> Result<()> {
     use observability::evidence_ledger::{DecisionKind, evidence_entry_hash_hex};
-    use security::remote_cap_http::{
+    use frankenengine_node::security::remote_cap_http::{
         PreparedRemoteCapHttpRequest, PreparedRemoteCapHttpTransport, RemoteCapHttpOutcome,
     };
 

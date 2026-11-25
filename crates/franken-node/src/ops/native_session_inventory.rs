@@ -2521,8 +2521,8 @@ impl NativeSessionInventoryGuard {
             // fsqlite if another connection holds an active transaction.
             const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
             let wal_path = self.protected_root.join(format!("{INVENTORY_FILE}-wal"));
-            if std::fs::metadata(&wal_path)
-                .is_ok_and(|meta| meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
+            if std::fs::symlink_metadata(&wal_path)
+                .is_ok_and(|meta| meta.is_file() && meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
             {
                 let _ = active_conn.query("PRAGMA wal_checkpoint(TRUNCATE);");
             }

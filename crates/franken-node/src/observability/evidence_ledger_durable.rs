@@ -234,9 +234,9 @@ impl DurableEvidenceLedger {
                 // non-blockingly under fsqlite if another transaction is open.
                 const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
                 let wal_path = state_dir.join(format!("{EVIDENCE_DB_FILE}-wal"));
-                if std::fs::metadata(&wal_path)
-                    .is_ok_and(|meta| meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
-                {
+                if std::fs::symlink_metadata(&wal_path).is_ok_and(|meta| {
+                    meta.is_file() && meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES
+                }) {
                     let _ = connection.query("PRAGMA wal_checkpoint(TRUNCATE);");
                 }
                 return Ok(entry);

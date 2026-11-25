@@ -1450,7 +1450,7 @@ impl LockstepHarness {
                 path.display()
             )
         };
-        let file = File::open(path).with_context(&context)?;
+        let file = File::open(path).with_context(context)?;
         let mut bytes = Vec::new();
         file.take((MAX_RAW_STRACE_BYTES + 1) as u64)
             .read_to_end(&mut bytes)

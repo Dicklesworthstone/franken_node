@@ -96,9 +96,11 @@ pub fn authority_state_present(snapshot_path: &Path) -> bool {
         durable_store_authority_path(snapshot_path),
     ]
     .iter()
-    .any(|path| match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        _ => true,
+    .any(|path| {
+        !matches!(
+            std::fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
     })
 }
 
