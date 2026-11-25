@@ -1486,6 +1486,7 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | `franken-node incident replay` | Verifies recorded bundle integrity by default; `--execute` also re-executes captured native guest inputs. `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--execute`, `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model synthetic` (default) is the sandboxed risk-score stand-in. `--model production` re-decides every host effect a run-captured incident recorded (its signed effect-receipt chain entry) under the runtime profile named by `--policy` (`strict`, `balanced`, `legacy-risky`), using the run path's own capability table: an effect whose capability the profile does not grant is refused at the capability gate; one it grants gets the recorded outcome of the profile-independent SSRF / flow / sandbox gates; spawns keep their admission-bound outcome. Decisions after the first divergence are labelled `determination=path_assumed`. Bundles without recorded effects, and non-profile policies, are refused. The model is bound into the counterfactual digest. Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
+| `franken-node incident sessions` | Discover authenticated retained native-session admissions, outcomes and provider journals. Includes signed admissions whose inventory database or row is missing or safely readable but corrupt; source errors remain explicit. Flags: `--project`, `--session`, `--json`. |
 | `franken-node incident capture` | `--from-run <receipt-id\|receipt-path>` verifies the product-signed run record, receipt snapshot, engine ledger and session identity before sealing incident evidence. An existing source is returned as `already_captured` only after its signature and run bindings authenticate. Alternatively, `--from-session <UUID>` exports original signed supervisor observations, including interrupted, panicked and pending sessions, to a private `.fnforensics.json` artifact for independent offline verification. Session exports accept `--out`; run captures accept `--severity`. Both accept `--json`; session exports use `franken-node/incident-forensics-cli/v1`, run captures use `franken-node/incident-capture-cli/v1`. |
 
 ### Long-term verifiability (LTV)
@@ -2550,12 +2551,28 @@ outcome, journal and frozen sources are still authenticated. A readable
 contradictory or malformed row, damaged retained evidence, or an unsafe database
 path or permission refuses export.
 
-The CLI reports `inventory_projection` as `matched`, `missing_database`,
+The export CLI reports `inventory_projection` as `matched`, `missing_database`,
 `missing_admission`, or `unreadable_database`; the last includes a bounded
 `inventory_diagnostic`. Preserve the session UUID and independently trusted
-public key with the original run: recovery does not rebuild the inventory or
-its session listing. Older sessions without a retained admission body still
-require their original valid database row.
+public key with the original run. Older sessions without a retained admission
+body still require their original valid database row.
+
+Discovery also scans the bounded retained admission directory, so operators can
+find original session UUIDs even after inventory loss:
+
+```bash
+franken-node incident sessions --project /srv/application --json
+```
+
+The listing combines remaining database rows with independently authenticated
+admissions, without duplicating sessions or repairing the database. Missing or
+unreadable projections remain explicit source errors. Present contradictory
+rows and unsafe database paths refuse recovery. An invalid outcome leaves its
+valid admission visible as `outcome_unverified`; a missing signed outcome stays
+`pending_liveness_unknown`. Project filtering follows signature verification,
+and the original project directory need not still exist. These discovered
+records also feed incident listings and coverage inspection; recovery grants no
+replay, quiescence or historical-completeness claim.
 
 Session export opens existing protected evidence read-only. It does not create
 replacement authority, repair the inventory or retry an effect. Publication uses
