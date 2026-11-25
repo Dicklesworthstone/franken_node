@@ -27,8 +27,9 @@ use frankenengine_verifier_sdk::incident_bundle::{
     verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
-    MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionForensicError,
-    verify_native_session_forensics,
+    MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionExpectedIdentity,
+    NativeSessionForensicError, verify_native_session_forensics,
+    verify_native_session_forensics_with_expected_identity,
 };
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
@@ -60,7 +61,7 @@ const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -80,6 +81,7 @@ struct Request {
     counterfactual_incident: Option<CounterfactualIncidentRequest>,
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
+    expected_native_identity: Option<NativeSessionExpectedIdentity>,
     session_policy: Option<SessionPolicyRequest>,
     fleet_policy: Option<FleetPolicyRequest>,
 }
@@ -263,6 +265,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) =
         (None, None, None);
     let (mut incident_anchor, mut expected_baseline) = (None, None);
+    let (mut expected_native_nonce, mut expected_admission) = (None, None);
     let mut fleet_policy_path = None;
     let mut session_policy_path = None;
     let (mut coordinator_id, mut coordinator_key) = (None, None);
@@ -283,6 +286,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-manifest-sha256" => &mut expected_manifest,
             "--expected-source-artifact-sha256" => &mut expected_source_artifact,
             "--expected-graph-input-hash" => &mut expected_graph,
+            "--expected-session-nonce" => &mut expected_native_nonce,
+            "--expected-admission-sha256" => &mut expected_admission,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
             "--trusted-session-policy" => &mut session_policy_path,
             "--trusted-coordinator-id" => &mut coordinator_id,
@@ -565,6 +570,23 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         .as_deref()
         .map(read_session_policy)
         .transpose()?;
+    let expected_native_identity = match (expected_native_nonce, expected_admission) {
+        (None, None) => None,
+        (Some(session_nonce), Some(admission_sha256)) if format == "native-session-forensics" => {
+            let expected = NativeSessionExpectedIdentity {
+                session_nonce,
+                admission_sha256,
+            };
+            expected.validate().map_err(native_session_failure)?;
+            Some(expected)
+        }
+        _ => {
+            return Err(failure(
+                "EXPECTED_NATIVE_IDENTITY_INVALID",
+                "native-session identity pins require both a session nonce and admission SHA-256 and apply only to native-session-forensics",
+            ));
+        }
+    };
     Ok(Request {
         format,
         anchor,
@@ -574,6 +596,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         counterfactual_incident,
         publisher_trust,
         expected_publisher_identity,
+        expected_native_identity,
         session_policy,
         fleet_policy,
     })
@@ -656,6 +679,8 @@ fn publisher_identity_failure(error: &PublisherSourceIdentityError) -> Failure {
 
 fn native_session_failure(error: NativeSessionForensicError) -> Failure {
     let code = match error {
+        NativeSessionForensicError::ExpectedIdentityInvalid => "EXPECTED_NATIVE_IDENTITY_INVALID",
+        NativeSessionForensicError::ExpectedIdentityMismatch => "EXPECTED_NATIVE_IDENTITY_MISMATCH",
         NativeSessionForensicError::InputTooLarge => "INPUT_TOO_LARGE",
         NativeSessionForensicError::JsonInvalid => "JSON_INVALID",
         NativeSessionForensicError::SchemaUnsupported => "SCHEMA_UNSUPPORTED",
@@ -895,8 +920,15 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             Ok(json!({"scope": "authenticated_verification_session", "facts": facts}))
         }
         "native-session-forensics" => {
-            let verified = verify_native_session_forensics(bytes, trusted_key)
-                .map_err(native_session_failure)?;
+            let verified = match request.expected_native_identity.as_ref() {
+                Some(expected) => verify_native_session_forensics_with_expected_identity(
+                    bytes,
+                    trusted_key,
+                    expected,
+                ),
+                None => verify_native_session_forensics(bytes, trusted_key),
+            }
+            .map_err(native_session_failure)?;
             // The result authenticates original supervisor statements only.
             // It contains no private panic text or host-effect request data.
             Ok(json!({"scope": "authenticated_supervisor_observations", "facts": verified}))
@@ -1508,6 +1540,7 @@ mod tests {
             counterfactual_incident: None,
             publisher_trust: None,
             expected_publisher_identity: None,
+            expected_native_identity: None,
             session_policy: None,
             fleet_policy: Some(FleetPolicyRequest {
                 policy: parse_fleet_quiescence_policy(&policy_bytes).unwrap(),
@@ -1639,6 +1672,85 @@ mod tests {
             let summary = verified.to_string();
             assert!(!summary.contains("private panic") && !summary.contains("private dependency"));
         }
+    }
+
+    #[test]
+    fn cli_native_session_identity_requires_the_requested_admission() {
+        for outcome in [false, true] {
+            let (bytes, key) = native_session_fixture(outcome);
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            let nonce = value["admission_receipt"]["session_nonce"]
+                .as_str()
+                .unwrap();
+            let digest = value["admission_receipt"]["admission_sha256"]
+                .as_str()
+                .unwrap();
+            let mut request = args("native-session-forensics", &key);
+            request.extend([
+                "--expected-session-nonce".into(),
+                nonce.into(),
+                "--expected-admission-sha256".into(),
+                digest.into(),
+            ]);
+            let verified = run(&request, &mut bytes.as_slice()).unwrap();
+            assert_eq!(verified["facts"]["session_nonce"], nonce);
+            assert_eq!(verified["facts"]["admission_sha256"], digest);
+            assert_eq!(verified["facts"]["historical_completeness"], false);
+            assert!(!format!("{:?}", arguments(&request).unwrap()).contains(nonce));
+            *request.last_mut().unwrap() = "0".repeat(64);
+            assert_eq!(
+                run(&request, &mut bytes.as_slice()).unwrap_err().code,
+                "EXPECTED_NATIVE_IDENTITY_MISMATCH",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_native_session_identity_rejects_partial_malformed_and_misapplied_pins() {
+        let nonce = "019a7f53-c180-7001-8001-000000000071";
+        for (format, options) in [
+            (
+                "native-session-forensics",
+                vec!["--expected-session-nonce".into(), nonce.into()],
+            ),
+            (
+                "native-session-forensics",
+                vec!["--expected-admission-sha256".into(), "a".repeat(64)],
+            ),
+            (
+                "native-session-forensics",
+                vec![
+                    "--expected-session-nonce".into(),
+                    nonce.into(),
+                    "--expected-admission-sha256".into(),
+                    "A".repeat(64),
+                ],
+            ),
+            (
+                "incident-bundle",
+                vec![
+                    "--expected-session-nonce".into(),
+                    nonce.into(),
+                    "--expected-admission-sha256".into(),
+                    "a".repeat(64),
+                ],
+            ),
+        ] {
+            let mut request = args(format, ANCHOR);
+            request.extend(options);
+            assert_eq!(
+                arguments(&request).unwrap_err().code,
+                "EXPECTED_NATIVE_IDENTITY_INVALID"
+            );
+        }
+        let mut duplicate = args("native-session-forensics", ANCHOR);
+        duplicate.extend([
+            "--expected-session-nonce".into(),
+            nonce.into(),
+            "--expected-session-nonce".into(),
+            nonce.into(),
+        ]);
+        assert_eq!(arguments(&duplicate).unwrap_err().code, "USAGE");
     }
 
     #[test]

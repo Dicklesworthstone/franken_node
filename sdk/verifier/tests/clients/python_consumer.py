@@ -101,7 +101,9 @@ for case in cases:
                                  trusted_coordinator_public_key_hex=case.get("coordinator_key_hex"),
                                  expected_manifest_sha256=case.get("expected_manifest_sha256"),
                                  expected_source_artifact_sha256=case.get("expected_source_artifact_sha256"),
-                                 expected_graph_input_hash=case.get("expected_graph_input_hash"))
+                                 expected_graph_input_hash=case.get("expected_graph_input_hash"),
+                                 expected_session_nonce=case.get("expected_session_nonce"),
+                                 expected_admission_sha256=case.get("expected_admission_sha256"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
         if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"):
@@ -586,6 +588,26 @@ for mode in native_positives:
     if mode == "native_v3_without_journal":
         assert verified["facts"]["durable_journal"] is None
     print(json.dumps({"case": "protocol_" + mode, "result": "verified"}), flush=True)
+
+# A distributed executable must not silently ignore a requested admission.
+native_identity_pins = {
+    "expected_session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+    "expected_admission_sha256": "a" * 64,
+}
+native_identity_input = json.dumps({"protocol_control": "native_valid"}).encode()
+verify_artifact(native_identity_input, cases[0]["anchor"], verifier=str(root / "fake_verifier"),
+                format="native-session-forensics", **native_identity_pins)
+for field, value in (("expected_session_nonce", "0199abcd-1234-7000-8000-123456789abd"),
+                     ("expected_admission_sha256", "b" * 64)):
+    try:
+        verify_artifact(native_identity_input, cases[0]["anchor"], verifier=str(root / "fake_verifier"),
+                        format="native-session-forensics", **{**native_identity_pins, field: value})
+    except VerifierError as error:
+        assert error.code == "EXPECTED_NATIVE_IDENTITY_MISMATCH", (field, error.code)
+        assert value not in str(error)
+    else:
+        raise AssertionError("executable ignored " + field)
+    print(json.dumps({"case": "native_ignored_" + field, "result": "EXPECTED_NATIVE_IDENTITY_MISMATCH"}), flush=True)
 
 # Exercise the exact transport boundary without launching a subprocess or
 # constructing a large JSON/base64 artifact. Other formats retain their cap.

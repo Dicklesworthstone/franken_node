@@ -23,6 +23,10 @@ export interface VerifierOptions {
   expectedSourceArtifactSha256?: string;
   /** Optional authenticated graph commitment. Requires expectedManifestSha256; does not reconstruct the graph. */
   expectedGraphInputHash?: string;
+  /** Independently retained native admission nonce. Requires expectedAdmissionSha256; native-session-forensics only. */
+  expectedSessionNonce?: string;
+  /** Original receipt's domain-separated admission commitment: 64 lowercase hex digits, without sha256:. Requires expectedSessionNonce. Does not prove outcome freshness. */
+  expectedAdmissionSha256?: string;
   /** Required detached signature for signed-bundle, publisher-source formats, and counterfactual-receipt. */
   signatureHex?: string;
   timeoutMs?: number;

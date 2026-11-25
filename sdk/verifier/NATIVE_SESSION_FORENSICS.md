@@ -20,6 +20,47 @@ format: its original signatures are embedded and both use the supplied product
 root. The library entry point is
 `native_session::verify_native_session_forensics(bytes, trusted_root)`.
 
+## Requiring the intended session
+
+One product root can sign many runs. To require evidence for a specific
+admission, retain its session nonce and admission commitment independently
+when that run is admitted, then supply both values:
+
+```sh
+franken-verifier verify --format native-session-forensics \
+  --trusted-key-hex "$TRUSTED_PRODUCT_ROOT_PUBLIC_KEY_HEX" \
+  --expected-session-nonce "$EXPECTED_SESSION_NONCE" \
+  --expected-admission-sha256 "$EXPECTED_ADMISSION_SHA256" \
+  < INC-SESSION-UUID.fnforensics.json
+```
+
+The nonce must be a nonzero, lowercase UUID. The commitment is the receipt's
+`admission_sha256`: exactly 64 lowercase hexadecimal characters, without a
+`sha256:` prefix. It commits to the domain-separated, length-framed admission
+described below, including its project, entrypoint, epoch and authority. It is
+**not** the plain SHA-256 of the admission JSON or the exported file. Copying
+these expected values from the candidate export does not establish an
+independent expectation.
+
+The verifier authenticates the complete evidence before comparing its identity.
+An otherwise valid export from another admission fails with
+`EXPECTED_NATIVE_IDENTITY_MISMATCH`. Missing one of the two options, malformed
+values, or using these options with another format fails with
+`EXPECTED_NATIVE_IDENTITY_INVALID`. Omitting both preserves unrestricted
+verification under the supplied product root.
+
+Rust callers use `NativeSessionExpectedIdentity` and
+`native_session::verify_native_session_forensics_with_expected_identity`.
+Python's `verify_artifact` accepts `expected_session_nonce` and
+`expected_admission_sha256`; JavaScript and TypeScript's `verifyArtifact`
+accept `expectedSessionNonce` and `expectedAdmissionSha256`. The language
+bindings also compare the returned identity with the caller's expectation.
+
+These pins apply to v1, v2 and v3 exports, including pending admissions and
+interrupted or panicked outcomes. They identify the requested admission;
+they do not establish that its retained outcome is the newest one. Replay,
+quiescence and historical-completeness claims remain unchanged.
+
 ## What a successful result means
 
 The verification scope is `authenticated_supervisor_observations`. The result

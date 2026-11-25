@@ -710,6 +710,9 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * outcome stays pending, and durable journal prefixes never certify complete history.
  * Version 3 also authenticates retained source capsule content without replaying it.
  * Its security_epoch is an exact decimal u64 string, including zero.
+ * Native identity pins must be supplied together from independent caller records:
+ * a lowercase session UUID and the receipt's raw domain-framed admission digest.
+ * They identify the requested admission without proving its newest outcome.
  * Publisher-source trust requires an independent revocation authority, an explicit
  * RFC3339 time (four-digit year, non-leap seconds, at most nine fraction digits),
  * and an exact positive decimal u64 freshness window. Optional provenance trust
@@ -731,6 +734,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     trustedFleetPolicy, trustedSessionPolicyPath, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
+    expectedSessionNonce, expectedAdmissionSha256,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
@@ -800,6 +804,16 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
           || expectedIdentity.some((value) => value !== undefined && !digest(value)))) {
     throw new VerifierError("EXPECTED_IDENTITY_INVALID", "publisher identity pins require an exact manifest SHA-256 and canonical optional source commitments");
   }
+  if (expectedSessionNonce !== undefined || expectedAdmissionSha256 !== undefined) {
+    if (format !== "native-session-forensics"
+        || typeof expectedSessionNonce !== "string" || expectedSessionNonce.length !== 36
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(expectedSessionNonce)
+        || expectedSessionNonce === "00000000-0000-0000-0000-000000000000"
+        || typeof expectedAdmissionSha256 !== "string" || expectedAdmissionSha256.length !== 64
+        || !/^[0-9a-f]+$/u.test(expectedAdmissionSha256)) {
+      throw new VerifierError("EXPECTED_NATIVE_IDENTITY_INVALID", "native-session identity pins require a canonical session nonce and admission SHA-256");
+    }
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const anchor = trustedPublicKeyHex?.toLowerCase();
@@ -825,6 +839,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   if (expectedManifestSha256 !== undefined) args.push("--expected-manifest-sha256", expectedManifestSha256);
   if (expectedSourceArtifactSha256 !== undefined) args.push("--expected-source-artifact-sha256", expectedSourceArtifactSha256);
   if (expectedGraphInputHash !== undefined) args.push("--expected-graph-input-hash", expectedGraphInputHash);
+  if (expectedSessionNonce !== undefined) args.push("--expected-session-nonce", expectedSessionNonce,
+    "--expected-admission-sha256", expectedAdmissionSha256);
   if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"].includes(format)) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
@@ -873,6 +889,11 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
             || (expectedGraphInputHash !== undefined && source.capsule.graph_input_hash !== expectedGraphInputHash)) {
           return reject(new VerifierError("EXPECTED_IDENTITY_MISMATCH", "authenticated publisher source does not match the expected identity"));
         }
+      }
+      if (expectedSessionNonce !== undefined
+          && (result.facts.session_nonce !== expectedSessionNonce
+              || result.facts.admission_sha256 !== expectedAdmissionSha256)) {
+        return reject(new VerifierError("EXPECTED_NATIVE_IDENTITY_MISMATCH", "authenticated native-session evidence does not match the expected admission"));
       }
       resolve(result);
     });

@@ -1245,6 +1245,8 @@ def verify_artifact(
     expected_manifest_sha256: str | None = None,
     expected_source_artifact_sha256: str | None = None,
     expected_graph_input_hash: str | None = None,
+    expected_session_nonce: str | None = None,
+    expected_admission_sha256: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -1273,6 +1275,12 @@ def verify_artifact(
     A pending outcome and a retained journal prefix never certify complete history.
     Version 3 authenticates retained source capsule content without replaying it.
     Its security_epoch is an exact decimal u64 string, including zero.
+    Optional ``expected_session_nonce`` and ``expected_admission_sha256`` must
+    be supplied together from independent admission records. They require that
+    exact run, even when the same product root signs other valid observations.
+    The admission pin is 64 lowercase hex digits from the original receipt's
+    domain-separated commitment, not a plain hash of JSON or the export. A
+    match does not prove that the supplied outcome or journal is the latest.
     Publisher-source trust requires an independent revocation authority, an
     explicit RFC3339 evaluation time, and a positive decimal u64 freshness window.
     An optional independent provenance authority requires matching chain evidence.
@@ -1374,6 +1382,14 @@ def verify_artifact(
         or any(value is not None and not _digest(value) for value in expected_identity)
     ):
         raise VerifierError("EXPECTED_IDENTITY_INVALID", "publisher identity pins require an exact manifest SHA-256 and canonical optional source commitments")
+    if expected_session_nonce is not None or expected_admission_sha256 is not None:
+        if (format != "native-session-forensics"
+                or not isinstance(expected_session_nonce, str)
+                or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", expected_session_nonce) is None
+                or expected_session_nonce == "00000000-0000-0000-0000-000000000000"
+                or not isinstance(expected_admission_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_admission_sha256) is None):
+            raise VerifierError("EXPECTED_NATIVE_IDENTITY_INVALID", "native-session identity pins require a canonical session nonce and admission SHA-256")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -1418,6 +1434,9 @@ def verify_artifact(
         args.extend(["--expected-source-artifact-sha256", expected_source_artifact_sha256])
     if expected_graph_input_hash is not None:
         args.extend(["--expected-graph-input-hash", expected_graph_input_hash])
+    if expected_session_nonce is not None:
+        args.extend(["--expected-session-nonce", expected_session_nonce,
+                     "--expected-admission-sha256", expected_admission_sha256])
     if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
@@ -1462,4 +1481,9 @@ def verify_artifact(
                 or (expected_source_artifact_sha256 is not None and source["artifact_sha256"] != expected_source_artifact_sha256)
                 or (expected_graph_input_hash is not None and source["capsule"]["graph_input_hash"] != expected_graph_input_hash)):
             raise VerifierError("EXPECTED_IDENTITY_MISMATCH", "authenticated publisher source does not match the expected identity")
+    if expected_session_nonce is not None and (
+        result["facts"]["session_nonce"] != expected_session_nonce
+        or result["facts"]["admission_sha256"] != expected_admission_sha256
+    ):
+        raise VerifierError("EXPECTED_NATIVE_IDENTITY_MISMATCH", "authenticated native-session evidence does not match the expected admission")
     return result

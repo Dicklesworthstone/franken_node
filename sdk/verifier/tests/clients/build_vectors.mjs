@@ -1395,6 +1395,37 @@ const nativeSourceInterrupted = nativeJournal(nativeOutcome(
   }), [nativeAdmit(0), nativeReturn(0), nativeAdmit(1)], true);
 addNative("native_v3_source_with_interrupted_journal", nativeSourceInterrupted);
 addNative("native_v3_source_pending_header_only", nativeJournal(clone(nativeSourcePending), []));
+const nativePins = (fixture) => ({
+  expected_session_nonce: fixture.bundle.admission_receipt.session_nonce,
+  expected_admission_sha256: fixture.bundle.admission_receipt.admission_sha256,
+});
+for (const [name, fixture] of [["pending", nativePending], ["journal", nativeDurable],
+  ["source", nativeSourcePending], ["panic", nativePanic]]) {
+  addNative(`native_expected_identity_${name}`, fixture, "verified", nativePins(fixture));
+}
+addNative("native_expected_identity_other_nonce", nativePending, "EXPECTED_NATIVE_IDENTITY_MISMATCH", {
+  ...nativePins(nativePending), expected_session_nonce: "0199abcd-1234-7000-8000-123456789abd",
+});
+addNative("native_expected_identity_other_commitment", nativePending, "EXPECTED_NATIVE_IDENTITY_MISMATCH", {
+  ...nativePins(nativePending), expected_admission_sha256: "0".repeat(64),
+});
+// A valid signature from the enrolled product root is insufficient when the
+// caller independently retained a different admission's identity.
+addNative("native_expected_identity_other_genuine_admission", nativeFixture(),
+  "EXPECTED_NATIVE_IDENTITY_MISMATCH", nativePins(nativePending));
+for (const [name, pins] of [
+  ["nonce_only", { expected_session_nonce: sessionNonce }],
+  ["commitment_only", { expected_admission_sha256: "a".repeat(64) }],
+  ["nil_nonce", { ...nativePins(nativePending), expected_session_nonce: "00000000-0000-0000-0000-000000000000" }],
+  ["uppercase_commitment", { ...nativePins(nativePending), expected_admission_sha256: "A".repeat(64) }],
+  ["prefixed_commitment", { ...nativePins(nativePending), expected_admission_sha256: "sha256:" + "a".repeat(64) }],
+]) {
+  addNative(`native_expected_identity_invalid_${name}`, nativePending, "EXPECTED_NATIVE_IDENTITY_INVALID", pins);
+}
+const nativePinnedBadSignature = clone(nativeComplete);
+nativePinnedBadSignature.bundle.outcome.signature_hex = "00".repeat(64);
+addNative("native_expected_identity_authenticates_before_matching", nativePinnedBadSignature,
+  "SIGNATURE_INVALID", nativePins(nativePending));
 addNative("native_foreign_anchor", nativePending, "SIGNER_UNTRUSTED", { anchor: foreign });
 function mutateNative(name, fixture, mutate, expected) {
   const changed = clone(fixture);

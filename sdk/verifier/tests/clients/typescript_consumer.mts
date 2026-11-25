@@ -12,6 +12,7 @@ type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclud
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
+  expected_session_nonce?: string; expected_admission_sha256?: string;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
   ltv_facts?: LtvEvidenceFacts;
@@ -263,7 +264,9 @@ let nativeNegative = 0;
 for (const observation of cases.filter((item) => item.format === "native-session-forensics")) {
   try {
     const verified = await verifyArtifact(Buffer.from(observation.input_hex, "hex"), observation.anchor,
-      { verifier: resolve("verifier"), format: "native-session-forensics" });
+      { verifier: resolve("verifier"), format: "native-session-forensics",
+        expectedSessionNonce: observation.expected_session_nonce,
+        expectedAdmissionSha256: observation.expected_admission_sha256 });
     if (observation.expected !== "verified" || verified.format !== "native-session-forensics"
         || verified.scope !== "authenticated_supervisor_observations") throw new Error("native-session scope mismatch");
     assert.deepEqual(verified.facts, observation.native_facts, observation.name);

@@ -4,6 +4,8 @@
 //! does not replay a guest, recover missing history, establish process liveness,
 //! or turn a provider return marker into a committed host-effect receipt. The
 //! caller supplies the product root independently of the exported evidence.
+//! Callers expecting one particular run can additionally pin its session nonce
+//! and admission commitment with [`NativeSessionExpectedIdentity`].
 
 use std::fmt;
 
@@ -46,6 +48,41 @@ const ADMISSION_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-session-admissio
 const OUTCOME_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-session-outcome-signature/v1\0";
 const JOURNAL_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-effect-journal-signature/v1\0";
 const JOURNAL_RECORD_DOMAIN: &[u8] = b"franken-node/native-effect-journal-record/v1\0";
+
+/// A particular native admission selected from the caller's trusted records.
+///
+/// A product root signs many runs. Its signature alone cannot establish that an
+/// exported observation belongs to the run an auditor requested. Retain these
+/// two values independently when admitting that run; never derive expectations
+/// from the candidate bundle. The commitment is the raw 64-character lowercase
+/// `admission_sha256` in the signed admission receipt, including the protocol's
+/// domain and length framing, not a plain hash of the export or admission JSON.
+///
+/// Matching binds the original project, entrypoint, epoch, source commitment
+/// and authority metadata covered by that admission. It does not prove that an
+/// outcome is the latest, recover missing history, replay a guest, or certify
+/// process cleanup or completion of external effects.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NativeSessionExpectedIdentity {
+    pub session_nonce: String,
+    pub admission_sha256: String,
+}
+
+impl fmt::Debug for NativeSessionExpectedIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NativeSessionExpectedIdentity { fields: [redacted] }")
+    }
+}
+
+impl NativeSessionExpectedIdentity {
+    /// Reject malformed caller expectations before parsing candidate evidence.
+    pub fn validate(&self) -> Result<(), NativeSessionForensicError> {
+        if !nonce_valid(&self.session_nonce) || !digest_valid(&self.admission_sha256) {
+            return Err(NativeSessionForensicError::ExpectedIdentityInvalid);
+        }
+        Ok(())
+    }
+}
 
 /// Portable envelope, with an explicit `outcome: null` for an observation that
 /// has no retained signed outcome. Absence is never inferred to mean success.
@@ -169,6 +206,8 @@ pub struct VerifiedNativeSessionForensics {
 /// Stable failures do not include private or attacker-controlled evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeSessionForensicError {
+    ExpectedIdentityInvalid,
+    ExpectedIdentityMismatch,
     InputTooLarge,
     JsonInvalid,
     SchemaUnsupported,
@@ -187,6 +226,10 @@ pub enum NativeSessionForensicError {
 impl fmt::Display for NativeSessionForensicError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::ExpectedIdentityInvalid => "expected native-session identity is invalid",
+            Self::ExpectedIdentityMismatch => {
+                "authenticated native-session evidence does not match the expected admission"
+            }
             Self::InputTooLarge => "native-session forensic evidence exceeds its byte bound",
             Self::JsonInvalid => "native-session forensic evidence has invalid or ambiguous JSON",
             Self::SchemaUnsupported => "native-session forensic schema is unsupported",
@@ -1209,6 +1252,25 @@ pub fn verify_native_session_forensics(
     Ok(verified)
 }
 
+/// Authenticate retained supervisor evidence and bind it to a caller-selected
+/// admission. All signatures, source bytes and journal/outcome consistency are
+/// checked before reporting a mismatch. A matching pending or interrupted run
+/// retains its original proof scope and cannot become a successful execution.
+pub fn verify_native_session_forensics_with_expected_identity(
+    input: &[u8],
+    trusted_root: &VerifyingKey,
+    expected: &NativeSessionExpectedIdentity,
+) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
+    expected.validate()?;
+    let verified = verify_native_session_forensics(input, trusted_root)?;
+    if verified.session_nonce != expected.session_nonce
+        || verified.admission_sha256 != expected.admission_sha256
+    {
+        return Err(NativeSessionForensicError::ExpectedIdentityMismatch);
+    }
+    Ok(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,6 +1454,128 @@ mod tests {
             sources["graph_input_hash"].as_str().unwrap(),
         );
         (key, bundle, bytes)
+    }
+
+    #[test]
+    fn expected_identity_accepts_all_forensic_schemas_without_upgrading_proof_scope() {
+        let (key, pending) = pending_fixture();
+        let mut journal = pending.clone();
+        journal.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        journal.journal_jsonl = Some(journal_header(
+            &key,
+            &journal.admission_receipt.admission_sha256,
+        ));
+        let (_, sources, _) = retained_source_fixture();
+        let mut interrupted_run = pending.clone();
+        issue_outcome(&mut interrupted_run, &key, interrupted());
+
+        for bundle in [pending, journal, sources, interrupted_run] {
+            let expected = NativeSessionExpectedIdentity {
+                session_nonce: bundle.admission_receipt.session_nonce.clone(),
+                admission_sha256: bundle.admission_receipt.admission_sha256.clone(),
+            };
+            let bytes = serde_json::to_vec(&bundle).unwrap();
+            let result = verify_native_session_forensics_with_expected_identity(
+                &bytes,
+                &key.verifying_key(),
+                &expected,
+            )
+            .unwrap();
+            assert_eq!(result, verify_bundle(&bundle, &key).unwrap());
+            assert!(!result.replay_certified);
+            assert!(!result.quiescence_certified);
+            assert!(!result.historical_completeness);
+            assert!(!format!("{expected:?}").contains(&expected.session_nonce));
+            assert!(!format!("{expected:?}").contains(&expected.admission_sha256));
+        }
+    }
+
+    #[test]
+    fn expected_identity_rejects_other_genuine_admissions_under_the_same_root() {
+        let (key, original) = pending_fixture();
+        let expected = NativeSessionExpectedIdentity {
+            session_nonce: original.admission_receipt.session_nonce.clone(),
+            admission_sha256: original.admission_receipt.admission_sha256.clone(),
+        };
+        // All substitutions have genuine signatures. Even a reused nonce
+        // cannot hide a different project, epoch, source or authority envelope.
+        for (field, replacement) in [
+            (
+                "session_nonce",
+                json!("019a7f53-c180-7001-8001-000000000099"),
+            ),
+            ("security_epoch", json!(8)),
+            ("entrypoint", json!("/removed/project/other.js")),
+            ("dependency_ids", json!(["another-dependency"])),
+        ] {
+            let mut candidate = original.clone();
+            let mut admission: Value = serde_json::from_str(&candidate.admission_json).unwrap();
+            admission[field] = replacement;
+            candidate.admission_json = admission.to_string();
+            issue_admission(&mut candidate, &key);
+            assert!(verify_bundle(&candidate, &key).is_ok());
+            assert_eq!(
+                verify_native_session_forensics_with_expected_identity(
+                    &serde_json::to_vec(&candidate).unwrap(),
+                    &key.verifying_key(),
+                    &expected,
+                ),
+                Err(NativeSessionForensicError::ExpectedIdentityMismatch),
+                "{field}",
+            );
+        }
+    }
+
+    #[test]
+    fn expected_identity_validates_pins_and_authenticates_before_matching() {
+        let (key, mut bundle) = pending_fixture();
+        let expected = NativeSessionExpectedIdentity {
+            session_nonce: bundle.admission_receipt.session_nonce.clone(),
+            admission_sha256: bundle.admission_receipt.admission_sha256.clone(),
+        };
+        for (nonce, digest) in [
+            (String::new(), expected.admission_sha256.clone()),
+            (
+                "00000000-0000-0000-0000-000000000000".into(),
+                expected.admission_sha256.clone(),
+            ),
+            (
+                expected.session_nonce.to_uppercase(),
+                expected.admission_sha256.clone(),
+            ),
+            (expected.session_nonce.clone(), "a".repeat(63)),
+            (expected.session_nonce.clone(), "A".repeat(64)),
+            (
+                expected.session_nonce.clone(),
+                format!("sha256:{}", expected.admission_sha256),
+            ),
+        ] {
+            assert_eq!(
+                verify_native_session_forensics_with_expected_identity(
+                    b"unparsed candidate",
+                    &key.verifying_key(),
+                    &NativeSessionExpectedIdentity {
+                        session_nonce: nonce,
+                        admission_sha256: digest
+                    },
+                ),
+                Err(NativeSessionForensicError::ExpectedIdentityInvalid),
+            );
+        }
+        issue_outcome(&mut bundle, &key, interrupted());
+        bundle.outcome.as_mut().unwrap().signature_hex = "0".repeat(128);
+        let mismatched = NativeSessionExpectedIdentity {
+            admission_sha256: "0".repeat(64),
+            ..expected
+        };
+        assert_eq!(
+            verify_native_session_forensics_with_expected_identity(
+                &serde_json::to_vec(&bundle).unwrap(),
+                &key.verifying_key(),
+                &mismatched,
+            ),
+            Err(NativeSessionForensicError::OutcomeSignatureInvalid),
+        );
     }
 
     #[test]

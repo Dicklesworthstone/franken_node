@@ -24,7 +24,9 @@ for (const test of cases) {
       trustedCoordinatorPublicKeyHex: test.coordinator_key_hex,
       expectedManifestSha256: test.expected_manifest_sha256,
       expectedSourceArtifactSha256: test.expected_source_artifact_sha256,
-      expectedGraphInputHash: test.expected_graph_input_hash });
+      expectedGraphInputHash: test.expected_graph_input_hash,
+      expectedSessionNonce: test.expected_session_nonce,
+      expectedAdmissionSha256: test.expected_admission_sha256 });
     assert.equal(test.expected, "verified", test.name);
     assert.equal(result.artifact_sha256, createHash("sha256").update(data).digest("hex"));
     if (test.format === "incident-bundle") {
@@ -474,6 +476,20 @@ for (const mode of nativePositives) {
   }
   if (mode === "native_v3_without_journal") assert.equal(verified.facts.durable_journal, null);
   console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
+}
+// A distributed executable must not silently ignore a requested admission.
+const nativeIdentityPins = { expectedSessionNonce: "0199abcd-1234-7000-8000-123456789abc",
+  expectedAdmissionSha256: "a".repeat(64) };
+const nativeIdentityInput = Buffer.from(JSON.stringify({ protocol_control: "native_valid" }));
+await verifyArtifact(nativeIdentityInput, cases[0].anchor,
+  { verifier: resolve("fake_verifier"), format: "native-session-forensics", ...nativeIdentityPins });
+for (const [field, value] of [["expectedSessionNonce", "0199abcd-1234-7000-8000-123456789abd"],
+  ["expectedAdmissionSha256", "b".repeat(64)]]) {
+  await assert.rejects(verifyArtifact(nativeIdentityInput, cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "native-session-forensics", ...nativeIdentityPins, [field]: value }),
+  (error) => error instanceof VerifierError && error.code === "EXPECTED_NATIVE_IDENTITY_MISMATCH"
+    && !error.message.includes(value));
+  console.log(JSON.stringify({ case: `native_ignored_${field}`, result: "EXPECTED_NATIVE_IDENTITY_MISMATCH" }));
 }
 // Check exact transport limits without launching a process or retaining a huge
 // serialized fixture. Oversized inputs in every other format still fail above.
