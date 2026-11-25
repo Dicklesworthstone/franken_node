@@ -1,7 +1,9 @@
-"""Real Git checkout tests for source bootstrap; no compiler or network claims.
+"""Real Git checkout and compiled build-script tests for source provenance.
 
 Only Git's URL transport is redirected to local repositories. Revision lookup,
 fetch, checkout, filesystem guards, lock parsing and receipt publication are real.
+BuildSourceIdentityTests compiles and executes the production build.rs, without
+building the product crate or claiming native-runtime/release qualification.
 """
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +30,126 @@ def git(directory: Path, *args: str, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(["git", "-C", str(directory), *args], env=env,
                             text=True, capture_output=True, timeout=15, check=True)
     return result.stdout.strip()
+
+
+class BuildSourceIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        compiler = shutil.which(os.environ.get("RUSTC", "rustc"))
+        if compiler is None:
+            raise unittest.SkipTest("rustc is required to execute the production build script")
+        cls.compilation = tempfile.TemporaryDirectory(prefix="franken build identity ")
+        cls.addClassCleanup(cls.compilation.cleanup)
+        cls.binary = Path(cls.compilation.name) / ("build-script.exe" if os.name == "nt" else "build-script")
+        subprocess.run([compiler, "--edition=2024", str(ROOT / "crates/franken-node/build.rs"),
+                        "-o", str(cls.binary)], cwd=ROOT, text=True, capture_output=True,
+                       timeout=45, check=True)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="franken source identity ")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "source"
+        self.crate = self.workspace / "crates/franken-node"
+        self.crate.mkdir(parents=True)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                    and key not in {"FRANKEN_NODE_SOURCE_GIT_SHA", "FRANKEN_NODE_GIT_SHA"}}
+        self.env.update({"CARGO_MANIFEST_DIR": str(self.crate),
+                         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                         "GIT_AUTHOR_NAME": "Build identity test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                         "GIT_COMMITTER_NAME": "Build identity test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+                         "GIT_TERMINAL_PROMPT": "0"})
+
+    def initialize_git(self, directory):
+        git(directory, "init", "--quiet", "--initial-branch=main", env=self.env)
+        (directory / "tracked-input.txt").write_text("source input\n", encoding="utf-8")
+        git(directory, "add", ".", env=self.env)
+        git(directory, "commit", "--quiet", "-m", "source input", env=self.env)
+        return git(directory, "rev-parse", "HEAD", env=self.env)
+
+    def run_build_script(self, declared=None, **extra_env):
+        env = {**self.env, **extra_env}
+        if declared is not None:
+            env["FRANKEN_NODE_SOURCE_GIT_SHA"] = declared
+        return subprocess.run([str(self.binary)], cwd=self.crate, env=env,
+                              text=True, capture_output=True, timeout=15)
+
+    def assert_revision(self, result, revision):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        emitted = [line for line in result.stdout.splitlines() if line.startswith("cargo:rustc-env=")]
+        self.assertEqual(emitted, ["cargo:rustc-env=FRANKEN_NODE_GIT_SHA=" + revision])
+        self.assertIn("cargo:rerun-if-env-changed=FRANKEN_NODE_SOURCE_GIT_SHA", result.stdout.splitlines())
+
+    def assert_refused(self, result, reason):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(reason, result.stderr)
+        self.assertNotIn("cargo:rustc-env=", result.stdout)
+
+    def test_git_free_source_embeds_exact_declared_revision(self):
+        revision = "0123456789abcdef" * 2 + "01234567"
+        self.assert_revision(self.run_build_script(revision), revision)
+
+    def test_unbound_source_stays_unknown(self):
+        self.assert_revision(self.run_build_script(), "unknown")
+
+    def test_malformed_declared_revision_cannot_become_build_metadata(self):
+        for value in ["", "a" * 12, "a" * 39, "a" * 41, "A" * 40, "g" * 40,
+                      " a" + "b" * 38, "a" * 40 + "\n",
+                      "a" * 40 + "\ncargo:rustc-env=INJECTED=1"]:
+            with self.subTest(value=value):
+                self.assert_refused(self.run_build_script(value), "lowercase 40-hex Git commit SHA")
+
+    def test_normal_checkout_embeds_full_head_and_watches_branch_updates(self):
+        first = self.initialize_git(self.workspace)
+        result = self.run_build_script()
+        self.assert_revision(result, first)
+        self.assertIn(f"cargo:rerun-if-changed={self.workspace / '.git/HEAD'}", result.stdout.splitlines())
+        self.assertIn(f"cargo:rerun-if-changed={self.workspace / '.git/refs/heads/main'}", result.stdout.splitlines())
+        (self.workspace / "tracked-input.txt").write_text("new source input\n", encoding="utf-8")
+        git(self.workspace, "commit", "--quiet", "-am", "advance source", env=self.env)
+        second = git(self.workspace, "rev-parse", "HEAD", env=self.env)
+        self.assertNotEqual(first, second)
+        self.assert_revision(self.run_build_script(), second)
+
+    def test_matching_declared_and_checked_out_revision_is_accepted(self):
+        revision = self.initialize_git(self.workspace)
+        self.assert_revision(self.run_build_script(revision), revision)
+
+    def test_foreign_declared_revision_is_rejected_before_emitting_identity(self):
+        revision = self.initialize_git(self.workspace)
+        foreign = "0" * 40 if revision != "0" * 40 else "1" * 40
+        self.assert_refused(self.run_build_script(foreign), "does not match FrankenNode repository HEAD")
+
+    def test_source_archive_does_not_inherit_an_enclosing_repository_head(self):
+        self.initialize_git(self.root)
+        declared = "f" * 40
+        self.assert_revision(self.run_build_script(declared), declared)
+        self.assert_revision(self.run_build_script(), "unknown")
+
+    def test_foreign_git_environment_cannot_relabel_a_checkout(self):
+        revision = self.initialize_git(self.workspace)
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        (foreign / "foreign-only.txt").write_text("unrelated checkout\n", encoding="utf-8")
+        foreign_revision = self.initialize_git(foreign)
+        self.assertNotEqual(revision, foreign_revision)
+        self.assert_revision(self.run_build_script(
+            revision, GIT_DIR=str(foreign / ".git"), GIT_WORK_TREE=str(foreign)), revision)
+
+    def test_unreadable_repository_identity_cannot_fall_back_to_a_claim(self):
+        (self.workspace / ".git").mkdir()
+        self.assert_refused(self.run_build_script("a" * 40), "cannot inspect FrankenNode source repository")
+
+    def test_detached_and_packed_heads_keep_exact_identity(self):
+        revision = self.initialize_git(self.workspace)
+        git(self.workspace, "pack-refs", "--all", env=self.env)
+        packed = self.run_build_script()
+        self.assert_revision(packed, revision)
+        self.assertIn(f"cargo:rerun-if-changed={self.workspace / '.git/packed-refs'}", packed.stdout.splitlines())
+        self.assertIn(f"cargo:rerun-if-changed={self.workspace / '.git/refs/heads'}", packed.stdout.splitlines())
+        git(self.workspace, "checkout", "--quiet", "--detach", revision, env=self.env)
+        self.assert_revision(self.run_build_script(), revision)
 
 
 class SourceBootstrapTests(unittest.TestCase):
