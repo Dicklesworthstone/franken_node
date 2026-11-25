@@ -146,6 +146,12 @@ pub struct FleetEpochCommitFacts {
     pub committed_epoch: u64,
     pub transition_id: String,
     pub statement_sha256: String,
+    /// Authenticated retry identity and exact original request commitment.
+    /// Historical and one-shot certificates omit these fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_request_sha256: Option<String>,
 }
 
 /// Stable errors never echo evidence, private project paths, keys or node IDs.
@@ -228,6 +234,9 @@ type Result<T> = std::result::Result<T, FleetQuiescenceError>;
 #[serde(deny_unknown_fields)]
 struct Response {
     schema_version: String,
+    // Transport metadata is deliberately not an authenticated observation.
+    #[serde(default, rename = "already_committed")]
+    _already_committed: bool,
     evidence: Evidence,
     certificate: Certificate,
 }
@@ -241,6 +250,8 @@ struct CliResponse {
     transport: String,
     live_control_plane: bool,
     control_plane_url: String,
+    #[serde(default, rename = "already_committed")]
+    _already_committed: bool,
     evidence: Evidence,
     certificate: Certificate,
 }
@@ -348,6 +359,10 @@ struct Certificate {
     initiator: String,
     reason: String,
     trace_id: String,
+    #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
+    operation_request_sha256: Option<String>,
     certified_at: DateTime<Utc>,
     action_log_checkpoint: FleetActionCheckpoint,
     fleet_quiescence_certified: bool,
@@ -572,6 +587,7 @@ fn parse_response(bytes: &[u8]) -> Result<ParsedResponse> {
         }
         Response {
             schema_version: "franken-node/fleet-http-api/v2".into(),
+            _already_committed: cli._already_committed,
             evidence: cli.evidence,
             certificate: cli.certificate,
         }
@@ -667,6 +683,14 @@ fn verify_observation_response(
         || certificate.schema_version != "franken-node/fleet-epoch-quiescence-certificate/v1"
     {
         return Err(FleetQuiescenceError::SchemaUnsupported);
+    }
+    match (
+        certificate.operation_id.as_deref(),
+        certificate.operation_request_sha256.as_deref(),
+    ) {
+        (Some(id), Some(digest)) if identifier(id) && digest_shape(digest) => {}
+        (None, None) => {}
+        _ => return Err(FleetQuiescenceError::ContextMismatch),
     }
     if evidence.nodes.len() != policy.participants.len()
         || certificate.participants.len() != policy.participants.len()
@@ -965,6 +989,8 @@ pub fn verify_fleet_epoch_commit(
         committed_epoch: statement.committed_epoch,
         transition_id: statement.transition_id.clone(),
         statement_sha256: hex::encode(Sha256::digest(&statement_bytes)),
+        operation_id: certificate.operation_id.clone(),
+        operation_request_sha256: certificate.operation_request_sha256.clone(),
     })
 }
 
@@ -1671,6 +1697,76 @@ mod tests {
     }
 
     #[test]
+    fn epoch_operation_identity_and_request_are_authenticated_together() {
+        let (original, policy, trust, _) = epoch_fixture();
+        let legacy = verify_epoch(&original, &policy, &trust).unwrap();
+        assert!(legacy.operation_id.is_none());
+        assert!(legacy.operation_request_sha256.is_none());
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert!(serialized.get("operation_id").is_none());
+        assert!(serialized.get("operation_request_sha256").is_none());
+
+        let mut response = original.clone();
+        response["certificate"]["operation_id"] = json!("maintenance-epoch-7");
+        response["certificate"]["operation_request_sha256"] = json!("ab".repeat(32));
+        assert_eq!(
+            verify_epoch(&response, &policy, &trust),
+            Err(FleetQuiescenceError::EpochProofInvalid),
+            "adding unsigned retry authority to an old commit must fail"
+        );
+        let coordinator = SigningKey::from_bytes(&[43; 32]);
+        resign_epoch(&mut response, &coordinator);
+        let facts = verify_epoch(&response, &policy, &trust).unwrap();
+        assert_eq!(facts.operation_id.as_deref(), Some("maintenance-epoch-7"));
+        assert_eq!(facts.operation_request_sha256, Some("ab".repeat(32)));
+        assert!(!facts.current_quiescence_proven);
+
+        // Recovery metadata cannot renew the original observation or modify
+        // the independently authenticated request/commit identity.
+        response["already_committed"] = json!(true);
+        let recovered = verify_epoch(&response, &policy, &trust).unwrap();
+        assert_eq!(recovered.statement_sha256, facts.statement_sha256);
+        assert_eq!(recovered.observed_at, facts.observed_at);
+        assert!(!recovered.current_quiescence_proven);
+        for field in ["operation_id", "operation_request_sha256"] {
+            let mut changed = response.clone();
+            changed["certificate"][field] = json!("cd".repeat(32));
+            assert_eq!(
+                verify_epoch(&changed, &policy, &trust),
+                Err(FleetQuiescenceError::EpochProofInvalid)
+            );
+            let mut stripped = response.clone();
+            stripped["certificate"].as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                verify_epoch(&stripped, &policy, &trust),
+                Err(FleetQuiescenceError::EpochProofInvalid)
+            );
+            resign_epoch(&mut stripped, &coordinator);
+            assert_eq!(
+                verify_epoch(&stripped, &policy, &trust),
+                Err(FleetQuiescenceError::ContextMismatch),
+                "even a signed incomplete operation binding must fail"
+            );
+        }
+        for invalid_id in ["", ".", "../another-operation", "contains spaces"] {
+            let mut invalid = response.clone();
+            invalid["certificate"]["operation_id"] = json!(invalid_id);
+            resign_epoch(&mut invalid, &coordinator);
+            assert_eq!(
+                verify_epoch(&invalid, &policy, &trust),
+                Err(FleetQuiescenceError::ContextMismatch)
+            );
+        }
+        let mut later = policy.clone();
+        later.evaluation_time += chrono::TimeDelta::seconds(300);
+        assert_eq!(
+            verify_epoch(&response, &later, &trust),
+            Err(FleetQuiescenceError::ObservationStale),
+            "recovered history cannot pass as fresh quiescence"
+        );
+    }
+
+    #[test]
     fn signed_cli_certification_and_retained_export_preserve_both_api_scopes() {
         let (response, policy, trust, _) = epoch_fixture();
         for command in ["fleet.certify-quiescence", "fleet.export-epoch"] {
@@ -1679,6 +1775,7 @@ mod tests {
                 "command": command, "ok": true,
                 "transport": "http", "live_control_plane": true,
                 "control_plane_url": "https://coordinator.invalid/",
+                "already_committed": command == "fleet.export-epoch",
                 "evidence": response["evidence"],
                 "certificate": response["certificate"],
                 "commit_proof": response["commit_proof"],

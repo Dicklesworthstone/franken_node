@@ -107,7 +107,12 @@ class FleetQuiescenceFacts(TypedDict):
     current_quiescence_proven: Literal[False]
 
 
-class FleetEpochCommitFacts(TypedDict):
+class _FleetEpochOperationFacts(TypedDict, total=False):
+    operation_id: str
+    operation_request_sha256: str
+
+
+class FleetEpochCommitFacts(_FleetEpochOperationFacts):
     """Authenticated historical coordinator commit and enrolled observations."""
 
     schema_version: Literal["franken-verifier/fleet-epoch-commit/v1"]
@@ -980,6 +985,16 @@ def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], da
               "epoch_commit_authenticated", "current_quiescence_proven"}
     if coordinator is not None:
         fields.update({"coordinator_id", "coordinator_key_id", "committed_epoch", "transition_id", "statement_sha256"})
+        if isinstance(facts, dict) and ("operation_id" in facts or "operation_request_sha256" in facts):
+            fields.update({"operation_id", "operation_request_sha256"})
+            operation_id = facts.get("operation_id")
+            request_digest = facts.get("operation_request_sha256")
+            if (not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128
+                    or operation_id == "." or ".." in operation_id
+                    or re.fullmatch(r"[A-Za-z0-9._-]+", operation_id) is None
+                    or not isinstance(request_digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", request_digest) is None):
+                return False
     if not isinstance(facts, dict) or set(facts) != fields:
         return False
     if coordinator is not None:
