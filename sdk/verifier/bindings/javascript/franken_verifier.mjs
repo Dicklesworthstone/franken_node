@@ -533,7 +533,18 @@ function fleetFactsValid(facts, trusted, bytes, coordinator) {
     "evaluation_time", "observed_at", "participant_count", "admitted_sessions", "terminal_sessions",
     "supervisor_signatures_verified", "expected_population_complete", "expected_action_context_matched",
     "epoch_commit_authenticated", "current_quiescence_proven"];
-  if (coordinator !== undefined) fields.push("coordinator_id", "coordinator_key_id", "committed_epoch", "transition_id", "statement_sha256");
+  if (coordinator !== undefined) {
+    fields.push("coordinator_id", "coordinator_key_id", "committed_epoch", "transition_id", "statement_sha256");
+    if (facts !== null && typeof facts === "object"
+        && ("operation_id" in facts || "operation_request_sha256" in facts)) {
+      fields.push("operation_id", "operation_request_sha256");
+      if (typeof facts.operation_id !== "string" || facts.operation_id.length < 1
+          || facts.operation_id.length > 128 || facts.operation_id === "." || facts.operation_id.includes("..")
+          || !/^[A-Za-z0-9._-]+$/u.test(facts.operation_id)
+          || typeof facts.operation_request_sha256 !== "string"
+          || !/^[0-9a-f]{64}$/u.test(facts.operation_request_sha256)) return false;
+    }
+  }
   if (!keys(facts, fields)) return false;
   const evaluated = instantNs(facts.evaluation_time), observed = instantNs(facts.observed_at);
   const { policy } = trusted;

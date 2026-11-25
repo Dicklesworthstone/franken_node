@@ -33640,6 +33640,7 @@ fn fleet_epoch_cli_payload(
         "transport": FLEET_CLI_HTTP_TRANSPORT,
         "live_control_plane": true,
         "control_plane_url": control_plane_url,
+        "already_committed": response.already_committed,
         "evidence": response.evidence,
         "certificate": response.certificate,
     });
@@ -33711,6 +33712,9 @@ fn handle_fleet_export_epoch(args: &cli::FleetExportEpochArgs) -> Result<()> {
 }
 
 fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Result<()> {
+    if let Some(operation_id) = &args.id {
+        control_plane::fleet_transport::validate_action_id(operation_id)?;
+    }
     if args.initiator.trim().is_empty() || args.reason.trim().is_empty() {
         anyhow::bail!("`fleet certify-quiescence` requires nonempty --initiator and --reason");
     }
@@ -33754,11 +33758,14 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
             anyhow::bail!("`fleet certify-quiescence` requires the live HTTP coordinator");
         };
         let request = control_plane::fleet_transport_http::FleetHttpEpochBarrierRequest {
+            operation_id: args.id.clone(),
+            expected_action_log: None,
             initiator: args.initiator.clone(),
             reason: args.reason.clone(),
             trace_id: args
                 .trace_id
                 .clone()
+                .or_else(|| args.id.clone())
                 .unwrap_or_else(|| fleet_operation_id("certify-quiescence")),
             stale_after: Duration::from_secs(
                 args.stale_after_secs
@@ -33783,8 +33790,14 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
         } else {
             let certificate = &response.certificate;
             println!(
-                "Certified enrolled native-session quiescence: epoch {} -> {}",
-                certificate.pre_epoch, certificate.committed_epoch,
+                "{} enrolled native-session quiescence: epoch {} -> {}",
+                if response.already_committed {
+                    "Recovered committed"
+                } else {
+                    "Certified"
+                },
+                certificate.pre_epoch,
+                certificate.committed_epoch,
             );
             println!("  coordinator={}", transport.url().as_str());
             println!(
@@ -33795,6 +33808,10 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
                 response.evidence.stale_after.as_secs(),
             );
             println!("  trace_id={}", certificate.trace_id);
+            if let Some(operation_id) = &certificate.operation_id {
+                println!("  operation_id={operation_id}");
+            }
+            println!("  certified_at={}", certificate.certified_at);
             if let Some(proof) = &response.commit_proof {
                 println!(
                     "  commit_proof=ed25519 coordinator={} signer={}",
@@ -33811,7 +33828,15 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
                     participant.active_hold_ids.join(","),
                 );
             }
-            println!("  Admission holds remain active; resume them explicitly after maintenance.");
+            if response.already_committed {
+                println!(
+                    "  This is the original historical commit; current quiescence and active holds are not asserted."
+                );
+            } else {
+                println!(
+                    "  Admission holds remain active; resume them explicitly after maintenance."
+                );
+            }
         }
         Ok(())
     }

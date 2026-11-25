@@ -186,6 +186,111 @@ console.log(require('assert').strict === require('assert/strict'));
     }
 
     #[test]
+    fn frozen_computed_module_require_preserves_npm_sources_absence_and_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, contents) in [
+            (
+                "app.cjs",
+                r#"
+const kit = module['require']('kit');
+console.log(kit.value, kit.label);
+try { module['require']('optional-addon'); }
+catch (error) { console.log(error.code); }
+"#,
+            ),
+            ("node_modules/kit/package.json", r#"{"main":"index.cjs"}"#),
+            (
+                "node_modules/kit/index.cjs",
+                r#"
+const value = module['re' + 'quire']('./value.cjs');
+const format = module['require']('node:util').format;
+module.exports = {value: value, label: format('%s:%d', 'frozen', value)};
+"#,
+            ),
+            ("node_modules/kit/value.cjs", "module.exports=42;"),
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let reference = std::process::Command::new("node")
+            .current_dir(root.path())
+            .arg("app.cjs")
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output()
+            .expect("Node is required for the computed-loader oracle");
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        let expected: Vec<_> = String::from_utf8(reference.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(expected, ["42 frozen:42", "MODULE_NOT_FOUND"]);
+
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(
+            graph.report().diagnostics.is_empty(),
+            "{:?}",
+            graph.report()
+        );
+        assert_eq!(graph.report().edges.len(), 4);
+        let pin = graph.report().input_hash.clone();
+        let sealed = capsule::encode(&graph).unwrap();
+        for name in [
+            "app.cjs",
+            "node_modules/kit/index.cjs",
+            "node_modules/kit/value.cjs",
+        ] {
+            std::fs::write(
+                root.path().join(name),
+                "throw new Error('live replacement must not run');",
+            )
+            .unwrap();
+        }
+        let optional = root.path().join("node_modules/optional-addon");
+        std::fs::create_dir_all(&optional).unwrap();
+        std::fs::write(
+            optional.join("index.js"),
+            "module.exports='new ambient dependency';",
+        )
+        .unwrap();
+        let replayed = capsule::replay(sealed.bytes(), sealed.digest()).unwrap();
+        assert_eq!(replayed.report(), graph.report());
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            assert_eq!(
+                execute_with_capabilities(
+                    resolver.clone(),
+                    root.path(),
+                    true,
+                    lane,
+                    &[RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin]
+                )
+                .unwrap(),
+                expected,
+                "computed module.require must retain its captured importer in {lane:?}"
+            );
+            let error = execute_with_capabilities(
+                resolver.clone(),
+                root.path(),
+                true,
+                lane,
+                &[RuntimeCapability::ModuleLoad],
+            )
+            .expect_err("computed spelling cannot grant builtin authority");
+            assert!(
+                error.contains(&RuntimeCapability::Builtin.to_string()),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn frozen_create_require_executes_the_creating_packages_commonjs_dependencies() {
         let root = tempfile::tempdir().unwrap();
         let nested = root.path().join("packages/bridge/node_modules/where");

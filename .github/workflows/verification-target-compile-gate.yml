@@ -119,12 +119,49 @@ jobs:
         run: |
           cargo test --locked -p frankenengine-node --test cli_arg_validation \
             source_graph_cli_captures_without_evaluation_and_preserves_incomplete_evidence
+      - name: Exercise lost-response epoch recovery and native epoch authority
+        if: matrix.gate == 'check'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p frankenengine-node --features test-support \
+            --test fleet_cli_e2e fleet_http_epoch_barrier_ -- --test-threads=1 \
+            | tee "$RUNNER_TEMP/fleet-epoch-retry-e2e.log"
+          cargo test --locked -p frankenengine-node --features test-support \
+            --test runtime_cli_e2e runtime_epoch_ -- --test-threads=1 \
+            | tee "$RUNNER_TEMP/runtime-epoch-authority-e2e.log"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          checks = {
+              "fleet-epoch-retry-e2e.log": [
+                  "fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and_aborts_on_fault",
+                  "fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_indeterminate_drains",
+              ],
+              "runtime-epoch-authority-e2e.log": [
+                  "runtime_epoch_authenticates_durable_head_and_ignores_stale_or_corrupt_cache",
+                  "runtime_epoch_unsigned_genesis_cannot_authenticate_a_live_epoch",
+              ],
+          }
+          for filename, required in checks.items():
+              text = (pathlib.Path(os.environ["RUNNER_TEMP"]) / filename).read_text()
+              if not re.search(r"^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;", text, re.M):
+                  raise SystemExit(f"{filename}: expected nonzero executed tests and no failures or ignores")
+              for name in required:
+                  if not re.search(r"^test " + re.escape(name) + r" \.\.\. ok$", text, re.M):
+                      raise SystemExit(f"{filename}: required regression did not execute successfully: {name}")
+          PY
       - name: Preserve the default-feature source selection
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: default-build-${{ matrix.gate }}-sources
-          path: ${{ runner.temp }}/sibling-revisions.txt
+          path: |
+            ${{ runner.temp }}/sibling-revisions.txt
+            ${{ runner.temp }}/fleet-epoch-retry-e2e.log
+            ${{ runner.temp }}/runtime-epoch-authority-e2e.log
           if-no-files-found: error
           retention-days: 7
 

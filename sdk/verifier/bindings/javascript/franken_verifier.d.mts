@@ -92,6 +92,9 @@ export interface FleetEpochCommitFacts extends Omit<FleetQuiescenceFacts, "schem
   transition_id: string;
   /** SHA-256 of the canonical, independently authenticated commit statement. */
   statement_sha256: string;
+  /** Stable identity and exact request commitment, present together for retryable operations. */
+  operation_id?: string;
+  operation_request_sha256?: string;
 }
 export interface NativeCaptureMetadata {
   payload_sha256: string;

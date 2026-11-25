@@ -554,6 +554,224 @@ fn seed_guarded_policy_transport(
     transport
 }
 
+fn sign_maintenance_observations(
+    state: &mut FleetSharedState,
+    root: &ed25519_dalek::SigningKey,
+    observed_at: DateTime<Utc>,
+) {
+    use ed25519_dalek::Signer as _;
+    use frankenengine_node::control_plane::fleet_transport::{
+        NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
+    };
+
+    for (index, node) in state.nodes.iter_mut().enumerate() {
+        let Some(drain) = node.native_session_drain.as_mut() else {
+            continue;
+        };
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+            node_id: node.node_id.clone(),
+            zone_id: node.zone_id.clone(),
+            drain_id: uuid::Uuid::from_u128(index as u128 + 1).to_string(),
+            generation: 1,
+            project_root_sha256: "a4".repeat(32),
+            observed_at,
+            product_root_key_id: format!(
+                "ed25519:{}",
+                hex::encode(root.verifying_key().as_bytes())
+            ),
+            checkpoint_sha256: drain.observation_sha256().unwrap(),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            root.sign(&attestation.signing_payload().unwrap())
+                .to_bytes(),
+        );
+        attestation
+            .verify(drain, &node.node_id, &node.zone_id, &root.verifying_key())
+            .unwrap();
+        drain.supervisor_attestation = Some(attestation);
+    }
+}
+
+#[test]
+fn guarded_policy_refuses_observations_that_expire_before_commit() {
+    for signed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, now) = maintenance_state();
+        let root = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+        if signed {
+            sign_maintenance_observations(
+                &mut state,
+                &root,
+                now - chrono::TimeDelta::milliseconds(500),
+            );
+        } else {
+            // The first sorted participant expires before the other node;
+            // taking the last heartbeat would wrongly admit the publication.
+            state
+                .nodes
+                .iter_mut()
+                .find(|node| node.node_id == "node-a")
+                .unwrap()
+                .last_seen -= chrono::TimeDelta::milliseconds(250);
+        }
+        let mut request = guarded_policy_request(&state, "expiring-policy");
+        request.guard.stale_after = Duration::from_millis(1_500);
+        let expires_at = now + chrono::TimeDelta::milliseconds(if signed { 1_000 } else { 1_250 });
+        let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+        for commit_at in [expires_at, now - chrono::TimeDelta::nanoseconds(1)] {
+            let clock_calls = std::cell::Cell::new(0);
+            let result = transport.publish_policy_with_maintenance_guard_projected(
+                &request,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                || {
+                    let call = clock_calls.get();
+                    clock_calls.set(call + 1);
+                    if call == 0 { now } else { commit_at }
+                },
+                |_| Ok(()),
+            );
+            let error =
+                result.expect_err("expired observations or a reversed clock cannot publish");
+            assert!(
+                matches!(error, FleetTransportError::StaleState { .. }),
+                "{error}"
+            );
+            assert_eq!(clock_calls.get(), 2);
+            assert_eq!(transport.list_actions().unwrap(), state.actions);
+            let connection =
+                Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref())
+                    .unwrap();
+            let rows = connection
+                .query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;")
+                .unwrap();
+            assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+        }
+        let clock_calls = std::cell::Cell::new(0);
+        let receipt = transport
+            .publish_policy_with_maintenance_guard_projected(
+                &request,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                || {
+                    let call = clock_calls.get();
+                    clock_calls.set(call + 1);
+                    if call == 0 {
+                        now
+                    } else {
+                        expires_at - chrono::TimeDelta::nanoseconds(1)
+                    }
+                },
+                |_| Ok(()),
+            )
+            .expect("the same immutable action remains usable before observation expiry");
+        assert_eq!(receipt.accepted_at, now);
+        assert_eq!(receipt.evidence.observed_at, now);
+        assert_eq!(
+            transport.list_actions().unwrap().last(),
+            Some(&request.action)
+        );
+    }
+}
+
+#[test]
+fn epoch_barrier_rolls_back_when_signed_observations_expire_before_commit() {
+    use frankenengine_node::control_plane::control_epoch::EpochSigningKey;
+    use frankenengine_node::control_plane::fleet_transport::FleetEpochBarrierParams;
+    use std::collections::BTreeMap;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut state, now) = maintenance_state();
+    state.actions.truncate(2);
+    state.nodes.retain(|node| node.zone_id == "zone-a");
+    acknowledge_maintenance(&mut state, now);
+    let root = ed25519_dalek::SigningKey::from_bytes(&[84; 32]);
+    sign_maintenance_observations(
+        &mut state,
+        &root,
+        now - chrono::TimeDelta::milliseconds(500),
+    );
+    let roots: BTreeMap<_, _> = state
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                (node.zone_id.clone(), node.node_id.clone()),
+                root.verifying_key(),
+            )
+        })
+        .collect();
+    let key = EpochSigningKey::new(&[85; 32]).unwrap();
+    let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+    let params = FleetEpochBarrierParams {
+        initiator: "release-operator",
+        reason: "observations must remain valid through durable admission",
+        now,
+        stale_after: Duration::from_millis(1_500),
+        trace_id: "expire-before-epoch-commit",
+        operation_id: None,
+        operation_request_sha256: None,
+        expected_action_log: None,
+    };
+    let expires_at = now + chrono::TimeDelta::seconds(1);
+    for commit_at in [expires_at, now - chrono::TimeDelta::nanoseconds(1)] {
+        let clock_calls = std::cell::Cell::new(0);
+        let result = transport.certify_epoch_quiescence_projected(
+            &key,
+            None,
+            &roots,
+            params,
+            || {
+                let call = clock_calls.get();
+                clock_calls.set(call + 1);
+                if call == 0 { now } else { commit_at }
+            },
+            |_| Ok(()),
+        );
+        let error =
+            result.expect_err("a prepared certificate cannot outlive its signed population");
+        assert!(
+            matches!(error, FleetTransportError::StaleState { .. }),
+            "{error}"
+        );
+        assert_eq!(clock_calls.get(), 2);
+        assert_eq!(transport.current_fleet_epoch(&key).unwrap(), 0);
+        assert_eq!(transport.list_actions().unwrap(), state.actions);
+        let connection =
+            Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+        let rows = connection
+            .query("SELECT COUNT(*) FROM fleet_epoch_commits;")
+            .unwrap();
+        assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+    }
+    let clock_calls = std::cell::Cell::new(0);
+    let (evidence, certificate, _, already_committed) = transport
+        .certify_epoch_quiescence_projected(
+            &key,
+            None,
+            &roots,
+            params,
+            || {
+                let call = clock_calls.get();
+                clock_calls.set(call + 1);
+                if call == 0 {
+                    now
+                } else {
+                    expires_at - chrono::TimeDelta::nanoseconds(1)
+                }
+            },
+            |_| Ok(()),
+        )
+        .expect("valid signed observations permit a durable epoch advance");
+    assert!(!already_committed);
+    assert_eq!(certificate.certified_at, now);
+    assert_eq!(evidence.observed_at, now);
+    assert_eq!(certificate.committed_epoch, 1);
+    assert_eq!(transport.current_fleet_epoch(&key).unwrap(), 1);
+}
+
 #[test]
 fn guarded_policy_durable_retry_preserves_original_admission_after_resume_and_reopen() {
     let temp = tempfile::tempdir().unwrap();
@@ -4240,6 +4458,87 @@ fn guarded_resume_keeps_original_and_new_participants_and_expires_before_commit(
             )
             .is_ok()
     );
+}
+
+#[test]
+fn guarded_resume_refuses_expired_observations_before_request_expiry() {
+    for signed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, now) = maintenance_state();
+        let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+        let publication = publish_and_acknowledge_guarded_policy(&mut transport, &mut state, now);
+        let root = ed25519_dalek::SigningKey::from_bytes(&[86; 32]);
+        if signed {
+            sign_maintenance_observations(
+                &mut state,
+                &root,
+                now - chrono::TimeDelta::milliseconds(500),
+            );
+            for node in &state.nodes {
+                transport.upsert_node_status(node).unwrap();
+            }
+        }
+        let mut request = guarded_resume_request(&state, &publication, now);
+        request.guard.stale_after = Duration::from_millis(1_500);
+        let expires_at = now + chrono::TimeDelta::milliseconds(if signed { 1_000 } else { 1_500 });
+        assert!(expires_at < request.expires_at);
+        for commit_at in [expires_at, now - chrono::TimeDelta::nanoseconds(1)] {
+            let clock_calls = std::cell::Cell::new(0);
+            let result = transport.resume_native_sessions_with_maintenance_guard_projected(
+                &request,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                || {
+                    let call = clock_calls.get();
+                    clock_calls.set(call + 1);
+                    if call == 0 { now } else { commit_at }
+                },
+                |_| Ok(()),
+            );
+            let error = result.expect_err("request validity cannot renew its drain observations");
+            assert!(
+                matches!(error, FleetTransportError::StaleState { .. }),
+                "{error}"
+            );
+            assert_eq!(clock_calls.get(), 2);
+            assert_eq!(transport.list_actions().unwrap(), state.actions);
+            assert_eq!(
+                fleet_native_session_holds(&transport.list_actions().unwrap(), "zone-a").unwrap(),
+                BTreeSet::from(["hold-a".to_owned(), "hold-b".to_owned()]),
+            );
+            let connection =
+                Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref())
+                    .unwrap();
+            let rows = connection
+                .query("SELECT COUNT(*) FROM fleet_guarded_native_resumes;")
+                .unwrap();
+            assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+        }
+        let clock_calls = std::cell::Cell::new(0);
+        let receipt = transport
+            .resume_native_sessions_with_maintenance_guard_projected(
+                &request,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                || {
+                    let call = clock_calls.get();
+                    clock_calls.set(call + 1);
+                    if call == 0 {
+                        now
+                    } else {
+                        expires_at - chrono::TimeDelta::nanoseconds(1)
+                    }
+                },
+                |_| Ok(()),
+            )
+            .expect("a still-fresh acknowledged policy permits its explicit owner release");
+        assert_eq!(receipt.accepted_at, now);
+        assert_eq!(receipt.evidence.observed_at, now);
+        assert_eq!(
+            fleet_native_session_holds(&transport.list_actions().unwrap(), "zone-a").unwrap(),
+            BTreeSet::from(["hold-b".to_owned()]),
+        );
+    }
 }
 
 #[test]

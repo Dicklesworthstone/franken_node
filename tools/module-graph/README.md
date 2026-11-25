@@ -434,6 +434,14 @@ replace the complete set for every edge. Supported quoted escapes and
 substitution-free template literals are decoded without running JavaScript.
 Comments and ordinary string contents are not treated as module requests.
 
+Direct CommonJS loads also recognize exact computed property names, including
+`module['require']('./value.cjs')`, escaped strings and bounded concatenations
+such as `module['re' + 'quire']('package-name')`. They retain the same importer
+and captured routes as `module.require`. Unknown computed properties such as
+`module[method]`, or extracting, replacing or passing the loader, keep the graph
+incomplete. An exact `typeof module['require']` probe remains a read-only type
+observation and grants no load authority.
+
 Native CommonJS `require` can also flow through an ordered chain of top-level
 `const` aliases, such as `const load = require; const next = load;` followed by
 `next('./value.cjs')` or `next.resolve('package-name')`. These calls retain the

@@ -3571,8 +3571,14 @@ pub struct FleetCertifyQuiescenceArgs {
     #[arg(long, default_value = "")]
     pub reason: String,
 
-    /// Audit correlation identifier; generated when omitted. Repeating this
-    /// value does not deduplicate a new epoch transition.
+    /// Stable operation ID. Exact retries recover the original committed epoch
+    /// and evidence, including after a lost response or coordinator restart.
+    /// Reusing the ID with different intent fails without advancing the epoch.
+    #[arg(long)]
+    pub id: Option<String>,
+
+    /// Audit correlation identifier. Defaults to --id when supplied, otherwise
+    /// generated. Repeating only this value does not deduplicate a transition.
     #[arg(long)]
     pub trace_id: Option<String>,
 
@@ -6177,6 +6183,8 @@ mod parser_contract_extra_tests {
             "release-operator",
             "--reason",
             "replace the admitted runtime",
+            "--id",
+            "maintenance-epoch-7",
             "--trace-id",
             "rollout-epoch-7",
             "--stale-after-secs",
@@ -6189,6 +6197,7 @@ mod parser_contract_extra_tests {
         };
         assert_eq!(args.initiator, "release-operator");
         assert_eq!(args.reason, "replace the admitted runtime");
+        assert_eq!(args.id.as_deref(), Some("maintenance-epoch-7"));
         assert_eq!(args.trace_id.as_deref(), Some("rollout-epoch-7"));
         assert_eq!(args.stale_after_secs, Some(45));
         assert!(args.json);
@@ -6199,6 +6208,7 @@ mod parser_contract_extra_tests {
             return Err("expected handler-validated fleet certification".into());
         };
         assert!(args.initiator.is_empty() && args.reason.is_empty());
+        assert!(args.id.is_none());
         assert!(args.trace_id.is_none() && args.stale_after_secs.is_none());
         assert!(args.json);
         assert!(

@@ -2206,7 +2206,7 @@ fn scan(
                         Some(kind)
                     } else if resolve {
                         Some(LoadKind::RequireResolve)
-                    } else if is_require(f, bytes) || bindings.is_loader(f, text) {
+                    } else if is_require(f, text) || bindings.is_loader(f, text) {
                         Some(LoadKind::Require)
                     } else {
                         None
@@ -2414,13 +2414,32 @@ fn scan(
                 ));
                 None
             }
-            "member_expression"
+            "member_expression" | "subscript_expression"
                 if !erased
-                    && is_require(node, bytes)
+                    && is_require(node, text)
                     && !direct_callee(node, text)
                     && !loader_typeof_probe(node) =>
             {
                 issue = Some(("INDIRECT_REQUIRE", "module.require is used indirectly"));
+                None
+            }
+            "subscript_expression"
+                if !erased
+                    && commonjs_module_member(node, text)
+                    && node
+                        .child_by_field_name("index")
+                        .is_none_or(|index| {
+                            let index = runtime_operand(index);
+                            // These primitive property keys cannot spell require
+                            // and cannot invoke guest coercion hooks.
+                            !matches!(index.kind(), "number" | "true" | "false" | "null")
+                                && literal(index, text).is_none()
+                        }) =>
+            {
+                issue = Some((
+                    "INDIRECT_REQUIRE",
+                    "computed module members require an exact property name to exclude hidden loader use",
+                ));
                 None
             }
             "jsx_element" | "jsx_self_closing_element" | "with_statement" if !erased => {
@@ -3295,16 +3314,19 @@ fn is_require_resolve(node: Node<'_>, source: &str) -> bool {
     }
 }
 
-fn is_require(node: Node<'_>, bytes: &[u8]) -> bool {
+fn commonjs_module_member(node: Node<'_>, source: &str) -> bool {
     let node = runtime_operand(node);
-    (node.kind() == "identifier" && node.utf8_text(bytes) == Ok("require"))
-        || (node.kind() == "member_expression"
-            && node
-                .child_by_field_name("object")
-                .is_some_and(|n| runtime_operand(n).utf8_text(bytes) == Ok("module"))
-            && node
-                .child_by_field_name("property")
-                .is_some_and(|n| n.utf8_text(bytes) == Ok("require")))
+    matches!(node.kind(), "member_expression" | "subscript_expression")
+        && node.child_by_field_name("object").is_some_and(|object| {
+            let object = runtime_operand(object);
+            object.kind() == "identifier" && object.utf8_text(source.as_bytes()) == Ok("module")
+        })
+}
+
+fn is_require(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    (node.kind() == "identifier" && node.utf8_text(source.as_bytes()) == Ok("require"))
+        || (commonjs_module_member(node, source) && named_member(node, "require", source))
 }
 
 /// Evaluate only exact strings, without executing code, coercing a value or
@@ -4870,6 +4892,141 @@ if (false) { import.meta.resolve('./unused.node'); }
         assert_eq!(g.report.edges.len(), 2);
         assert!(g.report.fully_resolved);
         assert_eq!(g.report.edges[1].kind, LoadKind::DynamicImport);
+    }
+
+    #[test]
+    fn computed_module_require_captures_exact_loader_names() {
+        for (language, source) in [
+            (
+                SourceLanguage::JavaScript,
+                "module['require']('./dep.cjs');",
+            ),
+            (
+                SourceLanguage::JavaScript,
+                r#"module["requ\u0069re"]('./dep.cjs');"#,
+            ),
+            (
+                SourceLanguage::JavaScript,
+                "((module)['re' + 'quire'])('./dep.cjs');",
+            ),
+            (
+                SourceLanguage::JavaScript,
+                "module[`re${'quire'}`]('./dep.cjs');",
+            ),
+            (
+                SourceLanguage::TypeScript,
+                "((module as Module)['require'] as Loader)('./dep.cjs');",
+            ),
+            (
+                SourceLanguage::TypeScript,
+                "module[('re' + 'quire') as string]!('./dep.cjs');",
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}");
+            assert!(notices.is_empty(), "{source}: {notices:?}");
+            assert_eq!(loads.len(), 1, "{source}: {loads:?}");
+            assert_eq!(loads[0].kind, LoadKind::Require, "{source}");
+            assert_eq!(loads[0].specifier.as_deref(), Some("./dep.cjs"), "{source}");
+        }
+    }
+
+    #[test]
+    fn computed_module_require_does_not_hide_loader_escape_or_mutation() {
+        for source in [
+            "const load = module['require']; load('./hidden.cjs');",
+            "save(module['require']);",
+            "module['require'] = replacement;",
+            "delete module['require'];",
+            "module['re' + 'quire'].call(module, './hidden.cjs');",
+            "module['require']['apply'](module, ['./hidden.cjs']);",
+            "module['require'].resolve('./hidden.cjs');",
+            "(module['require'] as Loader).call(module, './hidden.cjs');",
+            "typeof (module['require'] = replacement);",
+            "typeof (0, module['require']);",
+        ] {
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::TypeScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}");
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.code == "INDIRECT_REQUIRE"),
+                "computed spelling cannot conceal indirect loader use: {source}: {notices:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn computed_module_require_keeps_missing_and_unknown_requests_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        for (source, state) in [
+            ("module['require'](request);", EdgeState::NonLiteral),
+            ("module['require']('./absent.cjs');", EdgeState::Unresolved),
+        ] {
+            put(root.path(), "app.cjs", source);
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(!captured.report().fully_resolved, "{source}");
+            assert_eq!(captured.report().edges.len(), 1, "{source}");
+            assert_eq!(
+                captured.report().edges[0].kind,
+                LoadKind::Require,
+                "{source}"
+            );
+            assert_eq!(captured.report().edges[0].state, state, "{source}");
+        }
+    }
+
+    #[test]
+    fn computed_module_members_require_exact_names_but_preserve_dynamic_exports() {
+        let root = tempfile::tempdir().unwrap();
+        for source in [
+            "const method='require'; module[method]('./hidden.cjs');",
+            "module[flag ? 'require' : 'other']('./hidden.cjs');",
+            "module[selectMethod()]('./hidden.cjs');",
+            "const load=module[method]; load('./hidden.cjs');",
+            "typeof module[method];",
+            "(module as Module)[method]('./hidden.cjs');",
+        ] {
+            put(root.path(), "app.cts", source);
+            let captured = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+            assert!(!captured.report().fully_resolved, "{source}");
+            assert!(
+                captured
+                    .report()
+                    .diagnostics
+                    .iter()
+                    .any(|notice| notice.code == "INDIRECT_REQUIRE"),
+                "unknown member may expose the loader: {source}: {:?}",
+                captured.report()
+            );
+        }
+        for source in [
+            "module['exports'] = {answer: 42}; console.log(module['id']);",
+            "module['ex' + 'ports'][name] = 42; console.log(module.id);",
+            "module.exports[name] = module['exports'][name];",
+            "module[0]; module[1n]; module[(2)]; module[true]; module[false]; module[null];",
+        ] {
+            put(root.path(), "app.cjs", source);
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(
+                captured.report().fully_resolved,
+                "{source}: {:?}",
+                captured.report()
+            );
+            assert!(captured.report().edges.is_empty(), "{source}");
+        }
     }
 
     fn scan_string_request(expression: &str, language: SourceLanguage) -> Option<String> {
@@ -7641,6 +7798,8 @@ const fromPackage = require('string-' + 'fixture');
             ),
             (SourceLanguage::JavaScript, "typeof module.require;"),
             (SourceLanguage::JavaScript, "typeof ((module).require);"),
+            (SourceLanguage::JavaScript, "typeof module['require'];"),
+            (SourceLanguage::JavaScript, "typeof ((module)['re' + 'quire']);"),
             (SourceLanguage::TypeScript, "typeof (require as Loader);"),
             (
                 SourceLanguage::TypeScript,

@@ -45,10 +45,13 @@ use super::fleet_transport::{
     FleetEpochCommitSigner, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
     FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
-    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
-    certify_fleet_epoch_quiescence, fleet_epoch_quiescence_manifest_hash, validate_action_record,
-    validate_fleet_native_session_publication, validate_fleet_policy_publication,
-    validate_guarded_fleet_policy_publication, validate_node_status,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
+    MAX_NATIVE_DRAIN_ATTESTATION_AGE, NativeSessionDrainCheckpoint, NodeStatus,
+    certify_fleet_epoch_quiescence, fleet_action_log_checkpoint,
+    fleet_epoch_operation_request_sha256, fleet_epoch_quiescence_manifest_hash, validate_action_id,
+    validate_action_record, validate_fleet_native_session_publication,
+    validate_fleet_policy_publication, validate_guarded_fleet_policy_publication,
+    validate_node_status,
 };
 use super::fleet_transport::{
     FLEET_GUARDED_RESUME_RECEIPT_SCHEMA, FleetGuardedResumeReceipt,
@@ -101,6 +104,67 @@ impl SignedFleetEpochCommit {
         Ok(())
     }
 }
+
+/// Retain the earliest expiry of the exact observations admitted by a guarded
+/// transaction. Signature verification, serialization and database writes can
+/// outlast a freshness window; a later heartbeat cannot renew a signed drain.
+/// Compute the deadline before that work so the final commit check is O(1).
+fn fleet_observations_expire_at<'a>(
+    stale_after: Duration,
+    observations: impl Iterator<
+        Item = (
+            Option<DateTime<Utc>>,
+            Option<&'a NativeSessionDrainCheckpoint>,
+        ),
+    >,
+) -> Result<DateTime<Utc>, FleetTransportError> {
+    let heartbeat_age = chrono::TimeDelta::from_std(stale_after)
+        .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
+    let supervisor_age =
+        chrono::TimeDelta::from_std(stale_after.min(MAX_NATIVE_DRAIN_ATTESTATION_AGE))
+            .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
+    let mut expires_at: Option<DateTime<Utc>> = None;
+    for (heartbeat, drain) in observations {
+        let heartbeat = heartbeat.ok_or_else(|| {
+            FleetTransportError::stale_state("guarded commit requires an observed heartbeat")
+        })?;
+        let mut deadline = heartbeat.checked_add_signed(heartbeat_age).ok_or_else(|| {
+            FleetTransportError::stale_state("fleet heartbeat expiry is out of range")
+        })?;
+        if let Some(attestation) = drain.and_then(|drain| drain.supervisor_attestation.as_ref()) {
+            let signed_deadline = attestation
+                .observed_at
+                .checked_add_signed(supervisor_age)
+                .ok_or_else(|| {
+                    FleetTransportError::stale_state("fleet supervisor expiry is out of range")
+                })?;
+            deadline = deadline.min(signed_deadline);
+        }
+        expires_at = Some(expires_at.map_or(deadline, |expiry| expiry.min(deadline)));
+    }
+    expires_at.ok_or_else(|| {
+        FleetTransportError::stale_state("guarded commit requires a nonempty observed population")
+    })
+}
+
+fn validate_fleet_observation_commit_time(
+    accepted_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    commit_at: DateTime<Utc>,
+) -> Result<(), FleetTransportError> {
+    if commit_at < accepted_at {
+        return Err(FleetTransportError::stale_state(
+            "fleet coordinator clock regressed before guarded commit",
+        ));
+    }
+    if commit_at >= expires_at {
+        return Err(FleetTransportError::stale_state(
+            "fleet observations expired before guarded commit; obtain fresh acknowledgements",
+        ));
+    }
+    Ok(())
+}
+
 /// bd-ymbjw: fsqlite surfaces WAL write-write races as immediate
 /// "database is busy (snapshot conflict …)" errors. Unlike a plain lock wait,
 /// a snapshot conflict is not resolved by `busy_timeout` — the failing
@@ -804,8 +868,10 @@ impl DurableFleetTransport {
     ///
     /// Both callbacks are rerun after a snapshot conflict. `now` is sampled
     /// after the node projection, so a retried admission cannot reuse an older
-    /// freshness decision. Original committed receipts are returned unchanged
-    /// apart from the explicit retry flag, including after a later resume.
+    /// freshness decision. A final check immediately before commit also rejects
+    /// observations that expired during verification or persistence work.
+    /// Original committed receipts are returned unchanged apart from the
+    /// explicit retry flag, including after a later resume.
     pub fn publish_policy_with_maintenance_guard_projected(
         &mut self,
         request: &GuardedFleetPolicyPublication,
@@ -898,6 +964,13 @@ impl DurableFleetTransport {
                 accepted_at,
                 max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
+            )?;
             let receipt = FleetGuardedPolicyReceipt {
                 schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
                 action: request.action.clone(),
@@ -925,6 +998,7 @@ impl DurableFleetTransport {
             )
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
             enforce_table_capacity(&tx, "fleet_guarded_policy_publications", MAX_ACTION_LOG_ENTRIES)?;
+            validate_fleet_observation_commit_time(accepted_at, observations_expire_at, now())?;
             tx.commit()
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok(receipt)
@@ -1021,6 +1095,13 @@ impl DurableFleetTransport {
             let evidence = validate_guarded_fleet_native_session_resume(
                 request, &state, accepted_at, max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
+            )?;
             let receipt = FleetGuardedResumeReceipt {
                 schema_version: FLEET_GUARDED_RESUME_RECEIPT_SCHEMA.to_owned(),
                 request: request.clone(), evidence, accepted_at, observation_scope,
@@ -1036,10 +1117,13 @@ impl DurableFleetTransport {
             ).map_err(|error| FleetTransportError::io(error.to_string()))?;
             enforce_table_capacity(&tx, "fleet_guarded_native_resumes", MAX_ACTION_LOG_ENTRIES)?;
             // Serialization and signature verification may be expensive. A
-            // deadline that elapsed during them must roll back the release.
-            if now() >= request.expires_at {
+            // deadline that elapsed during them must roll back the release,
+            // including observation expiry before the request itself expires.
+            let commit_at = now();
+            if commit_at >= request.expires_at {
                 return Err(FleetTransportError::stale_state("guarded resume authorization expired before commit"));
             }
+            validate_fleet_observation_commit_time(accepted_at, observations_expire_at, commit_at)?;
             tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok(receipt)
         })
@@ -1096,7 +1180,11 @@ impl DurableFleetTransport {
         let epoch = encoded
             .parse::<u64>()
             .map_err(|_| FleetTransportError::serialization("invalid durable epoch head value"))?;
-        if epoch == 0 || epoch.to_string() != encoded || count != epoch {
+        if epoch == 0
+            || epoch.to_string() != encoded
+            || count != epoch
+            || epoch > MAX_ACTION_LOG_ENTRIES as u64
+        {
             return Err(FleetTransportError::stale_state(
                 "durable fleet epoch head and retained history disagree",
             ));
@@ -1141,6 +1229,26 @@ impl DurableFleetTransport {
             ));
         }
         Ok(commit)
+    }
+
+    /// Operation identity lives in the authenticated certificate. A disposable
+    /// index cannot establish absence: losing an index entry must never cause
+    /// the same operation to advance twice. Walk contiguous, bounded history
+    /// one record at a time instead of loading every evidence package at once.
+    /// Recent retries normally find their operation at the head.
+    fn query_epoch_operation(
+        connection: &Connection,
+        key: &EpochSigningKey,
+        head: u64,
+        operation_id: &str,
+    ) -> Result<Option<SignedFleetEpochCommit>, FleetTransportError> {
+        for epoch in (1..=head).rev() {
+            let commit = Self::query_epoch_commit(connection, key, epoch)?;
+            if commit.certificate.operation_id.as_deref() == Some(operation_id) {
+                return Ok(Some(commit));
+            }
+        }
+        Ok(None)
     }
 
     fn validate_head_signer(
@@ -1253,7 +1361,11 @@ impl DurableFleetTransport {
     /// Authenticate, certify and durably commit against one serialized action,
     /// node and epoch snapshot. A failed/conflicted transaction discards its
     /// provisional coordinator; retry rechecks the live hold and fresh nodes.
-    /// The clock refreshes params.now after node projection on every attempt.
+    /// The clock refreshes params.now after node projection on every attempt,
+    /// then checks the accepted observations' expiry immediately before commit.
+    /// An existing operation returns its original historical commit before
+    /// projecting current nodes. Recovery never renews supervisor observations
+    /// or proves that the presently admitted population remains quiescent.
     pub fn certify_epoch_quiescence_projected(
         &mut self,
         key: &EpochSigningKey,
@@ -1267,9 +1379,56 @@ impl DurableFleetTransport {
             FleetNativeDrainEvidence,
             FleetEpochQuiescenceCertificate,
             u64,
+            bool,
         ),
         FleetTransportError,
     > {
+        let expected_action_log = params.expected_action_log;
+        if let Some(operation_id) = params.operation_id {
+            validate_action_id(operation_id)?;
+            if signer.is_none() {
+                return Err(FleetTransportError::not_initialized(
+                    "retryable epoch operations require a provisioned coordinator signing key",
+                ));
+            }
+        }
+        if let Some(expected) = expected_action_log {
+            expected.validate()?;
+        }
+        if params.initiator.trim().is_empty()
+            || params.reason.trim().is_empty()
+            || params.trace_id.trim().is_empty()
+            || params.stale_after.is_zero()
+        {
+            return Err(FleetTransportError::serialization(
+                "epoch-barrier requests require an initiator, reason, trace and positive freshness window",
+            ));
+        }
+        let request_sha256 = params
+            .operation_id
+            .map(|operation_id| {
+                fleet_epoch_operation_request_sha256(
+                    operation_id,
+                    params.initiator,
+                    params.reason,
+                    params.trace_id,
+                    params.stale_after,
+                    expected_action_log,
+                )
+            })
+            .transpose()?;
+        if params
+            .operation_request_sha256
+            .is_some_and(|digest| Some(digest) != request_sha256.as_deref())
+        {
+            return Err(FleetTransportError::action_conflict(
+                "epoch operation digest differs from its exact request",
+            ));
+        }
+        let params = FleetEpochBarrierParams {
+            operation_request_sha256: request_sha256.as_deref(),
+            ..params
+        };
         self.ensure_initialized()?;
         self.with_connection(|connection| {
             let mut tx = connection
@@ -1278,11 +1437,55 @@ impl DurableFleetTransport {
             serialize_fleet_mutation(&tx)?;
             let epoch = self.query_epoch_head(connection, key)?;
             Self::validate_head_signer(connection, key, epoch, signer)?;
+            if let Some(operation_id) = params.operation_id
+                && let Some(retained) =
+                    Self::query_epoch_operation(connection, key, epoch, operation_id)?
+            {
+                let certificate = &retained.certificate;
+                if certificate.operation_request_sha256.as_deref()
+                    != params.operation_request_sha256
+                    || certificate.initiator != params.initiator
+                    || certificate.reason != params.reason
+                    || certificate.trace_id != params.trace_id
+                    || retained.evidence.stale_after
+                        != params.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER)
+                    || expected_action_log
+                        .is_some_and(|expected| expected != &certificate.action_log_checkpoint)
+                {
+                    return Err(FleetTransportError::action_conflict(
+                        "epoch operation ID already binds a different request or action snapshot",
+                    ));
+                }
+                let authorization = retained.coordinator_authorization.as_ref().ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "retained epoch operation lacks its independent coordinator authorization",
+                    )
+                })?;
+                let signer = signer.ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "retained epoch operation requires its provisioned coordinator signing key",
+                    )
+                })?;
+                authorization.verify(signer, &retained.evidence, certificate)?;
+                tx.commit()
+                    .map_err(|error| FleetTransportError::io(error.to_string()))?;
+                // No current node projection took place. Zero is not a new
+                // quarantine observation; recovery must leave the current
+                // control cache untouched.
+                return Ok((retained.evidence, retained.certificate, 0, true));
+            }
             let mut state = FleetSharedState {
                 schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
                 actions: Self::query_actions(connection)?,
                 nodes: Self::query_nodes(connection)?,
             };
+            if let Some(expected) = expected_action_log
+                && expected != &fleet_action_log_checkpoint(&state.actions)?
+            {
+                return Err(FleetTransportError::stale_state(
+                    "epoch-barrier action snapshot changed before certification",
+                ));
+            }
             project_nodes(&mut state.nodes)?;
             let quarantine_version = state
                 .nodes
@@ -1298,8 +1501,16 @@ impl DurableFleetTransport {
                 roots,
                 FleetEpochBarrierParams {
                     now: now(),
+                    stale_after: params.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
                     ..params
                 },
+            )?;
+            let observations_expire_at = fleet_observations_expire_at(
+                evidence.stale_after,
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.last_seen, node.native_session_drain.as_ref())),
             )?;
             let transition = coordinator
                 .last_signed_transition()
@@ -1343,9 +1554,14 @@ impl DurableFleetTransport {
                 ],
             )
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            validate_fleet_observation_commit_time(
+                certificate.certified_at,
+                observations_expire_at,
+                now(),
+            )?;
             tx.commit()
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
-            Ok((evidence, certificate, quarantine_version))
+            Ok((evidence, certificate, quarantine_version, false))
         })
     }
 

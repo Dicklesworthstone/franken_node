@@ -3762,6 +3762,218 @@ fn read_forensic_identity_captures(
     Ok(())
 }
 
+/// Enumerate bounded lookup selectors, not trusted identities. Every selected
+/// body is authenticated against the original root before it enters the report.
+fn read_retained_forensic_selectors(
+    protected_root: &Path,
+    max_files: usize,
+    max_bytes: usize,
+    report: &mut NativeSessionForensicReport,
+) -> Result<BTreeSet<String>> {
+    let directory = protected_root.join(ADMISSION_RECORD_DIRECTORY);
+    match std::fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error).context("inspect retained native-session admissions"),
+        Ok(_) => validate_existing_forensic_directory(&directory)?,
+    }
+    let mut paths = std::fs::read_dir(&directory)?
+        .take(max_files.saturating_add(1))
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if paths.len() > max_files {
+        bail!("retained native-session forensic admissions exceed their file bound");
+    }
+    paths.sort();
+    let mut selectors = BTreeSet::new();
+    let mut scanned_bytes = 0usize;
+    for path in paths {
+        let selector = (|| -> Result<String> {
+            let bytes = read_runtime_evidence_private_file(&path, MAX_ADMISSION_BYTES)?;
+            scanned_bytes = scanned_bytes.saturating_add(bytes.len());
+            if scanned_bytes > max_bytes {
+                bail!("retained native-session forensic admissions exceed their byte bound");
+            }
+            let admission: NativeSessionAdmission = serde_json::from_slice(&bytes)
+                .context("decode retained native-session forensic selector")?;
+            validate_forensic_session_nonce(&admission.session_nonce)?;
+            if path != admission_record_path(protected_root, &admission.session_nonce) {
+                bail!("retained native-session admission filename disagrees with its nonce");
+            }
+            Ok(admission.session_nonce)
+        })();
+        match selector {
+            Ok(nonce) => {
+                selectors.insert(nonce);
+            }
+            Err(error) => report.source_errors.push(forensic_source_error(
+                None,
+                path,
+                NativeSessionForensicErrorKind::AdmissionRecordInvalid,
+                format!("{error:#}"),
+            )),
+        }
+        if scanned_bytes > max_bytes {
+            bail!("retained native-session forensic admission scan exceeded its byte bound");
+        }
+    }
+    Ok(selectors)
+}
+
+/// Preserve the same outcome/source/journal verification for database-backed
+/// admissions and immutable admissions recovered from a missing projection.
+fn append_native_session_forensic_observation(
+    protected_root: &Path,
+    key: &ed25519_dalek::VerifyingKey,
+    admission: NativeSessionAdmission,
+    admission_receipt: NativeSessionAdmissionReceipt,
+    projection: (SqliteValue, bool),
+    retained_bytes: &mut usize,
+    report: &mut NativeSessionForensicReport,
+) -> Result<()> {
+    let (projected_outcome, outcome_within_bound) = projection;
+    let nonce = admission.session_nonce.clone();
+    let mut record = NativeSessionForensicRecord {
+        admission_receipt_path: admission_receipt_path(protected_root, &nonce),
+        admission,
+        outcome: None,
+        status: NativeSessionForensicStatus::PendingLivenessUnknown,
+        outcome_receipt_path: None,
+        outcome_recovered_from_receipt: false,
+        durable_journal: None,
+    };
+    let outcome = authenticate_forensic_outcome(
+        protected_root,
+        &record.admission,
+        &projected_outcome,
+        outcome_within_bound,
+        key,
+    );
+    let mut signed_outcome = None;
+    match outcome {
+        Ok(Some(receipt)) => {
+            let signed_bytes = bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len();
+            let projected_bytes = match &projected_outcome {
+                SqliteValue::Text(text) => text.len(),
+                _ => 0,
+            };
+            *retained_bytes =
+                retained_bytes.saturating_add(signed_bytes.saturating_sub(projected_bytes));
+            if *retained_bytes > MAX_RESERVED_BYTES {
+                report.source_errors.push(forensic_source_error(
+                    Some(&nonce),
+                    report.database_path.clone(),
+                    NativeSessionForensicErrorKind::InventoryUnreadable,
+                    "native-session forensic receipts exceed the aggregate byte bound",
+                ));
+                record.status = NativeSessionForensicStatus::OutcomeUnverified;
+                report.records.push(record);
+                return Ok(());
+            }
+            record.status = if receipt.outcome.kind
+                == NativeSessionOutcomeKind::SupervisionIncomplete
+                || receipt.outcome.process != NativeSessionProcessObservation::WorkerReaped
+            {
+                NativeSessionForensicStatus::SupervisionIncomplete
+            } else {
+                NativeSessionForensicStatus::TerminalObservation
+            };
+            record.outcome_recovered_from_receipt = matches!(projected_outcome, SqliteValue::Null);
+            record.outcome_receipt_path = Some(outcome_receipt_path(protected_root, &nonce));
+            signed_outcome = Some(
+                frankenengine_verifier_sdk::native_session::NativeSessionForensicOutcome {
+                    payload_json: receipt.payload_json()?,
+                    signature_hex: receipt.signature_hex,
+                },
+            );
+            record.outcome = Some(receipt.outcome);
+        }
+        Ok(None) if matches!(projected_outcome, SqliteValue::Null) => {}
+        Ok(None) => {
+            record.status = NativeSessionForensicStatus::OutcomeUnverified;
+            report.source_errors.push(forensic_source_error(
+                Some(&nonce),
+                outcome_receipt_path(protected_root, &nonce),
+                NativeSessionForensicErrorKind::OutcomeReceiptMissing,
+                "database outcome has no authenticated supervisor receipt",
+            ));
+        }
+        Err(error) => {
+            record.status = NativeSessionForensicStatus::OutcomeUnverified;
+            report.source_errors.push(error);
+        }
+    }
+    // Charge authenticated sizes before reading the corresponding objects.
+    if let Some(source) = &record.admission.source_capsule {
+        *retained_bytes = retained_bytes.saturating_add(source.capsule_bytes);
+        if *retained_bytes > MAX_RESERVED_BYTES {
+            report.source_errors.push(forensic_source_error(
+                Some(&nonce),
+                protected_root.join(SOURCE_CAPSULE_DIRECTORY),
+                NativeSessionForensicErrorKind::SourceCapsuleInvalid,
+                "native-session forensic sources exceed the aggregate byte bound",
+            ));
+            report.records.push(record);
+            return Ok(());
+        }
+    }
+    let source_capsule =
+        match read_retained_native_session_source_capsule(protected_root, &record.admission) {
+            Ok(source) => source,
+            Err(error) => {
+                report.source_errors.push(forensic_source_error(
+                    Some(&nonce),
+                    protected_root.join(SOURCE_CAPSULE_DIRECTORY),
+                    NativeSessionForensicErrorKind::SourceCapsuleInvalid,
+                    format!("{error:#}"),
+                ));
+                report.records.push(record);
+                return Ok(());
+            }
+        };
+    let journal = read_retained_native_session_effect_journal(protected_root, &nonce)
+        .and_then(|journal| {
+            journal
+                .map(|jsonl| {
+                    *retained_bytes = retained_bytes.saturating_add(jsonl.len());
+                    if *retained_bytes > MAX_RESERVED_BYTES {
+                        bail!("native-session forensic journals exceed the aggregate byte bound");
+                    }
+                    let (bundle, byte_cap) = make_native_session_forensic_bundle(
+                        &record.admission,
+                        &admission_receipt,
+                        signed_outcome,
+                        Some(jsonl),
+                        source_capsule.as_ref().map(|bytes| bytes.as_slice()),
+                    )?;
+                    let bytes = bounded_json(&bundle, byte_cap)?;
+                    let verified =
+                        frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
+                            bytes.as_bytes(),
+                            key,
+                        )?;
+                    verified
+                        .durable_journal
+                        .map(NativeSessionForensicJournal::from)
+                        .context("verified forensic bundle has no durable journal")
+                })
+                .transpose()
+        });
+    match journal {
+        Ok(journal) => record.durable_journal = journal,
+        Err(error) => report.source_errors.push(forensic_source_error(
+            Some(&nonce),
+            super::native_session_journal::native_session_effect_journal_path(
+                protected_root,
+                &nonce,
+            ),
+            NativeSessionForensicErrorKind::JournalInvalid,
+            format!("{error:#}"),
+        )),
+    }
+    report.records.push(record);
+    Ok(())
+}
+
 fn read_native_session_forensics_at(
     protected_root: &Path,
     project_root: Option<&Path>,
@@ -3789,7 +4001,11 @@ fn read_native_session_forensics_at(
     }
     validate_existing_forensic_directory(protected_root)?;
     validate_existing_forensic_directory(&protected_root.join("keys"))?;
-    for name in [ADMISSION_RECEIPT_DIRECTORY, OUTCOME_RECEIPT_DIRECTORY] {
+    for name in [
+        ADMISSION_RECEIPT_DIRECTORY,
+        ADMISSION_RECORD_DIRECTORY,
+        OUTCOME_RECEIPT_DIRECTORY,
+    ] {
         let directory = protected_root.join(name);
         match std::fs::symlink_metadata(&directory) {
             Ok(_) => validate_existing_forensic_directory(&directory)?,
@@ -3803,56 +4019,73 @@ fn read_native_session_forensics_at(
     let key = root.verifying_key();
     drop(root);
     let mut admissions = BTreeMap::new();
-    // Missing state is observable absence. The read-only opener is used only
-    // when a database is present; it must never create an empty inventory.
     let inventory = (|| -> Result<Option<Connection>> {
         match std::fs::symlink_metadata(&report.database_path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("inspect retained native-session database"),
             Ok(_) => report.store_present = true,
         }
+        // Validate orphaned sidecars even if the main file is missing. An
+        // unsafe filesystem object must never enable immutable-body fallback.
+        let present = validate_forensic_inventory_paths(protected_root)?;
+        if present != report.store_present {
+            bail!("native-session forensic database changed during path validation");
+        }
+        if !present {
+            return Ok(None);
+        }
         open_forensic_inventory(protected_root).map(Some)
     })();
-    let inventory = match inventory {
-        Ok(connection) => connection,
+    let (inventory, mut allow_retained_discovery) = match inventory {
+        Ok(connection) => (connection, true),
         Err(error) => {
+            let allowed = error
+                .downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+                .is_some();
             report.source_errors.push(forensic_source_error(
                 None,
                 report.database_path.clone(),
                 NativeSessionForensicErrorKind::InventoryUnreadable,
                 format!("{error:#}"),
             ));
-            None
+            (None, allowed)
         }
     };
-    if let Some(connection) = inventory {
-        // Enumerate bounded selectors first, then authenticate each observation
-        // through the same read-only connection and export verification helpers.
-        // A concurrent terminal observation may appear during this live read;
-        // no consistency, process liveness or complete-population claim follows.
+    let mut selectors = BTreeSet::new();
+    if let Some(connection) = inventory.as_ref() {
         let census = (|| -> Result<_> {
-            let rows = connection.query(&format!(
-                "SELECT CASE WHEN typeof(session_nonce) = 'text'
-                              AND LENGTH(CAST(session_nonce AS BLOB)) <= 128
-                             THEN session_nonce ELSE NULL END
-                 FROM native_sessions LIMIT {};",
-                MAX_STORED_SESSIONS + 1,
-            ))?;
+            let rows = connection
+                .query(&format!(
+                    "SELECT CASE WHEN typeof(session_nonce) = 'text'
+                                  AND LENGTH(CAST(session_nonce AS BLOB)) <= 128
+                                 THEN session_nonce ELSE NULL END
+                     FROM native_sessions LIMIT {};",
+                    MAX_STORED_SESSIONS + 1,
+                ))
+                .map_err(|error| {
+                    classify_forensic_inventory_read_error(
+                        "enumerate retained native-session inventory",
+                        error,
+                    )
+                })?;
             if rows.len() > MAX_STORED_SESSIONS {
                 bail!("native-session forensic inventory exceeds its session bound");
             }
             Ok(rows)
         })();
         match census {
-            Err(error) => report.source_errors.push(forensic_source_error(
-                None,
-                report.database_path.clone(),
-                NativeSessionForensicErrorKind::InventoryUnreadable,
-                format!("{error:#}"),
-            )),
+            Err(error) => {
+                allow_retained_discovery = error
+                    .downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+                    .is_some();
+                report.source_errors.push(forensic_source_error(
+                    None,
+                    report.database_path.clone(),
+                    NativeSessionForensicErrorKind::InventoryUnreadable,
+                    format!("{error:#}"),
+                ));
+            }
             Ok(rows) => {
-                let mut seen = BTreeSet::new();
-                let mut retained_bytes = 0usize;
                 for row in rows {
                     let [SqliteValue::Text(nonce)] = row.values() else {
                         report.source_errors.push(forensic_source_error(
@@ -3872,205 +4105,189 @@ fn read_native_session_forensics_at(
                         ));
                         continue;
                     }
-                    if !seen.insert(nonce.to_string()) {
+                    selectors.insert(nonce.to_string());
+                }
+            }
+        }
+    }
+    if allow_retained_discovery {
+        match read_retained_forensic_selectors(
+            protected_root,
+            MAX_STORED_SESSIONS,
+            MAX_RETAINED_ADMISSION_BYTES,
+            &mut report,
+        ) {
+            Ok(retained) => {
+                if !report.store_present && !retained.is_empty() {
+                    report.source_errors.push(forensic_source_error(
+                        None,
+                        report.database_path.clone(),
+                        NativeSessionForensicErrorKind::InventoryUnreadable,
+                        "native-session inventory is missing; only retained signed observations are available",
+                    ));
+                }
+                selectors.extend(retained);
+            }
+            Err(error) => report.source_errors.push(forensic_source_error(
+                None,
+                protected_root.join(ADMISSION_RECORD_DIRECTORY),
+                NativeSessionForensicErrorKind::AdmissionRecordInvalid,
+                format!("{error:#}"),
+            )),
+        }
+    }
+    if selectors.len() > MAX_STORED_SESSIONS {
+        report.source_errors.push(forensic_source_error(
+            None,
+            report.database_path.clone(),
+            NativeSessionForensicErrorKind::InventoryUnreadable,
+            "combined native-session forensic inventory exceeds its session bound; coverage is incomplete",
+        ));
+    }
+    let mut retained_bytes = 0usize;
+    for nonce in selectors.iter().take(MAX_STORED_SESSIONS) {
+        let projection = if let Some(connection) = inventory.as_ref() {
+            match read_optional_forensic_projection(connection, nonce) {
+                Ok(Some(projection)) => Some(projection),
+                Ok(None) => {
+                    report.source_errors.push(forensic_source_error(
+                        Some(nonce),
+                        report.database_path.clone(),
+                        NativeSessionForensicErrorKind::InventoryUnreadable,
+                        "retained native-session admission has no database projection",
+                    ));
+                    None
+                }
+                Err(error) => {
+                    let unavailable = error
+                        .downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+                        .is_some();
+                    report.source_errors.push(forensic_source_error(
+                        Some(nonce),
+                        report.database_path.clone(),
+                        if unavailable {
+                            NativeSessionForensicErrorKind::InventoryUnreadable
+                        } else {
+                            NativeSessionForensicErrorKind::AdmissionInvalid
+                        },
+                        format!("{error:#}"),
+                    ));
+                    if !unavailable {
                         continue;
                     }
-                    let projection = read_forensic_projection(&connection, nonce);
-                    let (admission_value, projected_outcome, outcome_within_bound) =
-                        match projection {
-                            Ok(values) => values,
-                            Err(error) => {
-                                report.source_errors.push(forensic_source_error(
-                                    Some(nonce),
-                                    report.database_path.clone(),
-                                    NativeSessionForensicErrorKind::AdmissionInvalid,
-                                    format!("{error:#}"),
-                                ));
-                                continue;
-                            }
-                        };
-                    let json_bytes = |value: &SqliteValue| match value {
-                        SqliteValue::Text(text) => text.len(),
-                        _ => 0,
+                    // Preserve export's safety boundary on a damaged database:
+                    // disappearance, access/identity errors and unsafe sidecars
+                    // cannot be reclassified as readable corrupt evidence.
+                    let safety_error = match validate_forensic_inventory_paths(protected_root) {
+                        Ok(true) => None,
+                        Ok(false) => Some(
+                            "native-session forensic database disappeared while reading".to_owned(),
+                        ),
+                        Err(error) => Some(format!("{error:#}")),
                     };
-                    retained_bytes = retained_bytes
-                        .saturating_add(json_bytes(&admission_value))
-                        .saturating_add(json_bytes(&projected_outcome));
-                    if retained_bytes > MAX_RESERVED_BYTES {
+                    if let Some(detail) = safety_error {
                         report.source_errors.push(forensic_source_error(
                             Some(nonce),
                             report.database_path.clone(),
                             NativeSessionForensicErrorKind::InventoryUnreadable,
-                            "native-session forensic inventory exceeds its aggregate byte bound",
+                            detail,
                         ));
-                        break;
-                    }
-                    let (admission, admission_receipt) = match authenticate_forensic_admission(
-                        protected_root,
-                        nonce,
-                        &admission_value,
-                        &key,
-                    ) {
-                        Ok(authenticated) => authenticated,
-                        Err(error) => {
-                            report.source_errors.push(error);
-                            continue;
-                        }
-                    };
-                    // Authenticate before filtering: unsigned scope changes
-                    // must remain visible instead of hiding a damaged session.
-                    admissions.insert(admission.session_nonce.clone(), admission.clone());
-                    if report
-                        .project_root
-                        .as_ref()
-                        .is_some_and(|project| !admission.belongs_to_control_scope(project))
-                    {
                         continue;
                     }
-                    let mut record = NativeSessionForensicRecord {
-                        admission_receipt_path: admission_receipt_path(protected_root, nonce),
-                        admission,
-                        outcome: None,
-                        status: NativeSessionForensicStatus::PendingLivenessUnknown,
-                        outcome_receipt_path: None,
-                        outcome_recovered_from_receipt: false,
-                        durable_journal: None,
-                    };
-                    let outcome = authenticate_forensic_outcome(
-                        protected_root,
-                        &record.admission,
-                        &projected_outcome,
-                        outcome_within_bound,
-                        &key,
-                    );
-                    let mut signed_outcome = None;
-                    match outcome {
-                        Ok(Some(receipt)) => {
-                            let signed_bytes =
-                                bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len();
-                            retained_bytes = retained_bytes.saturating_add(
-                                signed_bytes.saturating_sub(json_bytes(&projected_outcome)),
-                            );
-                            if retained_bytes > MAX_RESERVED_BYTES {
-                                report.source_errors.push(forensic_source_error(
-                                    Some(nonce),
-                                    report.database_path.clone(),
-                                    NativeSessionForensicErrorKind::InventoryUnreadable,
-                                    "native-session forensic receipts exceed the aggregate byte bound",
-                                ));
-                                record.status = NativeSessionForensicStatus::OutcomeUnverified;
-                                report.records.push(record);
-                                break;
-                            }
-                            record.status = if receipt.outcome.kind
-                                == NativeSessionOutcomeKind::SupervisionIncomplete
-                                || receipt.outcome.process
-                                    != NativeSessionProcessObservation::WorkerReaped
-                            {
-                                NativeSessionForensicStatus::SupervisionIncomplete
-                            } else {
-                                NativeSessionForensicStatus::TerminalObservation
-                            };
-                            record.outcome_recovered_from_receipt =
-                                matches!(projected_outcome, SqliteValue::Null);
-                            record.outcome_receipt_path =
-                                Some(outcome_receipt_path(protected_root, nonce));
-                            signed_outcome = Some(
-                                frankenengine_verifier_sdk::native_session::NativeSessionForensicOutcome {
-                                    payload_json: receipt.payload_json()?,
-                                    signature_hex: receipt.signature_hex,
-                                },
-                            );
-                            record.outcome = Some(receipt.outcome);
-                        }
-                        Ok(None) if matches!(projected_outcome, SqliteValue::Null) => {}
-                        Ok(None) => {
-                            record.status = NativeSessionForensicStatus::OutcomeUnverified;
-                            report.source_errors.push(forensic_source_error(
-                                Some(nonce),
-                                outcome_receipt_path(protected_root, nonce),
-                                NativeSessionForensicErrorKind::OutcomeReceiptMissing,
-                                "database outcome has no authenticated supervisor receipt",
-                            ));
-                        }
-                        Err(error) => {
-                            record.status = NativeSessionForensicStatus::OutcomeUnverified;
-                            report.source_errors.push(error);
-                        }
-                    }
-                    // Charge the authenticated size before reading/replaying,
-                    // so corrupt repeated objects cannot bypass the scan budget.
-                    if let Some(source) = &record.admission.source_capsule {
-                        retained_bytes = retained_bytes.saturating_add(source.capsule_bytes);
-                        if retained_bytes > MAX_RESERVED_BYTES {
-                            report.source_errors.push(forensic_source_error(
-                                Some(nonce),
-                                protected_root.join(SOURCE_CAPSULE_DIRECTORY),
-                                NativeSessionForensicErrorKind::SourceCapsuleInvalid,
-                                "native-session forensic sources exceed the aggregate byte bound",
-                            ));
-                            report.records.push(record);
-                            break;
-                        }
-                    }
-                    let source_capsule = match read_retained_native_session_source_capsule(
-                        protected_root,
-                        &record.admission,
-                    ) {
-                        Ok(source) => source,
-                        Err(error) => {
-                            report.source_errors.push(forensic_source_error(
-                                Some(nonce),
-                                protected_root.join(SOURCE_CAPSULE_DIRECTORY),
-                                NativeSessionForensicErrorKind::SourceCapsuleInvalid,
-                                format!("{error:#}"),
-                            ));
-                            report.records.push(record);
-                            continue;
-                        }
-                    };
-                    let journal = read_retained_native_session_effect_journal(protected_root, nonce)
-                        .and_then(|journal| {
-                            journal
-                                .map(|jsonl| {
-                                    retained_bytes = retained_bytes.saturating_add(jsonl.len());
-                                    if retained_bytes > MAX_RESERVED_BYTES {
-                                        bail!("native-session forensic journals exceed the aggregate byte bound");
-                                    }
-                                    let (bundle, byte_cap) = make_native_session_forensic_bundle(
-                                        &record.admission,
-                                        &admission_receipt,
-                                        signed_outcome,
-                                        Some(jsonl),
-                                        source_capsule.as_ref().map(|bytes| bytes.as_slice()),
-                                    )?;
-                                    let bytes = bounded_json(&bundle, byte_cap)?;
-                                    let verified = frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
-                                        bytes.as_bytes(), &key,
-                                    )?;
-                                    verified.durable_journal.map(NativeSessionForensicJournal::from)
-                                        .context("verified forensic bundle has no durable journal")
-                                })
-                                .transpose()
-                        });
-                    match journal {
-                        Ok(journal) => record.durable_journal = journal,
-                        Err(error) => report.source_errors.push(forensic_source_error(
-                            Some(nonce),
-                            super::native_session_journal::native_session_effect_journal_path(
-                                protected_root,
-                                nonce,
-                            ),
-                            NativeSessionForensicErrorKind::JournalInvalid,
-                            format!("{error:#}"),
-                        )),
-                    }
-                    report.records.push(record);
-                    if retained_bytes > MAX_RESERVED_BYTES {
-                        break;
-                    }
+                    None
                 }
             }
+        } else if allow_retained_discovery {
+            None
+        } else {
+            continue;
+        };
+        let (admission, receipt, projected_outcome, outcome_within_bound) = match projection {
+            Some((admission_value, projected_outcome, outcome_within_bound)) => {
+                let json_bytes = |value: &SqliteValue| match value {
+                    SqliteValue::Text(text) => text.len(),
+                    _ => 0,
+                };
+                retained_bytes = retained_bytes
+                    .saturating_add(json_bytes(&admission_value))
+                    .saturating_add(json_bytes(&projected_outcome));
+                if retained_bytes > MAX_RESERVED_BYTES {
+                    report.source_errors.push(forensic_source_error(
+                        Some(nonce),
+                        report.database_path.clone(),
+                        NativeSessionForensicErrorKind::InventoryUnreadable,
+                        "native-session forensic inventory exceeds its aggregate byte bound",
+                    ));
+                    break;
+                }
+                let (admission, receipt) = match authenticate_forensic_admission(
+                    protected_root,
+                    nonce,
+                    &admission_value,
+                    &key,
+                ) {
+                    Ok(authenticated) => authenticated,
+                    Err(error) => {
+                        report.source_errors.push(error);
+                        continue;
+                    }
+                };
+                (admission, receipt, projected_outcome, outcome_within_bound)
+            }
+            None => {
+                let retained = read_retained_admission_record(protected_root, nonce, &key)
+                    .and_then(|record| {
+                        record.context(
+                            "native-session forensic discovery requires an original signed admission body when its projection is unavailable",
+                        )
+                    });
+                let (admission, receipt) = match retained {
+                    Ok(authenticated) => authenticated,
+                    Err(error) => {
+                        report.source_errors.push(forensic_source_error(
+                            Some(nonce),
+                            admission_record_path(protected_root, nonce),
+                            NativeSessionForensicErrorKind::AdmissionRecordInvalid,
+                            format!("{error:#}"),
+                        ));
+                        continue;
+                    }
+                };
+                retained_bytes = retained_bytes
+                    .saturating_add(bounded_json(&admission, MAX_ADMISSION_BYTES)?.len());
+                if retained_bytes > MAX_RESERVED_BYTES {
+                    report.source_errors.push(forensic_source_error(
+                        Some(nonce),
+                        admission_record_path(protected_root, nonce),
+                        NativeSessionForensicErrorKind::InventoryUnreadable,
+                        "native-session forensic admissions exceed the aggregate byte bound",
+                    ));
+                    break;
+                }
+                (admission, receipt, SqliteValue::Null, true)
+            }
+        };
+        // Authenticate before filtering: unsigned scope changes must stay
+        // visible, and valid out-of-scope admissions are not identity orphans.
+        admissions.insert(admission.session_nonce.clone(), admission.clone());
+        if report
+            .project_root
+            .as_ref()
+            .is_some_and(|project| !admission.belongs_to_control_scope(project))
+        {
+            continue;
+        }
+        append_native_session_forensic_observation(
+            protected_root,
+            &key,
+            admission,
+            receipt,
+            (projected_outcome, outcome_within_bound),
+            &mut retained_bytes,
+            &mut report,
+        )?;
+        if retained_bytes > MAX_RESERVED_BYTES {
+            break;
         }
     }
     report.records.sort_by(|left, right| {
@@ -4331,8 +4548,7 @@ fn forensic_source_error(
     }
 }
 
-/// Keep the exact query shared by export and discovery. SQL bounds each JSON
-/// value before it crosses into the product parser, even with a corrupt schema.
+#[cfg(test)]
 fn read_forensic_projection(
     connection: &Connection,
     nonce: &str,
@@ -4341,6 +4557,8 @@ fn read_forensic_projection(
         .context("native-session forensic nonce has no unique retained admission")
 }
 
+/// Keep the exact query shared by export and discovery. SQL bounds each JSON
+/// value before it crosses into the product parser, even with a corrupt schema.
 fn read_optional_forensic_projection(
     connection: &Connection,
     nonce: &str,
@@ -6377,6 +6595,381 @@ mod tests {
         std::fs::rename(&database, &retained).unwrap();
         symlink(&retained, &database).unwrap();
         assert!(export_native_session_forensics_at(&root, &admission.session_nonce).is_err());
+    }
+
+    #[test]
+    fn forensic_discovery_recovers_signed_admissions_when_projection_is_unavailable() {
+        for with_outcome in [false, true] {
+            for fault in 0..4 {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("evidence");
+                let admission = fixture(&root, 175);
+                let mut guard =
+                    NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+                let outcome = terminal_outcome();
+                if with_outcome {
+                    abandon_after_receipt(&root, guard, &outcome);
+                } else {
+                    guard.finished = true;
+                    drop(guard);
+                }
+                match fault {
+                    0 | 2 => {
+                        retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+                        if fault == 2 {
+                            create_new_runtime_evidence_private_file(
+                                &root.join(INVENTORY_FILE),
+                                &[b'x'; 4096],
+                            )
+                            .unwrap();
+                        }
+                    }
+                    1 | 3 => {
+                        let connection = open_inventory(&root, false).unwrap().unwrap();
+                        let mut tx = connection.transaction().unwrap();
+                        tx.execute(
+                            "ALTER TABLE native_sessions RENAME TO retained_native_sessions;",
+                        )
+                        .unwrap();
+                        if fault == 1 {
+                            tx.execute(
+                                "CREATE TABLE native_sessions (
+                                    session_nonce TEXT NOT NULL,
+                                    admission_json TEXT NOT NULL,
+                                    outcome_json TEXT
+                                );",
+                            )
+                            .unwrap();
+                        }
+                        tx.commit().unwrap();
+                        drop(tx);
+                        drop(connection);
+                        protect_sidecars(&root).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let before = forensic_state_snapshot(&root);
+                let report =
+                    read_native_session_forensics_at(&root, Some(&admission.project_root))
+                        .unwrap_or_else(|error| {
+                            panic!("fault {fault}, signed outcome {with_outcome}: {error:#}")
+                        });
+                assert_eq!(report.store_present, fault != 0);
+                assert!(report.source_errors.iter().any(|error| {
+                    error.kind == NativeSessionForensicErrorKind::InventoryUnreadable
+                        && error.path == root.join(INVENTORY_FILE)
+                }));
+                assert!(report.untracked_identity_captures.is_empty());
+                let [record] = report.records.as_slice() else {
+                    panic!("expected retained admission for fault {fault}: {report:?}");
+                };
+                assert_eq!(record.admission, admission);
+                assert_eq!(record.outcome.as_ref(), with_outcome.then_some(&outcome));
+                assert_eq!(record.outcome_recovered_from_receipt, with_outcome);
+                assert_eq!(
+                    record.status,
+                    if with_outcome {
+                        NativeSessionForensicStatus::TerminalObservation
+                    } else {
+                        NativeSessionForensicStatus::PendingLivenessUnknown
+                    }
+                );
+                assert_eq!(
+                    report.coverage,
+                    "retained_observations_only_not_historical_completeness"
+                );
+                assert!(!report.replay_certified);
+                assert!(!report.quiescence_certified);
+                assert_eq!(forensic_state_snapshot(&root), before);
+            }
+        }
+    }
+
+    #[test]
+    fn forensic_discovery_unions_partial_projection_without_duplicates_or_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let projected = fixture(&root, 176);
+        let retained = fixture(&root, 177);
+        for admission in [&projected, &retained] {
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+        }
+        let complete = read_native_session_forensics_at(&root, None).unwrap();
+        assert_eq!(complete.records.len(), 2);
+        assert!(complete.source_errors.is_empty());
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute("ALTER TABLE native_sessions RENAME TO retained_native_sessions;")
+            .unwrap();
+        tx.execute(
+            "CREATE TABLE native_sessions (
+                session_nonce TEXT PRIMARY KEY NOT NULL,
+                admission_json TEXT NOT NULL,
+                outcome_json TEXT
+            );",
+        )
+        .unwrap();
+        tx.execute_with_params(
+            "INSERT INTO native_sessions
+             SELECT * FROM retained_native_sessions WHERE session_nonce = ?1;",
+            &[SqliteValue::Text(projected.session_nonce.clone().into())],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(tx);
+        drop(connection);
+        protect_sidecars(&root).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let report = read_native_session_forensics_at(&root, None).unwrap();
+        let nonces: BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.admission.session_nonce.as_str())
+            .collect();
+        assert_eq!(report.records.len(), 2);
+        assert_eq!(
+            nonces,
+            BTreeSet::from([
+                projected.session_nonce.as_str(),
+                retained.session_nonce.as_str(),
+            ])
+        );
+        assert!(report.untracked_identity_captures.is_empty());
+        assert!(report.source_errors.iter().any(|error| {
+            error.kind == NativeSessionForensicErrorKind::InventoryUnreadable
+                && error.session_nonce.as_deref() == Some(retained.session_nonce.as_str())
+        }));
+        assert_eq!(forensic_state_snapshot(&root), before);
+        let connection = open_forensic_inventory(&root).unwrap();
+        assert!(
+            read_optional_forensic_projection(&connection, &retained.session_nonce)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn forensic_discovery_recovery_authenticates_scope_and_original_root() {
+        for mutation in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let operator = temp.path().join("operator");
+            let unrelated = temp.path().join("unrelated");
+            let admission = operator_fixture(&root, 178, &operator, 0);
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+            retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+            let selected = read_native_session_forensics_at(&root, Some(&operator)).unwrap();
+            assert_eq!(selected.records.len(), 1);
+            let excluded = read_native_session_forensics_at(&root, Some(&unrelated)).unwrap();
+            assert!(excluded.records.is_empty());
+            assert!(excluded.untracked_identity_captures.is_empty());
+            match mutation {
+                0 => {
+                    let mut forged = admission.clone();
+                    forged.project_root = unrelated.clone();
+                    forged.entrypoint = unrelated.join("forged.js");
+                    forged.control_scopes = Some(Vec::new());
+                    std::fs::write(
+                        admission_record_path(&root, &admission.session_nonce),
+                        serde_json::to_vec(&forged).unwrap(),
+                    )
+                    .unwrap();
+                }
+                1 => {
+                    let path = admission_receipt_path(&root, &admission.session_nonce);
+                    let mut receipt: NativeSessionAdmissionReceipt =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    receipt.signature_hex = "00".repeat(64);
+                    std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                }
+                2 => std::fs::rename(
+                    admission_receipt_path(&root, &admission.session_nonce),
+                    temp.path().join("retired-admission-receipt.json"),
+                )
+                .unwrap(),
+                3 => std::fs::write(
+                    root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+                    [99; 32],
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            let report = read_native_session_forensics_at(&root, Some(&operator)).unwrap();
+            assert!(report.records.is_empty(), "mutation {mutation}");
+            assert!(report.source_errors.iter().any(|error| {
+                error.kind == NativeSessionForensicErrorKind::AdmissionRecordInvalid
+                    && error.session_nonce.as_deref() == Some(admission.session_nonce.as_str())
+            }));
+            assert!(!report.replay_certified);
+            assert!(!report.quiescence_certified);
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
+    }
+
+    #[test]
+    fn forensic_discovery_recovery_preserves_bad_sources_and_unverified_outcomes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let damaged = fixture(&root, 179);
+        let valid = fixture(&root, 180);
+        for admission in [&damaged, &valid] {
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+        }
+        retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+        let damaged_path = admission_record_path(&root, &damaged.session_nonce);
+        std::fs::write(&damaged_path, b"{invalid").unwrap();
+        let outcome_path = outcome_receipt_path(&root, &valid.session_nonce);
+        let mut outcome: NativeSessionOutcomeReceipt =
+            serde_json::from_slice(&std::fs::read(&outcome_path).unwrap()).unwrap();
+        outcome.signature_hex = "00".repeat(64);
+        std::fs::write(&outcome_path, serde_json::to_vec(&outcome).unwrap()).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let report = read_native_session_forensics_at(&root, None).unwrap();
+        let [record] = report.records.as_slice() else {
+            panic!("valid admission must remain visible despite its bad outcome: {report:?}");
+        };
+        assert_eq!(record.admission, valid);
+        assert_eq!(record.status, NativeSessionForensicStatus::OutcomeUnverified);
+        assert!(record.outcome.is_none());
+        assert!(!record.outcome_recovered_from_receipt);
+        assert!(report.source_errors.iter().any(|error| {
+            error.kind == NativeSessionForensicErrorKind::AdmissionRecordInvalid
+                && error.path == damaged_path
+        }));
+        assert!(report.source_errors.iter().any(|error| {
+            error.kind == NativeSessionForensicErrorKind::OutcomeReceiptInvalid
+                && error.session_nonce.as_deref() == Some(valid.session_nonce.as_str())
+        }));
+        assert_eq!(report.untracked_identity_captures.len(), 1);
+        assert_eq!(
+            report.untracked_identity_captures[0].session_nonce,
+            damaged.session_nonce
+        );
+        assert_eq!(forensic_state_snapshot(&root), before);
+    }
+
+    #[test]
+    fn forensic_discovery_retained_selector_scan_enforces_binding_and_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 181);
+        let mut guard =
+            NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.finished = true;
+        drop(guard);
+        let path = admission_record_path(&root, &admission.session_nonce);
+        let bytes = std::fs::read(&path).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let mut report = read_native_session_forensics_at(&root, None).unwrap();
+        assert_eq!(
+            read_retained_forensic_selectors(&root, 1, bytes.len(), &mut report).unwrap(),
+            BTreeSet::from([admission.session_nonce.clone()])
+        );
+        assert!(
+            read_retained_forensic_selectors(&root, 0, bytes.len(), &mut report).is_err()
+        );
+        assert!(
+            read_retained_forensic_selectors(&root, 1, bytes.len() - 1, &mut report).is_err()
+        );
+        assert_eq!(forensic_state_snapshot(&root), before);
+        let misbound = root.join(ADMISSION_RECORD_DIRECTORY).join("misbound.json");
+        create_new_runtime_evidence_private_file(&misbound, &bytes).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let report = read_native_session_forensics_at(&root, None).unwrap();
+        assert_eq!(report.records.len(), 1);
+        assert!(report.source_errors.iter().any(|error| {
+            error.kind == NativeSessionForensicErrorKind::AdmissionRecordInvalid
+                && error.path == misbound
+        }));
+        assert_eq!(forensic_state_snapshot(&root), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forensic_discovery_recovery_refuses_unsafe_inventory_and_orphaned_sidecars() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        for mutation in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 182);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            let retired = temp.path().join("retired-inventory");
+            retire_forensic_inventory(&root, &retired);
+            let database = root.join(INVENTORY_FILE);
+            match mutation {
+                0 => {
+                    create_new_runtime_evidence_private_file(&database, &[b'x'; 4096]).unwrap();
+                    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                1 => symlink(retired.join(INVENTORY_FILE), &database).unwrap(),
+                2 => symlink(
+                    retired.join(INVENTORY_FILE),
+                    root.join(format!("{INVENTORY_FILE}-wal")),
+                )
+                .unwrap(),
+                3 => std::fs::hard_link(retired.join(INVENTORY_FILE), &database).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            let report = read_native_session_forensics_at(&root, None).unwrap();
+            assert!(report.records.is_empty(), "mutation {mutation}");
+            assert!(report.source_errors.iter().any(|error| {
+                error.kind == NativeSessionForensicErrorKind::InventoryUnreadable
+            }));
+            assert_eq!(report.untracked_identity_captures.len(), 1);
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forensic_discovery_recovers_journal_and_sources_without_inventing_terminal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let (admission, _) = frozen_source_fixture(&root, 183);
+        let mut guard =
+            NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let mut journal = guard.prepare_effect_journal().unwrap();
+        let request_hash = format!("sha256:{}", "ef".repeat(32));
+        journal.admit(0, "fs_write", &request_hash).unwrap();
+        journal.complete(0).unwrap();
+        journal.admit(1, "network_request", &request_hash).unwrap();
+        drop(journal);
+        guard.finished = true;
+        drop(guard);
+        retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+        std::fs::rename(&admission.project_root, temp.path().join("retired-project")).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let report =
+            read_native_session_forensics_at(&root, Some(&admission.project_root)).unwrap();
+        let [record] = report.records.as_slice() else {
+            panic!("expected retained admission and journal: {report:?}");
+        };
+        assert_eq!(record.admission, admission);
+        assert_eq!(record.status, NativeSessionForensicStatus::PendingLivenessUnknown);
+        assert!(record.outcome.is_none());
+        let journal = record.durable_journal.as_ref().unwrap();
+        assert_eq!(journal.admitted_provider_calls, 2);
+        assert_eq!(journal.returned_provider_calls, 1);
+        assert_eq!(journal.indeterminate_provider_calls, 1);
+        assert!(!journal.replay_certified);
+        assert!(!journal.quiescence_certified);
+        assert!(!journal.historical_completeness);
+        assert!(!report.replay_certified);
+        assert!(!report.quiescence_certified);
+        assert!(report.untracked_identity_captures.is_empty());
+        assert_eq!(forensic_state_snapshot(&root), before);
+        assert!(!root.join(INVENTORY_FILE).exists());
+        assert!(!admission.project_root.exists());
     }
 
     #[test]
