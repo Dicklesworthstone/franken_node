@@ -67,6 +67,9 @@ const MAX_ZONE_ID_LEN: usize = 128;
 const MAX_ACTION_ID_LEN: usize = 128;
 pub(super) const MAX_ACTION_RECORD_BYTES: usize = 2_048;
 const MAX_ACTION_RECORD_LINE_BYTES: usize = MAX_ACTION_RECORD_BYTES * 2;
+// A heartbeat contains one bounded population summary and at most one
+// supervisor attestation. Bound the encoded file before parsing any strings.
+const MAX_NODE_STATUS_RECORD_BYTES: usize = 16 * 1024;
 pub const ERR_FLEET_JSONL_LINE_TOO_LARGE: &str = ERR_BOUNDED_INPUT_CAP_EXCEEDED;
 pub const FLEET_ACTION_RECORD_LINE_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
     "control_plane.fleet_transport",
@@ -3760,14 +3763,10 @@ impl FileFleetTransport {
             return Ok(original_path);
         }
 
-        let mut hash = Sha256::new();
-        hash.update(status.zone_id.as_bytes());
-        hash.update([0]);
-        hash.update(status.node_id.as_bytes());
         let qualified_path = self
             .layout
             .nodes_dir()
-            .join(format!("scoped-{}.json", hex::encode(hash.finalize())));
+            .join(scoped_node_status_file_name(status));
         if let Some(entry) = read_existing_node_status(&qualified_path)? {
             if !same_node(&entry) {
                 return Err(FleetTransportError::serialization(
@@ -3802,6 +3801,12 @@ impl FileFleetTransport {
                     path.display()
                 ))
             })?;
+            if payload.len() > MAX_NODE_STATUS_RECORD_BYTES {
+                return Err(FleetTransportError::serialization(format!(
+                    "serialized fleet node status {} exceeds {MAX_NODE_STATUS_RECORD_BYTES} bytes",
+                    path.display()
+                )));
+            }
             let mut temp_file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -3858,6 +3863,9 @@ impl FileFleetTransport {
                 ))
             })?;
             let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             let file_type = entry.file_type().map_err(|err| {
                 FleetTransportError::io(format!(
                     "failed reading fleet nodes directory entry type {}: {err}",
@@ -3865,10 +3873,10 @@ impl FileFleetTransport {
                 ))
             })?;
             if file_type.is_symlink() || !file_type.is_file() {
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
+                return Err(FleetTransportError::serialization(format!(
+                    "fleet node status {} is not a regular file; refusing to omit a retained participant",
+                    path.display()
+                )));
             }
 
             ensure_fleet_node_capacity(paths.len())?;
@@ -3878,11 +3886,29 @@ impl FileFleetTransport {
     }
 
     fn list_node_statuses_unlocked(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
+        let mut identities = BTreeSet::new();
         self.node_status_paths()?
             .iter()
-            .map(|path| read_node_status(path))
+            .map(|path| {
+                let status = read_node_status(path)?;
+                if !identities.insert((status.zone_id.clone(), status.node_id.clone())) {
+                    return Err(FleetTransportError::serialization(format!(
+                        "fleet node snapshot repeats identity `{}/{}`",
+                        status.zone_id, status.node_id
+                    )));
+                }
+                Ok(status)
+            })
             .collect()
     }
+}
+
+fn scoped_node_status_file_name(status: &NodeStatus) -> String {
+    let mut hash = Sha256::new();
+    hash.update(status.zone_id.as_bytes());
+    hash.update([0]);
+    hash.update(status.node_id.as_bytes());
+    format!("scoped-{}.json", hex::encode(hash.finalize()))
 }
 
 fn ensure_fleet_node_capacity(count: usize) -> Result<(), FleetTransportError> {
@@ -3895,19 +3921,129 @@ fn ensure_fleet_node_capacity(count: usize) -> Result<(), FleetTransportError> {
 }
 
 fn read_node_status(path: &Path) -> Result<NodeStatus, FleetTransportError> {
-    let file = File::open(path).map_err(|err| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // An entry can change after directory enumeration. Refuse links and
+        // avoid blocking on a substituted FIFO before inspecting the open file.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000);
+    }
+    let mut file = options.open(path).map_err(|err| {
         FleetTransportError::io(format!(
             "failed opening node status {}: {err}",
             path.display()
         ))
     })?;
-    let status = serde_json::from_reader(file).map_err(|err| {
+    let metadata = file.metadata().map_err(|err| {
+        FleetTransportError::io(format!(
+            "failed inspecting node status {}: {err}",
+            path.display()
+        ))
+    })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & 0x0000_0400 != 0 {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet node status {} must not be a reparse point",
+                path.display()
+            )));
+        }
+    }
+    if !metadata.is_file() || metadata.len() > MAX_NODE_STATUS_RECORD_BYTES as u64 {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet node status {} must be a regular file of at most {MAX_NODE_STATUS_RECORD_BYTES} bytes",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet node status {} must not have hardlink aliases",
+                path.display()
+            )));
+        }
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_NODE_STATUS_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            FleetTransportError::io(format!(
+                "failed reading node status {}: {err}",
+                path.display()
+            ))
+        })?;
+    let after = file.metadata().map_err(|err| {
+        FleetTransportError::io(format!(
+            "failed reinspecting node status {}: {err}",
+            path.display()
+        ))
+    })?;
+    if bytes.len() > MAX_NODE_STATUS_RECORD_BYTES
+        || bytes.len() as u64 != metadata.len()
+        || metadata.len() != after.len()
+    {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet node status {} exceeded its byte bound or changed during its bounded read",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mtime() != after.mtime()
+            || metadata.mtime_nsec() != after.mtime_nsec()
+            || metadata.ctime() != after.ctime()
+            || metadata.ctime_nsec() != after.ctime_nsec()
+            || after.nlink() != 1
+        {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet node status {} changed during its bounded read",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.last_write_time() != after.last_write_time() {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet node status {} changed during its bounded read",
+                path.display()
+            )));
+        }
+    }
+    let status: NodeStatus = serde_json::from_slice(&bytes).map_err(|err| {
         FleetTransportError::serialization(format!(
             "failed parsing node status {}: {err}",
             path.display()
         ))
     })?;
     validate_node_status(&status)?;
+    let original_name = format!("node-{}.json", status.node_id);
+    let scoped_name = scoped_node_status_file_name(&status);
+    let matches_identity = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == original_name || name == scoped_name);
+    if !matches_identity {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet node status {} does not match its node/zone filename identity",
+            path.display()
+        )));
+    }
     Ok(status)
 }
 
@@ -6693,6 +6829,229 @@ mod tests {
             error,
             FleetTransportError::SerializationError { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_transport_linked_pending_node_cannot_disappear_from_maintenance_population() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let root = SigningKey::from_bytes(&[37; 32]);
+        let (action, ready) = signed_supervisor_fixture(&root, now);
+        transport.publish_action(&action).unwrap();
+        transport.upsert_node_status(&ready).unwrap();
+
+        let mut pending = ready.clone();
+        pending.node_id = "node-b".into();
+        pending.health = NodeHealth::Quarantined;
+        pending.applied_actions = None;
+        let drain = pending.native_session_drain.as_mut().unwrap();
+        drain.terminal_sessions = 1;
+        drain.pending_sessions = 1;
+        drain.supervisor_attestation = None;
+        transport.upsert_node_status(&pending).unwrap();
+        let pending_path = transport.layout().node_status_path("node-b").unwrap();
+        let observe = || {
+            let state = transport.read_shared_state()?;
+            super::fleet_native_session_hold_evidence(
+                &state,
+                &action.action_id,
+                super::FleetNativeSessionHoldTarget::Held,
+                &std::collections::BTreeSet::new(),
+                now,
+                Duration::from_secs(30),
+            )
+        };
+        let before = observe().unwrap();
+        assert_eq!(before.nodes.len(), 2);
+        assert!(!before.complete);
+        assert!(before.nodes.iter().any(|node| {
+            node.node_id == "node-b"
+                && node.reason == super::FleetNativeDrainReadiness::PendingSessions
+        }));
+
+        let retained = directory.path().join("retained-node-b.json");
+        fs::rename(&pending_path, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &pending_path).unwrap();
+        let error = observe().expect_err("an unreadable participant cannot shrink the population");
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to omit a retained participant")
+        );
+        assert!(super::read_node_status(&pending_path).is_err());
+        assert_eq!(
+            serde_json::from_slice::<NodeStatus>(&fs::read(retained).unwrap()).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn file_transport_distinguishes_empty_inventory_from_nonregular_json_records() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        fs::write(
+            transport.layout().nodes_dir().join("notes.txt"),
+            "not a heartbeat",
+        )
+        .unwrap();
+        fs::create_dir(transport.layout().nodes_dir().join("node-unused.json.tmp")).unwrap();
+        assert!(transport.read_shared_state().unwrap().nodes.is_empty());
+
+        let invalid = transport
+            .layout()
+            .node_status_path("missing-worker")
+            .unwrap();
+        fs::create_dir(&invalid).unwrap();
+        assert!(transport.list_node_statuses().is_err());
+        assert!(transport.read_shared_state().is_err());
+        assert!(super::read_node_status(&invalid).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_transport_fifo_status_is_rejected_without_waiting_for_a_writer_or_eof() {
+        use rustix::fs::{CWD, Mode, OFlags, mkfifoat, openat};
+
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let fifo = transport.layout().node_status_path("fifo-worker").unwrap();
+        mkfifoat(CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+        assert!(transport.list_node_statuses().is_err());
+        assert!(transport.read_shared_state().is_err());
+
+        // Keep the FIFO open so a regressed blocking reader cannot receive EOF.
+        // Release it before joining even on timeout, leaving no blocked test thread.
+        let keeper = openat(
+            CWD,
+            &fifo,
+            OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            sender.send(super::read_node_status(&fifo)).unwrap();
+        });
+        let observed = receiver.recv_timeout(Duration::from_secs(5));
+        drop(keeper);
+        reader.join().unwrap();
+        assert!(
+            observed
+                .expect("a substituted FIFO must be rejected without waiting for EOF")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn file_transport_bounds_node_status_before_parsing_and_accepts_the_exact_limit() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let root = SigningKey::from_bytes(&[37; 32]);
+        let (action, status) = signed_supervisor_fixture(&root, now);
+        transport.publish_action(&action).unwrap();
+        transport.upsert_node_status(&status).unwrap();
+        let path = transport
+            .layout()
+            .node_status_path(&status.node_id)
+            .unwrap();
+        let mut bytes = serde_json::to_vec(&status).unwrap();
+        assert!(bytes.len() < super::MAX_NODE_STATUS_RECORD_BYTES);
+        bytes.resize(super::MAX_NODE_STATUS_RECORD_BYTES, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let state = transport.read_shared_state().unwrap();
+        assert_eq!(state.nodes, [status.clone()]);
+        assert!(
+            super::fleet_native_session_hold_evidence(
+                &state,
+                &action.action_id,
+                super::FleetNativeSessionHoldTarget::Held,
+                &std::collections::BTreeSet::new(),
+                now,
+                Duration::from_secs(30),
+            )
+            .unwrap()
+            .complete
+        );
+
+        // The extra byte is still valid trailing JSON whitespace: failure must
+        // come from the input bound, not a deliberately invalid JSON fixture.
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        let error = transport
+            .read_shared_state()
+            .expect_err("oversized heartbeat");
+        assert!(error.to_string().contains("at most"));
+        assert!(transport.upsert_node_status(&status).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn file_transport_rejects_filename_rebinding_and_duplicate_node_identities() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let status = node_status(
+            "prod",
+            "node-a",
+            "2026-04-06T00:00:00Z",
+            1,
+            NodeHealth::Healthy,
+        );
+        transport.upsert_node_status(&status).unwrap();
+        let original = transport.layout().node_status_path("node-a").unwrap();
+        let wrong = transport.layout().node_status_path("node-b").unwrap();
+        fs::rename(&original, &wrong).unwrap();
+        let error = transport
+            .read_shared_state()
+            .expect_err("wrong filename identity");
+        assert!(error.to_string().contains("filename identity"));
+
+        let mut different = status.clone();
+        different.node_id = "node-b".into();
+        assert!(transport.upsert_node_status(&different).is_err());
+        assert_eq!(
+            serde_json::from_slice::<NodeStatus>(&fs::read(&wrong).unwrap()).unwrap(),
+            status
+        );
+        fs::rename(&wrong, &original).unwrap();
+        let duplicate = transport
+            .layout()
+            .nodes_dir()
+            .join(super::scoped_node_status_file_name(&status));
+        fs::write(duplicate, serde_json::to_vec(&status).unwrap()).unwrap();
+        let error = transport
+            .read_shared_state()
+            .expect_err("duplicate identity");
+        assert!(error.to_string().contains("repeats identity"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_transport_rejects_hardlinked_node_status() {
+        let directory = tempdir().unwrap();
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().unwrap();
+        let status = node_status(
+            "prod",
+            "node-a",
+            "2026-04-06T00:00:00Z",
+            1,
+            NodeHealth::Healthy,
+        );
+        transport.upsert_node_status(&status).unwrap();
+        let original = transport.layout().node_status_path("node-a").unwrap();
+        fs::hard_link(&original, directory.path().join("outside-alias")).unwrap();
+        let error = transport
+            .read_shared_state()
+            .expect_err("hardlinked heartbeat");
+        assert!(error.to_string().contains("hardlink aliases"));
     }
 
     #[test]
