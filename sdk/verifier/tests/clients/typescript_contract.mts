@@ -226,6 +226,27 @@ export async function auditExpectedPublisherRelease(
   return verified.facts.manifest_sha256;
 }
 
+/** Independently verify the committed graph witness without a semantic replay claim. */
+export async function auditPublisherGraphCommitment(
+  data: Uint8Array, anchor: string, signature: string, executable: string, reportPath: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, anchor, {
+    verifier: executable, format: "publisher-source", signatureHex: signature, graphReport: reportPath,
+  });
+  if (verified.format !== "publisher-source") throw new Error("publisher source required");
+  const graph = verified.facts.graph_report;
+  if (graph === undefined) throw new Error("requested graph commitment is missing");
+  const recomputed: true = graph.graph_hash_recomputed;
+  const semantics: false = graph.graph_semantics_reconstructed;
+  const capsuleOnly: false = verified.facts.capsule.graph_hash_recomputed;
+  const count: number = graph.module_count;
+  const producerClaim: boolean = graph.declared_fully_resolved;
+  if (!recomputed || semantics || capsuleOnly || count < 1 || typeof producerClaim !== "boolean") {
+    throw new Error("invalid graph commitment scope");
+  }
+  return graph.graph_input_hash;
+}
+
 export async function auditResolution(data: Uint8Array, anchor: string, executable: string): Promise<string | null> {
   const verified = await verifyArtifact(data, anchor, { verifier: executable, format: "resolution-receipt" });
   if (verified.format !== "resolution-receipt") throw new Error("resolution decision required");

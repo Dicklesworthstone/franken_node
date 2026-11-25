@@ -403,6 +403,55 @@ if mode.startswith(("fleet_", "epoch_")):
             "statement_sha256": "a" * 64,
         })
 exit_code = 0
+graph_prefix = next((prefix for prefix in ("publisher_graph_witness_", "publisher_trust_graph_witness_")
+                     if mode.startswith(prefix)), None)
+if graph_prefix is not None:
+    source = response["facts"]["source"] if mode.startswith("publisher_trust_") else response["facts"]
+    action = mode[len(graph_prefix):]
+    if action != "ignored":
+        source["graph_report"] = {
+            "schema_version": "franken-verifier/source-graph-commitment/v1",
+            "graph_input_hash": source["capsule"]["graph_input_hash"],
+            "graph_hash_recomputed": True, "graph_semantics_reconstructed": False,
+            "capsule_digest": source["capsule_digest"], "report_sha256": "e" * 64,
+            "observation_count": source["capsule"]["input_count"],
+            # Multiple query/fragment identities can share one captured file.
+            "module_count": 2, "resolution_target_count": 0, "edge_count": 1,
+            "diagnostic_count": 0, "declared_fully_resolved": True,
+        }
+        changes = {
+            "wrong_schema": ("schema_version", "untrusted/v2"),
+            "not_recomputed": ("graph_hash_recomputed", False),
+            "semantic_claim": ("graph_semantics_reconstructed", True),
+            "wrong_graph": ("graph_input_hash", "sha256:" + "f" * 64),
+            "wrong_capsule": ("capsule_digest", "sha256:" + "f" * 64),
+            "prefixed_report_hash": ("report_sha256", "sha256:" + "e" * 64),
+            "uppercase_report_hash": ("report_sha256", "E" * 64),
+            "newline_report_hash": ("report_sha256", "e" * 64 + "\n"),
+            "observation_mismatch": ("observation_count", 2),
+            "boolean_count": ("edge_count", True),
+            "unsafe_count": ("edge_count", 2**53),
+            "zero_modules": ("module_count", 0),
+            "too_many_targets": ("resolution_target_count", 257),
+            "negative_count": ("diagnostic_count", -1),
+            "nonboolean_resolution": ("declared_fully_resolved", "true"),
+            "inconsistent_resolution": ("diagnostic_count", 1),
+        }
+        if action in changes:
+            field, value = changes[action]
+            source["graph_report"][field] = value
+        elif action == "unknown_field":
+            source["graph_report"]["execution_verified"] = True
+        elif action == "missing_field":
+            del source["graph_report"]["report_sha256"]
+        elif action == "null":
+            source["graph_report"] = None
+    if action == "forwarded":
+        if (sys.argv.count("--graph-report") != 1
+                or sys.argv[sys.argv.index("--graph-report") + 1] != "private graph; $(ignored).json"):
+            response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
+                        "error": {"code": "GRAPH_ARGUMENT_MISSING", "message": "graph report path was not forwarded"}}
+            exit_code = 2
 if mode in ("publisher_identity_forwarded", "publisher_trust_identity_forwarded"):
     for option, expected in (
         ("--expected-manifest-sha256", "sha256:" + "a" * 64),

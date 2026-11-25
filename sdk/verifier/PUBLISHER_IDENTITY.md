@@ -99,6 +99,7 @@ const verified = await verifyArtifact(packetBytes, trustedPublisherKey, {
   expectedManifestSha256: approvedManifestSha256,
   expectedSourceArtifactSha256: approvedSourceArtifactSha256,
   expectedGraphInputHash: approvedGraphInputHash,
+  graphReport: capturedGraphReportPath, // Optional SourceGraphReport JSON file.
 });
 ```
 
@@ -112,6 +113,7 @@ verified = verify_artifact(
     expected_manifest_sha256=approved_manifest_sha256,
     expected_source_artifact_sha256=approved_source_artifact_sha256,
     expected_graph_input_hash=approved_graph_input_hash,
+    graph_report=captured_graph_report_path,  # Optional str or pathlib.Path.
 )
 ```
 
@@ -120,6 +122,17 @@ arguments, and independently compare the authenticated response facts against
 the requested identity. An otherwise valid child success that ignores the pins
 is refused. These checks also apply to `publisher-source-trust`, whose source
 facts are nested under `facts.source`.
+
+`graphReport` / `graph_report` is accepted only for the two publisher-source
+formats. Paths are forwarded as separate arguments, including paths containing
+spaces. The Rust executable checks the bounded regular file and independently
+verifies its commitment. The bindings require a coherent `graph_report` result
+when this option is supplied: its graph hash and capsule digest must match the
+authenticated source, its observation count must match the capsule inventory,
+hash recomputation must be true, and semantic reconstruction must remain false.
+A child that ignores the option or returns a missing, malformed, mismatched, or
+stronger-scope summary is refused with `PROTOCOL_INVALID`. The existing
+release pins and publisher trust options continue to apply.
 
 ## Verify the graph report commitment
 

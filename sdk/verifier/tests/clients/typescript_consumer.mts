@@ -12,7 +12,7 @@ type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclud
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
-  expected_session_nonce?: string; expected_admission_sha256?: string;
+  expected_session_nonce?: string; expected_admission_sha256?: string; graph_report_path?: string;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
   ltv_facts?: LtvEvidenceFacts;
@@ -69,6 +69,45 @@ for (const name of ["resolution_signed_admission", "resolution_signed_rejection"
       ? verified.facts.decision !== "admit" || verified.facts.selected_version !== "1.2.3"
       : verified.facts.decision !== "reject" || verified.facts.selected_version !== null) throw new Error("TypeScript resolution decision mismatch");
 }
+let graphPositive = 0;
+let graphNegative = 0;
+for (const source of cases.filter((item) => item.graph_report_path !== undefined)) {
+  if (source.format !== "publisher-source" && source.format !== "publisher-source-trust") {
+    throw new Error("graph witness matrix has an unsupported format");
+  }
+  try {
+    const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor, {
+      verifier: resolve("verifier"), format: source.format, signatureHex: source.signature_hex,
+      trustedRevocationPublicKeyHex: source.revocation_anchor,
+      trustedProvenancePublicKeyHex: source.provenance_anchor ?? undefined,
+      evaluationTime: source.evaluation_time, maxRevocationAgeSecs: source.max_revocation_age_secs,
+      expectedManifestSha256: source.expected_manifest_sha256,
+      expectedSourceArtifactSha256: source.expected_source_artifact_sha256,
+      expectedGraphInputHash: source.expected_graph_input_hash,
+      graphReport: source.graph_report_path,
+    });
+    if (source.expected !== "verified"
+        || (verified.format !== "publisher-source" && verified.format !== "publisher-source-trust")) {
+      throw new Error("TypeScript graph witness scope mismatch: " + source.name);
+    }
+    const facts = verified.format === "publisher-source-trust" ? verified.facts.source : verified.facts;
+    const graph = facts.graph_report;
+    if (graph === undefined) throw new Error("requested graph commitment is missing");
+    const recomputed: true = graph.graph_hash_recomputed;
+    const semantics: false = graph.graph_semantics_reconstructed;
+    assert.equal(recomputed, true);
+    assert.equal(semantics, false);
+    assert.equal(graph.graph_input_hash, facts.capsule.graph_input_hash);
+    assert.equal(graph.capsule_digest, facts.capsule_digest);
+    assert.equal(graph.observation_count, facts.capsule.input_count);
+    assert.equal(facts.capsule.graph_hash_recomputed, false);
+    graphPositive += 1;
+  } catch (error: unknown) {
+    if (source.expected === "verified" || !(error instanceof VerifierError) || error.code !== source.expected) throw error;
+    graphNegative += 1;
+  }
+}
+assert(graphPositive === 3 && graphNegative === 10, "graph witness acceptance/refusal matrix must execute");
 for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixture_2"]) {
   const source = cases.find((item) => item.name === name)!;
   const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor,
@@ -213,6 +252,7 @@ for (const source of cases.filter((item) => item.format === "publisher-source" &
       expectedManifestSha256: source.expected_manifest_sha256,
       expectedSourceArtifactSha256: source.expected_source_artifact_sha256,
       expectedGraphInputHash: source.expected_graph_input_hash,
+      graphReport: source.graph_report_path,
     });
     if (source.expected !== "verified" || verified.format !== "publisher-source") {
       throw new Error("TypeScript expected publisher release mismatch: " + source.name);
@@ -240,6 +280,7 @@ for (const source of cases.filter((item) => item.format === "publisher-source-tr
       expectedManifestSha256: source.expected_manifest_sha256,
       expectedSourceArtifactSha256: source.expected_source_artifact_sha256,
       expectedGraphInputHash: source.expected_graph_input_hash,
+      graphReport: source.graph_report_path,
     });
     if (source.expected !== "verified" || verified.format !== "publisher-source-trust"
         || verified.scope !== "authenticated_publisher_source_trust") {
@@ -401,9 +442,10 @@ for (const candidate of allCases.filter((item): item is EpochCase => item.format
   }
 }
 assert(epochPositive >= 6 && epochNegative >= 30, "independent epoch commit and authority controls must execute");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
-  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + graphPositive + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
+  negative: 2 + graphNegative + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
+  publisher_graph_cases: graphPositive + graphNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
   ltv_policy_cases: ltvPositive + ltvNegative,
   fleet_observation_cases: fleetPositive + fleetNegative,

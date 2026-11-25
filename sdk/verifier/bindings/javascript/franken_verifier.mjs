@@ -207,6 +207,25 @@ function sourceCapsuleValid(summary, capsuleLimit, payloadLimit) {
     && (summary.condition_count === null || summary.condition_count + summary.additional_condition_count <= 64);
 }
 
+function sourceGraphCommitmentValid(report, source) {
+  return keys(report, ["schema_version", "graph_input_hash", "graph_hash_recomputed",
+    "graph_semantics_reconstructed", "capsule_digest", "report_sha256", "observation_count",
+    "module_count", "resolution_target_count", "edge_count", "diagnostic_count", "declared_fully_resolved"])
+    && report.schema_version === "franken-verifier/source-graph-commitment/v1"
+    && report.graph_hash_recomputed === true && report.graph_semantics_reconstructed === false
+    && report.graph_input_hash === source.capsule.graph_input_hash
+    && report.capsule_digest === source.capsule_digest
+    && typeof report.report_sha256 === "string" && report.report_sha256.length === 64
+    && /^[0-9a-f]{64}$/u.test(report.report_sha256)
+    && count(report.observation_count) && report.observation_count === source.capsule.input_count
+    && count(report.module_count) && report.module_count >= 1 && report.module_count <= 256
+    && count(report.resolution_target_count) && report.resolution_target_count <= 256
+    && count(report.edge_count) && report.edge_count <= 4096
+    && count(report.diagnostic_count) && report.diagnostic_count <= 4096
+    && typeof report.declared_fully_resolved === "boolean"
+    && (!report.declared_fully_resolved || report.diagnostic_count === 0);
+}
+
 function publisherSourceValid(facts, anchor) {
   return publisherText(facts.package_name, 256) && publisherText(facts.publisher_id, 256)
     && publisherText(facts.version, 128) && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(facts.version)
@@ -215,7 +234,8 @@ function publisherSourceValid(facts, anchor) {
       .update(Buffer.from([32, 0, 0, 0, 0, 0, 0, 0])).update(Buffer.from(anchor, "hex")).digest("hex").slice(0, 16)
     && (facts.registration_schema === "franken-node/extension-registration-manifest/v1" && facts.runtime_authority === null
       || facts.registration_schema === "franken-node/extension-registration-manifest/v2" && publisherAuthorityValid(facts.runtime_authority))
-    && sourceCapsuleValid(facts.capsule, 5 * 1024 * 1024, 5 * 1024 * 1024 - 12);
+    && sourceCapsuleValid(facts.capsule, 5 * 1024 * 1024, 5 * 1024 * 1024 - 12)
+    && (!Object.hasOwn(facts, "graph_report") || sourceGraphCommitmentValid(facts.graph_report, facts));
 }
 
 // These are authenticated supervisor observations, never a replay or cleanup
@@ -632,6 +652,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
     "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
     "ltv-evidence": ["artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds", "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256", "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"],
   }[format];
+  if (format === "publisher-source" && object(facts) && Object.hasOwn(facts, "graph_report")) expected.push("graph_report");
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
@@ -733,7 +754,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     trustedIncidentPublicKeyHex, expectedBaselineIntegrityHash,
     trustedFleetPolicy, trustedSessionPolicyPath, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
-    expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
+    expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash, graphReport,
     expectedSessionNonce, expectedAdmissionSha256,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
@@ -797,6 +818,15 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   } else if (publisherTrustOptions.some((value) => value !== undefined)) {
     throw new VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust");
   }
+  if (graphReport !== undefined) {
+    if (!["publisher-source", "publisher-source-trust"].includes(format)) {
+      throw new VerifierError("INPUT_INVALID", "graph reports apply only to publisher-source formats");
+    }
+    if (typeof graphReport !== "string" || graphReport.length === 0 || graphReport.includes("\0")
+        || Buffer.from(graphReport, "utf8").toString("utf8") !== graphReport) {
+      throw new VerifierError("GRAPH_REPORT_INVALID", "graphReport must be a report file path");
+    }
+  }
   const expectedIdentity = [expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash];
   if (expectedIdentity.some((value) => value !== undefined)
       && (!["publisher-source", "publisher-source-trust"].includes(format)
@@ -839,6 +869,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   if (expectedManifestSha256 !== undefined) args.push("--expected-manifest-sha256", expectedManifestSha256);
   if (expectedSourceArtifactSha256 !== undefined) args.push("--expected-source-artifact-sha256", expectedSourceArtifactSha256);
   if (expectedGraphInputHash !== undefined) args.push("--expected-graph-input-hash", expectedGraphInputHash);
+  if (graphReport !== undefined) args.push("--graph-report", graphReport);
   if (expectedSessionNonce !== undefined) args.push("--expected-session-nonce", expectedSessionNonce,
     "--expected-admission-sha256", expectedAdmissionSha256);
   if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"].includes(format)) {
@@ -881,6 +912,12 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
               incidentAnchor, expectedBaselineIntegrityHash))
           || (format === "ltv-evidence" && !ltvPolicyMatches(result.facts, bytes))) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
+      }
+      if (graphReport !== undefined) {
+        const source = format === "publisher-source-trust" ? result.facts.source : result.facts;
+        if (!Object.hasOwn(source, "graph_report")) {
+          return reject(new VerifierError("PROTOCOL_INVALID", "verifier omitted the requested graph commitment"));
+        }
       }
       if (expectedManifestSha256 !== undefined) {
         const source = format === "publisher-source-trust" ? result.facts.source : result.facts;

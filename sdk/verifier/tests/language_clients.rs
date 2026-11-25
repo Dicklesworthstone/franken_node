@@ -184,6 +184,7 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 "--expected-source-artifact-sha256",
             ),
             ("expected_graph_input_hash", "--expected-graph-input-hash"),
+            ("graph_report_path", "--graph-report"),
             ("expected_session_nonce", "--expected-session-nonce"),
             ("expected_admission_sha256", "--expected-admission-sha256"),
         ] {

@@ -657,6 +657,32 @@ def _source_capsule_valid(summary: Any, capsule_limit: int, payload_limit: int) 
     )
 
 
+def _source_graph_commitment_valid(report: Any, source: dict[str, Any]) -> bool:
+    return (
+        isinstance(report, dict)
+        and set(report) == {
+            "schema_version", "graph_input_hash", "graph_hash_recomputed", "graph_semantics_reconstructed",
+            "capsule_digest", "report_sha256", "observation_count", "module_count",
+            "resolution_target_count", "edge_count", "diagnostic_count", "declared_fully_resolved",
+        }
+        and report["schema_version"] == "franken-verifier/source-graph-commitment/v1"
+        and report["graph_hash_recomputed"] is True
+        and report["graph_semantics_reconstructed"] is False
+        and report["graph_input_hash"] == source["capsule"]["graph_input_hash"]
+        and report["capsule_digest"] == source["capsule_digest"]
+        and isinstance(report["report_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", report["report_sha256"]) is not None
+        and type(report["observation_count"]) is int
+        and report["observation_count"] == source["capsule"]["input_count"]
+        and type(report["module_count"]) is int and 1 <= report["module_count"] <= 256
+        and type(report["resolution_target_count"]) is int and 0 <= report["resolution_target_count"] <= 256
+        and type(report["edge_count"]) is int and 0 <= report["edge_count"] <= 4096
+        and type(report["diagnostic_count"]) is int and 0 <= report["diagnostic_count"] <= 4096
+        and type(report["declared_fully_resolved"]) is bool
+        and (not report["declared_fully_resolved"] or report["diagnostic_count"] == 0)
+    )
+
+
 def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
     return (
         _publisher_text(facts["package_name"], 256) and _publisher_text(facts["publisher_id"], 256)
@@ -671,6 +697,7 @@ def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
              or facts["registration_schema"] == "franken-node/extension-registration-manifest/v2"
              and _publisher_authority_valid(facts["runtime_authority"]))
         and _source_capsule_valid(facts["capsule"], 5 * 1024 * 1024, 5 * 1024 * 1024 - 12)
+        and ("graph_report" not in facts or _source_graph_commitment_valid(facts["graph_report"], facts))
     )
 
 
@@ -1130,6 +1157,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                          "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256",
                          "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"},
     }[format]
+    if format == "publisher-source" and "graph_report" in facts:
+        expected.add("graph_report")
     if run_anchor is not None:
         expected.add("run_origin")
     if runtime_anchor is not None:
@@ -1245,6 +1274,7 @@ def verify_artifact(
     expected_manifest_sha256: str | None = None,
     expected_source_artifact_sha256: str | None = None,
     expected_graph_input_hash: str | None = None,
+    graph_report: str | os.PathLike[str] | None = None,
     expected_session_nonce: str | None = None,
     expected_admission_sha256: str | None = None,
     signature_hex: str | None = None,
@@ -1252,6 +1282,9 @@ def verify_artifact(
 ) -> Verification:
     """Authenticate raw artifact bytes using an explicit trusted executable/key.
 
+    ``graph_report`` supplies a SourceGraphReport JSON file for publisher-source
+    formats. Its verified hash commitment is required in the response; this does
+    not independently reconstruct parser/resolver semantics or execute sources.
     Supported formats and proof scopes are in ``_SCOPES``. Capsule verification
     re-derives signed content hashes; incident verification checks recorded
     evidence. Neither constitutes guest execution or original-policy replay.
@@ -1375,6 +1408,17 @@ def verify_artifact(
             raise VerifierError("REVOCATION_FRESHNESS_POLICY_INVALID", "freshness must be a positive decimal u64 string")
     elif any(value is not None for value in publisher_trust_options):
         raise VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust")
+    graph_report_path = None
+    if graph_report is not None:
+        if format not in ("publisher-source", "publisher-source-trust"):
+            raise VerifierError("INPUT_INVALID", "graph reports apply only to publisher-source formats")
+        try:
+            graph_report_path = os.fspath(graph_report)
+            if not isinstance(graph_report_path, str) or not graph_report_path or "\0" in graph_report_path:
+                raise ValueError("invalid path")
+            graph_report_path.encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise VerifierError("GRAPH_REPORT_INVALID", "graph_report must be a report file path") from error
     expected_identity = (expected_manifest_sha256, expected_source_artifact_sha256, expected_graph_input_hash)
     if any(value is not None for value in expected_identity) and (
         format not in ("publisher-source", "publisher-source-trust")
@@ -1434,6 +1478,8 @@ def verify_artifact(
         args.extend(["--expected-source-artifact-sha256", expected_source_artifact_sha256])
     if expected_graph_input_hash is not None:
         args.extend(["--expected-graph-input-hash", expected_graph_input_hash])
+    if graph_report_path is not None:
+        args.extend(["--graph-report", graph_report_path])
     if expected_session_nonce is not None:
         args.extend(["--expected-session-nonce", expected_session_nonce,
                      "--expected-admission-sha256", expected_admission_sha256])
@@ -1475,6 +1521,10 @@ def verify_artifact(
                                  incident_anchor, expected_baseline_integrity_hash))
             or (format == "ltv-evidence" and not _ltv_policy_matches(result["facts"], data))):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
+    if graph_report_path is not None:
+        source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
+        if "graph_report" not in source:
+            raise VerifierError("PROTOCOL_INVALID", "verifier omitted the requested graph commitment")
     if expected_manifest_sha256 is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
         if (source["manifest_sha256"] != expected_manifest_sha256

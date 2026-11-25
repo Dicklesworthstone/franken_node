@@ -611,6 +611,71 @@ function addSourceTrust(name, expected = "verified", options = {}) {
     ...metadata, ...(facts === null ? {} : { publisher_trust_facts: facts }),
   });
 }
+// Retained real producer report, independently authenticated through its source
+// capsule. The filename deliberately contains shell syntax; clients must pass
+// it as one argument, never interpolate it into a command.
+const graphReportBytes = readFileSync(join(dirname(sourceCapsulesPath), "module_source_graph_workspace_report.json"));
+const graphReport = JSON.parse(graphReportBytes);
+const graphReportPath = "graph report; literal $(value).json";
+writeFileSync(join(dirname(output), graphReportPath), graphReportBytes);
+const changedGraphReport = clone(graphReport);
+changedGraphReport.edges[0].specifier = "PRIVATE-tampered-request";
+const changedGraphReportPath = "tampered graph report.json";
+writeFileSync(join(dirname(output), changedGraphReportPath), JSON.stringify(changedGraphReport));
+const graphSourceBytes = Buffer.from(sourceFixtures.vectors[2].module_sources.capsule_base64, "base64");
+const graphRegistration = sourceManifest(graphSourceBytes, 2);
+const graphRegistrationBytes = Buffer.from(ordered(graphRegistration));
+const graphSourceFacts = sourceFacts(graphRegistration, graphRegistrationBytes, graphSourceBytes);
+assert.equal(graphReport.input_hash, graphSourceFacts.capsule.graph_input_hash);
+const graphCommitment = {
+  schema_version: "franken-verifier/source-graph-commitment/v1",
+  graph_input_hash: graphReport.input_hash, graph_hash_recomputed: true, graph_semantics_reconstructed: false,
+  capsule_digest: graphSourceFacts.capsule_digest, report_sha256: hash(graphReportBytes),
+  observation_count: graphReport.probes.length, module_count: graphReport.modules.length,
+  resolution_target_count: graphReport.resolution_targets?.length ?? 0,
+  edge_count: graphReport.edges.length, diagnostic_count: graphReport.diagnostics.length,
+  declared_fully_resolved: graphReport.fully_resolved,
+};
+const graphIdentity = {
+  expected_manifest_sha256: graphSourceFacts.manifest_sha256,
+  expected_source_artifact_sha256: graphSourceFacts.artifact_sha256,
+  expected_graph_input_hash: graphSourceFacts.capsule.graph_input_hash,
+};
+for (const version of [1, 2]) {
+  const manifest = sourceManifest(graphSourceBytes, version);
+  const facts = sourceFacts(manifest, Buffer.from(ordered(manifest)), graphSourceBytes);
+  addSource("publisher_graph_report_v" + version, graphSourceBytes, manifest, "verified", {
+    graph_report_path: graphReportPath,
+    publisher_facts: { ...facts, graph_report: graphCommitment },
+    ...(version === 2 ? graphIdentity : {}),
+  });
+}
+addSourceTrust("publisher_trust_graph_report", "verified", {
+  manifest: graphRegistration, capsuleBytes: graphSourceBytes,
+  metadata: { ...graphIdentity, graph_report_path: graphReportPath },
+});
+cases.at(-1).publisher_trust_facts.source.graph_report = graphCommitment;
+for (const [name, path, capsuleBytes, manifest, expected, metadata] of [
+  ["tampered", changedGraphReportPath, graphSourceBytes, graphRegistration, "GRAPH_REPORT_INVALID", {}],
+  ["foreign_capsule", graphReportPath, sourceBytes, registration, "GRAPH_REPORT_INVALID", {}],
+  ["missing_file", "missing graph report.json", graphSourceBytes, graphRegistration, "GRAPH_REPORT_IO", {}],
+  ["release_mismatch", graphReportPath, graphSourceBytes, graphRegistration, "EXPECTED_IDENTITY_MISMATCH",
+    { ...graphIdentity, expected_manifest_sha256: "sha256:" + "0".repeat(64) }],
+]) {
+  addSource("publisher_graph_report_" + name, capsuleBytes, manifest, expected,
+    { graph_report_path: path, ...metadata });
+  addSourceTrust("publisher_trust_graph_report_" + name, expected, {
+    manifest, capsuleBytes, metadata: { graph_report_path: path, ...metadata },
+  });
+}
+addSource("publisher_graph_report_invalid_signature", graphSourceBytes, graphRegistration, "SIGNATURE_INVALID",
+  { graph_report_path: graphReportPath, signature_hex: "00".repeat(64) });
+addSourceTrust("publisher_trust_graph_report_revoked", "PUBLISHER_REVOKED", {
+  manifest: graphRegistration, capsuleBytes: graphSourceBytes,
+  revocations: { ...clone(trustRevocations), revoked_publisher_ids: [graphRegistration.publisher_id] },
+  metadata: { graph_report_path: graphReportPath },
+});
+
 // These retained expectations describe the approved release, not whichever
 // candidate is later signed. Signatures on substitutions remain genuine.
 const approvedSource = sourceFacts(registration, registrationBytes, sourceBytes);

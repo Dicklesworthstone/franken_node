@@ -25,6 +25,7 @@ for (const test of cases) {
       expectedManifestSha256: test.expected_manifest_sha256,
       expectedSourceArtifactSha256: test.expected_source_artifact_sha256,
       expectedGraphInputHash: test.expected_graph_input_hash,
+      graphReport: test.graph_report_path,
       expectedSessionNonce: test.expected_session_nonce,
       expectedAdmissionSha256: test.expected_admission_sha256 });
     assert.equal(test.expected, "verified", test.name);
@@ -571,6 +572,43 @@ const publisherTrustInputs = [
   ["trust_missing_source_signature", { signatureHex: undefined }, "SIGNATURE_MALFORMED"],
 ];
 // BEGIN publisher identity protocol controls (no cryptographic proof claims).
+const graphWitnessPath = "private graph; $(ignored).json";
+const graphWitnessControls = ["ignored", "null", "wrong_schema", "not_recomputed", "semantic_claim",
+  "wrong_graph", "wrong_capsule", "prefixed_report_hash", "uppercase_report_hash", "newline_report_hash", "observation_mismatch",
+  "boolean_count", "unsafe_count", "zero_modules", "too_many_targets", "negative_count",
+  "nonboolean_resolution", "inconsistent_resolution", "unknown_field", "missing_field"];
+let graphClientCases = 0;
+let graphProtocolCases = 0;
+for (const trusted of [false, true]) {
+  const prefix = trusted ? "publisher_trust_graph_witness_" : "publisher_graph_witness_";
+  const options = trusted ? publisherTrustOptions : { format: "publisher-source", signatureHex: "00".repeat(64) };
+  for (const path of ["", null, false, 7, [], {}, "private\0report", "\ud800"]) {
+    await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+      { verifier: resolve("does-not-exist"), ...options, graphReport: path }),
+    (error) => error instanceof VerifierError && error.code === "GRAPH_REPORT_INVALID" && error.exitCode === null);
+    graphClientCases += 1;
+  }
+  const forwarded = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + "forwarded" })),
+    cases[0].anchor, { verifier: resolve("fake_verifier"), ...options, graphReport: graphWitnessPath });
+  const source = trusted ? forwarded.facts.source : forwarded.facts;
+  assert.equal(source.graph_report.graph_hash_recomputed, true);
+  assert.equal(source.graph_report.graph_semantics_reconstructed, false);
+  assert(source.graph_report.module_count > source.capsule.file_count, "URL identities may share a file");
+  graphProtocolCases += 1;
+  for (const control of graphWitnessControls) {
+    await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + control })),
+      cases[0].anchor, { verifier: resolve("fake_verifier"), ...options, graphReport: graphWitnessPath }),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID"
+      && !error.message.includes(graphWitnessPath), prefix + control);
+    graphProtocolCases += 1;
+    console.log(JSON.stringify({ case: prefix + control, result: "PROTOCOL_INVALID" }));
+  }
+}
+await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+  { verifier: resolve("does-not-exist"), format: "incident-bundle", graphReport: graphWitnessPath }),
+(error) => error instanceof VerifierError && error.code === "INPUT_INVALID" && error.exitCode === null);
+graphClientCases += 1;
+
 const identityPins = {
   expectedManifestSha256: "sha256:" + "a".repeat(64),
   expectedSourceArtifactSha256: "sha256:" + "b".repeat(64),
@@ -689,8 +727,8 @@ for (const mode of ltvControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
-  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + promotionInputs.length,
+  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + graphClientCases + promotionInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
-    + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases
+    + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases + graphProtocolCases
     + counterfactualControls.length + ltvControls.length + promotionControls.length + 2
     + nativeControls.length + nativePositives.length + 1, passed: true }));

@@ -102,6 +102,7 @@ for case in cases:
                                  expected_manifest_sha256=case.get("expected_manifest_sha256"),
                                  expected_source_artifact_sha256=case.get("expected_source_artifact_sha256"),
                                  expected_graph_input_hash=case.get("expected_graph_input_hash"),
+                                 graph_report=Path(case["graph_report_path"]) if "graph_report_path" in case else None,
                                  expected_session_nonce=case.get("expected_session_nonce"),
                                  expected_admission_sha256=case.get("expected_admission_sha256"))
     except VerifierError as error:
@@ -702,6 +703,55 @@ publisher_trust_inputs = [
     ("trust_missing_source_signature", {"signature_hex": None}, "SIGNATURE_MALFORMED"),
 ]
 # BEGIN publisher identity protocol controls (no cryptographic proof claims).
+graph_witness_path = "private graph; $(ignored).json"
+graph_witness_controls = [
+    "ignored", "null", "wrong_schema", "not_recomputed", "semantic_claim", "wrong_graph", "wrong_capsule",
+    "prefixed_report_hash", "uppercase_report_hash", "newline_report_hash", "observation_mismatch", "boolean_count", "unsafe_count",
+    "zero_modules", "too_many_targets", "negative_count", "nonboolean_resolution",
+    "inconsistent_resolution", "unknown_field", "missing_field",
+]
+graph_client_cases = 0
+graph_protocol_cases = 0
+for trusted in (False, True):
+    prefix = "publisher_trust_graph_witness_" if trusted else "publisher_graph_witness_"
+    options = publisher_trust_options if trusted else {"format": "publisher-source", "signature_hex": "00" * 64}
+    for path in ("", False, 7, [], {}, b"private-report.json", "private\0report", "\ud800"):
+        try:
+            verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                            **options, graph_report=path)
+        except VerifierError as error:
+            assert error.code == "GRAPH_REPORT_INVALID" and error.exit_code is None, (path, error.code)
+        else:
+            raise AssertionError("invalid graph path reached the verifier")
+        graph_client_cases += 1
+    forwarded = verify_artifact(json.dumps({"protocol_control": prefix + "forwarded"}).encode(),
+                                cases[0]["anchor"], verifier=root / "fake_verifier",
+                                **options, graph_report=Path(graph_witness_path))
+    source = forwarded["facts"]["source"] if trusted else forwarded["facts"]
+    assert source["graph_report"]["graph_hash_recomputed"] is True
+    assert source["graph_report"]["graph_semantics_reconstructed"] is False
+    assert source["graph_report"]["module_count"] > source["capsule"]["file_count"]
+    graph_protocol_cases += 1
+    for control in graph_witness_controls:
+        try:
+            verify_artifact(json.dumps({"protocol_control": prefix + control}).encode(),
+                            cases[0]["anchor"], verifier=root / "fake_verifier",
+                            **options, graph_report=graph_witness_path)
+        except VerifierError as error:
+            assert error.code == "PROTOCOL_INVALID" and graph_witness_path not in str(error), (control, error.code)
+        else:
+            raise AssertionError("unverified graph summary accepted: " + prefix + control)
+        graph_protocol_cases += 1
+        print(json.dumps({"case": prefix + control, "result": "PROTOCOL_INVALID"}), flush=True)
+try:
+    verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                    format="incident-bundle", graph_report=graph_witness_path)
+except VerifierError as error:
+    assert error.code == "INPUT_INVALID" and error.exit_code is None
+else:
+    raise AssertionError("graph report accepted for incident format")
+graph_client_cases += 1
+
 identity_pins = {
     "expected_manifest_sha256": "sha256:" + "a" * 64,
     "expected_source_artifact_sha256": "sha256:" + "b" * 64,
@@ -844,9 +894,9 @@ for mode in ltv_controls:
         raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
                   "transport_cases": check_bounded_transport(),
-                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases + len(promotion_inputs),
+                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases + graph_client_cases + len(promotion_inputs),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)
-                  + len(publisher_trust_controls) + len(publisher_trust_positives) + identity_protocol_cases
+                  + len(publisher_trust_controls) + len(publisher_trust_positives) + identity_protocol_cases + graph_protocol_cases
                   + len(counterfactual_controls) + len(ltv_controls) + len(promotion_controls) + 2
                   + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)

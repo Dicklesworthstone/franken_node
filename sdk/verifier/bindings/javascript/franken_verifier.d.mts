@@ -23,6 +23,8 @@ export interface VerifierOptions {
   expectedSourceArtifactSha256?: string;
   /** Optional authenticated graph commitment. Requires expectedManifestSha256; does not reconstruct the graph. */
   expectedGraphInputHash?: string;
+  /** SourceGraphReport JSON file; publisher-source formats only. Requires independent hash verification, not parser/resolver reconstruction. */
+  graphReport?: string;
   /** Independently retained native admission nonce. Requires expectedAdmissionSha256; native-session-forensics only. */
   expectedSessionNonce?: string;
   /** Original receipt's domain-separated admission commitment: 64 lowercase hex digits, without sha256:. Requires expectedSessionNonce. Does not prove outcome freshness. */
@@ -283,6 +285,23 @@ export interface PublisherSourceCapsule {
   condition_count: number | null;
   additional_condition_count: number;
 }
+/** Independently rehashed report commitment and captured inputs, not parser/resolver reconstruction. */
+export interface SourceGraphCommitment {
+  schema_version: "franken-verifier/source-graph-commitment/v1";
+  graph_input_hash: string;
+  graph_hash_recomputed: true;
+  graph_semantics_reconstructed: false;
+  capsule_digest: string;
+  /** Raw SHA-256 of the supplied report file, without a sha256: prefix. */
+  report_sha256: string;
+  observation_count: number;
+  module_count: number;
+  resolution_target_count: number;
+  edge_count: number;
+  diagnostic_count: number;
+  /** Authenticated producer claim, not an independently reconstructed conclusion. */
+  declared_fully_resolved: boolean;
+}
 /** Publisher authentication, not provenance, revocation, graph reconstruction or execution. */
 export type PublisherSourceFacts = {
   package_name: string;
@@ -294,6 +313,8 @@ export type PublisherSourceFacts = {
   signer_key_id: string;
   signer_public_key_hex: string;
   capsule: PublisherSourceCapsule;
+  /** Present when the SDK verified a separately supplied graph-report witness. */
+  graph_report?: SourceGraphCommitment;
 } & (
   { registration_schema: "franken-node/extension-registration-manifest/v1"; runtime_authority: null }
   | { registration_schema: "franken-node/extension-registration-manifest/v2"; runtime_authority: PublisherRuntimeAuthority }
