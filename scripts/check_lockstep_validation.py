@@ -13,8 +13,9 @@ Combines:
   3. Live multi-runtime lockstep execution (`--execute-live`):
      - Executes real `node`, `bun`, and `franken-node` (or fail-closed error
        when a requested runtime binary is absent) over deterministic fixture
-       cases, captures stdout/stderr/exit_code/elapsed_ms and filesystem +
-       network side-effect summaries, classifies divergences into
+       cases, captures stdout/stderr/exit_code/elapsed_ms and filesystem
+       content/mode changes (network activity is explicitly unobserved),
+       classifies divergences into
        `agree` / `harmless` / `acceptable` / `blocking`, validates divergence
        receipts, evaluates thresholds, writes a machine-readable report, and
        emits structured JSONL lifecycle events (`lockstep_run_started`,
@@ -35,10 +36,12 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -87,6 +90,10 @@ DEFAULT_TIMING_BUDGET_MS = 100.0
 DEFAULT_MIN_CORPUS_CASES = 500
 POLICY_TARGET_CORPUS_CASES = 1000
 VALID_DIVERGENCE_CLASSES = {"agree", "harmless", "acceptable", "blocking"}
+MAX_SNAPSHOT_ENTRIES = 50_000
+MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+MAX_SNAPSHOT_DEPTH = 128
+SNAPSHOT_TIMEOUT_SECS = 15.0
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _TEMP_PATH_RE = re.compile(r"(/tmp|/var/folders|/data/tmp)/[^\s:\"'`]+")
@@ -380,24 +387,102 @@ def _normalize_text_for_harmless(text: str) -> str:
     return "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
 
 
+def _finite_nonnegative(value: object, field: str) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    try:
+        number = float(value)
+    except OverflowError as err:
+        raise ValueError(f"{field} is outside the supported numeric range") from err
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    return number
+
+
+def _normalize_fs_entry(entry: object) -> dict | None:
+    if entry is None:
+        return None
+    if not isinstance(entry, dict) or entry.get("kind") not in ("file", "directory", "symlink"):
+        raise ValueError("filesystem changes require typed entry fingerprints")
+    mode = entry.get("mode")
+    if type(mode) is not int or not 0 <= mode <= 0o7777:
+        raise ValueError("filesystem entry mode is invalid")
+    fields = {"kind", "mode"}
+    if entry["kind"] == "file":
+        fields.update(("sha256", "size_bytes"))
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            raise ValueError("filesystem file fingerprint is missing its SHA-256")
+        if type(entry.get("size_bytes")) is not int or entry["size_bytes"] < 0:
+            raise ValueError("filesystem file size is invalid")
+    elif entry["kind"] == "symlink":
+        fields.add("target")
+        if not isinstance(entry.get("target"), str):
+            raise ValueError("filesystem symlink fingerprint is missing its target")
+    if set(entry) != fields:
+        raise ValueError("filesystem entry fingerprint has unexpected or missing fields")
+    return {key: entry[key] for key in sorted(fields)}
+
+
+def _normalize_side_effects(raw: object) -> dict:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("side_effects must be an object")
+    result = {}
+    for key in ("fs_created", "fs_modified", "fs_deleted", "network_targets"):
+        values = raw.get(key, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+            raise ValueError(f"{key} must contain nonempty paths or targets")
+        if len(set(values)) != len(values):
+            raise ValueError(f"{key} contains duplicate observations")
+        result[key] = sorted(values)
+    changes = raw.get("filesystem_changes", [])
+    if not isinstance(changes, list):
+        raise ValueError("filesystem_changes must be a list")
+    by_path = {}
+    classified = {key: [] for key in ("fs_created", "fs_modified", "fs_deleted")}
+    for change in changes:
+        if not isinstance(change, dict) or set(change) != {"path", "before", "after"}:
+            raise ValueError("filesystem changes require path, before and after fingerprints")
+        path = change["path"]
+        if not isinstance(path, str) or not path or path in by_path:
+            raise ValueError("filesystem change paths must be nonempty and unique")
+        before = _normalize_fs_entry(change["before"])
+        after = _normalize_fs_entry(change["after"])
+        if before == after:
+            raise ValueError("filesystem change has identical before and after entries")
+        key = "fs_created" if before is None else "fs_deleted" if after is None else "fs_modified"
+        classified[key].append(path)
+        by_path[path] = {"path": path, "before": before, "after": after}
+    if any(sorted(paths) != result[key] for key, paths in classified.items()):
+        raise ValueError("filesystem side-effect mismatch: path lists lack matching content fingerprints")
+    result["filesystem_changes"] = [by_path[path] for path in sorted(by_path)]
+    network_scope = raw.get("network_observation", "not_observed")
+    if network_scope not in ("not_observed", "observed") or (network_scope == "not_observed" and result["network_targets"]):
+        raise ValueError("network observation scope contradicts its targets")
+    result["network_observation"] = network_scope
+    return result
+
+
 def normalize_runtime_result(raw: dict) -> dict:
-    """Canonicalize one runtime execution result for deterministic comparison."""
-    stdout = str(raw.get("stdout", "")).replace("\r\n", "\n")
-    stderr = str(raw.get("stderr", "")).replace("\r\n", "\n")
-    exit_code = int(raw.get("exit_code", -1))
-    elapsed_ms = float(raw.get("elapsed_ms", 0.0))
-    timed_out = bool(raw.get("timed_out", False))
-    side_effects_raw = raw.get("side_effects") or {}
-    fs_created = sorted(str(p) for p in side_effects_raw.get("fs_created", []))
-    fs_modified = sorted(str(p) for p in side_effects_raw.get("fs_modified", []))
-    fs_deleted = sorted(str(p) for p in side_effects_raw.get("fs_deleted", []))
-    net_hosts = sorted(str(h) for h in side_effects_raw.get("network_targets", []))
-    side_effects = {
-        "fs_created": fs_created,
-        "fs_modified": fs_modified,
-        "fs_deleted": fs_deleted,
-        "network_targets": net_hosts,
-    }
+    """Validate a result before canonicalizing it; defaults never hide missing exits."""
+    if not isinstance(raw, dict):
+        raise ValueError("runtime observation must be an object")
+    if not isinstance(raw.get("stdout"), str) or not isinstance(raw.get("stderr"), str):
+        raise ValueError("runtime stdout and stderr must be complete strings")
+    stdout = raw["stdout"].replace("\r\n", "\n")
+    stderr = raw["stderr"].replace("\r\n", "\n")
+    exit_code = raw.get("exit_code")
+    if type(exit_code) is not int:
+        raise ValueError("runtime observation requires an integer exit_code")
+    elapsed_ms = _finite_nonnegative(raw.get("elapsed_ms"), "elapsed_ms")
+    timed_out = raw.get("timed_out", False)
+    if type(timed_out) is not bool:
+        raise ValueError("timed_out must be a boolean")
+    execution_error = raw.get("execution_error")
+    if execution_error is not None and (not isinstance(execution_error, str) or not execution_error.strip()):
+        raise ValueError("execution_error must be a nonempty string or null")
+    side_effects = _normalize_side_effects(raw.get("side_effects"))
     return {
         "stdout": stdout,
         "stderr": stderr,
@@ -407,6 +492,7 @@ def normalize_runtime_result(raw: dict) -> dict:
         "stderr_sha256": f"sha256:{hashlib.sha256(stderr.encode('utf-8')).hexdigest()}",
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "execution_error": execution_error,
         "elapsed_ms": round(elapsed_ms, 3),
         "side_effects": side_effects,
     }
@@ -425,6 +511,7 @@ def compute_divergence_sha256(
             rt: {
                 "exit_code": obs["exit_code"],
                 "timed_out": obs["timed_out"],
+                "execution_error": obs["execution_error"],
                 "stdout_sha256": obs["stdout_sha256"],
                 "stderr_sha256": obs["stderr_sha256"],
                 "side_effects": obs["side_effects"],
@@ -433,7 +520,7 @@ def compute_divergence_sha256(
         },
     }
     payload = json.dumps(canonical_view, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return f"sha256:{hashlib.sha256(b'clv_divergence_v1:' + payload).hexdigest()}"
+    return f"sha256:{hashlib.sha256(b'clv_divergence_v2:' + payload).hexdigest()}"
 
 
 def verify_divergence_receipt(
@@ -464,7 +551,7 @@ def verify_divergence_receipt(
     check_now = now_utc or _utc_now()
     if expires_at <= check_now:
         return False, f"receipt expired at {receipt['expires_at_utc']}"
-    if require_timing_waiver and not bool(receipt.get("allows_timing_anomaly", False)):
+    if require_timing_waiver and receipt.get("allows_timing_anomaly") is not True:
         return False, "receipt does not authorize timing anomaly waiver"
     return True, f"verified receipt {receipt['receipt_id']} by {receipt['approver']}"
 
@@ -476,44 +563,72 @@ def classify_lockstep_case(
     *,
     reference_runtime: str = "node",
     product_runtime: str = "franken-node",
+    required_runtimes: tuple[str, ...] | None = None,
     receipts_by_case: dict[str, dict] | None = None,
     timing_budget_ms: float = DEFAULT_TIMING_BUDGET_MS,
     now_utc: datetime | None = None,
 ) -> dict:
-    """Classify a multi-runtime case into agree / harmless / acceptable / blocking."""
-    normalized = {rt: normalize_runtime_result(obs) for rt, obs in observations_by_runtime.items()}
-    if reference_runtime not in normalized or product_runtime not in normalized:
+    """Compare every configured role; incomplete executions cannot be waived."""
+    normalized = {}
+    invalid = []
+    required = set(observations_by_runtime if required_runtimes is None else required_runtimes)
+    required.update((reference_runtime, product_runtime))
+    if reference_runtime == product_runtime:
+        invalid.append("reference and product runtime roles must be distinct")
+    missing = required.difference(observations_by_runtime)
+    unexpected = set(observations_by_runtime).difference(required)
+    if missing:
+        invalid.append(f"missing required runtime observation(s): {sorted(missing)}")
+    if unexpected:
+        invalid.append(f"unexpected runtime observation(s): {sorted(unexpected)}")
+    try:
+        timing_budget_ms = _finite_nonnegative(timing_budget_ms, "timing_budget_ms")
+    except ValueError as err:
+        invalid.append(str(err))
+    for runtime, observation in observations_by_runtime.items():
+        try:
+            normalized[runtime] = normalize_runtime_result(observation)
+        except (TypeError, ValueError, OverflowError) as err:
+            invalid.append(f"{runtime}: invalid observation: {err}")
+            continue
+        result = normalized[runtime]
+        if result["timed_out"] or not 0 <= result["exit_code"] <= 0xFFFFFFFF or result["execution_error"]:
+            invalid.append(
+                f"{runtime}: incomplete execution (exit_code={result['exit_code']}, "
+                f"timed_out={result['timed_out']}, execution_error={result['execution_error']!r})"
+            )
+    if invalid:
         return {
             "case_id": case_id,
             "family": family,
             "class": "blocking",
             "passed": False,
-            "reason": f"missing required runtime observation (need `{reference_runtime}` and `{product_runtime}`)",
+            "reason": "; ".join(invalid),
             "timing_anomaly": False,
             "timing_delta_ms": None,
-            "divergence_sha256": None,
+            "divergence_sha256": compute_divergence_sha256(case_id, family, normalized) if normalized else None,
             "receipt_verified": False,
-            "receipt_detail": "missing runtime observation",
+            "receipt_detail": "invalid or incomplete execution evidence cannot be waived",
             "observations": normalized,
         }
 
     ref = normalized[reference_runtime]
-    prod = normalized[product_runtime]
-    timing_delta_ms = round(prod["elapsed_ms"] - ref["elapsed_ms"], 3)
+    compared = {runtime: obs for runtime, obs in normalized.items() if runtime != reference_runtime}
+    timing_delta_ms = round(max(obs["elapsed_ms"] - ref["elapsed_ms"] for obs in compared.values()), 3)
     timing_anomaly = timing_delta_ms > timing_budget_ms
-    exact_match = (
-        prod["exit_code"] == ref["exit_code"]
-        and prod["timed_out"] == ref["timed_out"]
-        and prod["stdout"] == ref["stdout"]
-        and prod["stderr"] == ref["stderr"]
-        and prod["side_effects"] == ref["side_effects"]
+    exact_match = all(
+        obs["exit_code"] == ref["exit_code"]
+        and obs["stdout"] == ref["stdout"]
+        and obs["stderr"] == ref["stderr"]
+        and obs["side_effects"] == ref["side_effects"]
+        for obs in compared.values()
     )
-    harmless_match = (
-        prod["exit_code"] == ref["exit_code"]
-        and prod["timed_out"] == ref["timed_out"]
-        and prod["side_effects"] == ref["side_effects"]
-        and prod["stdout_harmless"] == ref["stdout_harmless"]
-        and prod["stderr_harmless"] == ref["stderr_harmless"]
+    harmless_match = all(
+        obs["exit_code"] == ref["exit_code"]
+        and obs["side_effects"] == ref["side_effects"]
+        and obs["stdout_harmless"] == ref["stdout_harmless"]
+        and obs["stderr_harmless"] == ref["stderr_harmless"]
+        for obs in compared.values()
     )
     div_sha = compute_divergence_sha256(case_id, family, normalized)
     receipt = (receipts_by_case or {}).get(case_id)
@@ -524,7 +639,7 @@ def classify_lockstep_case(
             "family": family,
             "class": "agree",
             "passed": True,
-            "reason": "exact match within timing budget",
+            "reason": "all configured runtimes match within timing budget",
             "timing_anomaly": False,
             "timing_delta_ms": timing_delta_ms,
             "divergence_sha256": div_sha,
@@ -572,14 +687,15 @@ def classify_lockstep_case(
         }
 
     reasons = []
-    if prod["timed_out"] != ref["timed_out"] or prod["exit_code"] != ref["exit_code"]:
-        reasons.append(f"exit_code/timeout mismatch (product={prod['exit_code']}/timeout={prod['timed_out']} vs {reference_runtime}={ref['exit_code']}/timeout={ref['timed_out']})")
-    if prod["stdout_harmless"] != ref["stdout_harmless"]:
-        reasons.append("stdout semantic mismatch")
-    if prod["stderr_harmless"] != ref["stderr_harmless"]:
-        reasons.append("stderr semantic mismatch")
-    if prod["side_effects"] != ref["side_effects"]:
-        reasons.append("filesystem/network side-effect mismatch")
+    for runtime, obs in compared.items():
+        if obs["exit_code"] != ref["exit_code"]:
+            reasons.append(f"{runtime}: exit_code mismatch ({obs['exit_code']} vs {reference_runtime}={ref['exit_code']})")
+        if obs["stdout_harmless"] != ref["stdout_harmless"]:
+            reasons.append(f"{runtime}: stdout semantic mismatch")
+        if obs["stderr_harmless"] != ref["stderr_harmless"]:
+            reasons.append(f"{runtime}: stderr semantic mismatch")
+        if obs["side_effects"] != ref["side_effects"]:
+            reasons.append(f"{runtime}: filesystem/network side-effect mismatch")
     if timing_anomaly:
         reasons.append(f"timing anomaly +{timing_delta_ms:.1f}ms > {timing_budget_ms:.1f}ms budget")
     reasons.append(receipt_detail)
@@ -877,18 +993,97 @@ def evaluate_corpus_artifact(
     )
 
 
-def _snapshot_directory(root: Path) -> dict[str, str]:
-    snap: dict[str, str] = {}
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            rel = p.relative_to(root).as_posix()
-            if rel.startswith(".franken-node/") or rel == "franken_node.toml":
-                continue
-            snap[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+def _snapshot_directory(root: Path) -> dict[str, dict]:
+    """Bounded, no-follow observation; a missing observation is never an empty one."""
+    if os.scandir not in os.supports_fd or not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")):
+        raise OSError("filesystem observation requires fd-relative no-follow support")
+    deadline = time.monotonic() + SNAPSHOT_TIMEOUT_SECS
+    total_bytes = 0
+    total_entries = 1
+    snap: dict[str, dict] = {}
+
+    def check_budget() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError("filesystem observation deadline exceeded")
+
+    def excluded(relative: str) -> bool:
+        return relative == ".franken-node" or relative.startswith(".franken-node/") or relative == "franken_node.toml"
+
+    def version(info: os.stat_result) -> tuple:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def visit(directory_fd: int, relative_directory: str, expected: os.stat_result, depth: int) -> None:
+        nonlocal total_bytes, total_entries
+        check_budget()
+        if depth > MAX_SNAPSHOT_DEPTH:
+            raise ValueError("filesystem observation depth limit exceeded")
+        directory_before = os.fstat(directory_fd)
+        if version(expected) != version(directory_before):
+            raise ValueError("filesystem directory changed before observation")
+        # Iterate lazily so a hostile directory cannot allocate an unbounded
+        # list of names before the entry/deadline checks get a chance to run.
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                check_budget()
+                if total_entries >= MAX_SNAPSHOT_ENTRIES:
+                    raise ValueError("filesystem observation entry limit exceeded")
+                total_entries += 1
+                name = entry.name
+                relative = name if relative_directory == "." else f"{relative_directory}/{name}"
+                if excluded(relative):
+                    continue
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                record = {"mode": stat.S_IMODE(info.st_mode)}
+                if stat.S_ISREG(info.st_mode):
+                    if info.st_size > MAX_SNAPSHOT_BYTES - total_bytes:
+                        raise ValueError("filesystem observation byte limit exceeded")
+                    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+                    with os.fdopen(descriptor, "rb") as stream:
+                        if version(info) != version(os.fstat(stream.fileno())):
+                            raise ValueError("filesystem entry changed before observation")
+                        digest = hashlib.sha256()
+                        size = 0
+                        while True:
+                            check_budget()
+                            chunk = stream.read(min(65536, MAX_SNAPSHOT_BYTES - total_bytes + 1))
+                            if not chunk:
+                                break
+                            total_bytes += len(chunk)
+                            size += len(chunk)
+                            if total_bytes > MAX_SNAPSHOT_BYTES:
+                                raise ValueError("filesystem observation byte limit exceeded")
+                            digest.update(chunk)
+                        if version(info) != version(os.fstat(stream.fileno())):
+                            raise ValueError("filesystem entry changed during observation")
+                    record.update(kind="file", sha256=digest.hexdigest(), size_bytes=size)
+                elif stat.S_ISDIR(info.st_mode):
+                    record["kind"] = "directory"
+                    child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                    try:
+                        visit(child_fd, relative, info, depth + 1)
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISLNK(info.st_mode):
+                    record.update(kind="symlink", target=os.readlink(name, dir_fd=directory_fd))
+                else:
+                    raise ValueError(f"unsupported filesystem entry: {relative}")
+                if version(info) != version(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)):
+                    raise ValueError("filesystem entry changed during observation")
+                snap[relative] = record
+        if version(directory_before) != version(os.fstat(directory_fd)):
+            raise ValueError("filesystem directory changed during observation")
+
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        root_before = os.fstat(root_fd)
+        snap["."] = {"kind": "directory", "mode": stat.S_IMODE(root_before.st_mode)}
+        visit(root_fd, ".", root_before, 0)
+    finally:
+        os.close(root_fd)
     return snap
 
 
-def _diff_directory_snapshots(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
+def _diff_directory_snapshots(before: dict[str, dict], after: dict[str, dict]) -> dict:
     created = sorted(k for k in after if k not in before)
     deleted = sorted(k for k in before if k not in after)
     modified = sorted(k for k in after if k in before and after[k] != before[k])
@@ -896,7 +1091,12 @@ def _diff_directory_snapshots(before: dict[str, str], after: dict[str, str]) -> 
         "fs_created": created,
         "fs_modified": modified,
         "fs_deleted": deleted,
+        "filesystem_changes": [
+            {"path": path, "before": before.get(path), "after": after.get(path)}
+            for path in sorted(set(created + deleted + modified))
+        ],
         "network_targets": [],
+        "network_observation": "not_observed",
     }
 
 
@@ -954,10 +1154,17 @@ def _execute_one_runtime_fixture(
         run_env["NO_COLOR"] = "1"
         run_env["XDG_STATE_HOME"] = state_tmp
         run_env["LOCALAPPDATA"] = state_tmp
-        before = _snapshot_directory(workdir)
-        started = time.perf_counter()
+        started = None
         timed_out = False
+        stdout = stderr = ""
+        exit_code = -1
+        execution_error = None
+        before = None
         try:
+            if _finite_nonnegative(timeout_secs, "timeout_secs") == 0:
+                raise ValueError("timeout_secs must be positive")
+            before = _snapshot_directory(workdir)
+            started = time.perf_counter()
             proc = subprocess.run(
                 [*cmd_prefix, "case.js"],
                 cwd=workdir,
@@ -975,15 +1182,24 @@ def _execute_one_runtime_fixture(
             stdout = (err.stdout or "") if isinstance(err.stdout, str) else (err.stdout or b"").decode("utf-8", "replace")
             stderr = (err.stderr or "") if isinstance(err.stderr, str) else (err.stderr or b"").decode("utf-8", "replace")
             exit_code = 124
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        after = _snapshot_directory(workdir)
+        except (OSError, ValueError, UnicodeError) as err:
+            execution_error = f"runtime observation failed: {type(err).__name__}: {err}"
+        elapsed_ms = (time.perf_counter() - started) * 1000.0 if started is not None else 0.0
+        side_effects = {}
+        if before is not None:
+            try:
+                side_effects = _diff_directory_snapshots(before, _snapshot_directory(workdir))
+            except (OSError, ValueError) as err:
+                detail = f"filesystem observation failed: {type(err).__name__}: {err}"
+                execution_error = f"{execution_error}; {detail}" if execution_error else detail
         return {
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "execution_error": execution_error,
             "elapsed_ms": round(elapsed_ms, 3),
-            "side_effects": _diff_directory_snapshots(before, after),
+            "side_effects": side_effects,
         }
 
 
@@ -1014,6 +1230,24 @@ def run_live_lockstep_fixtures(
         details={"mode": "live_fixtures", "runtimes": sorted(runtime_commands.keys()), "fixture_count": len(fixtures)},
     )
 
+    # Pair mode is explicit and supported, but every configured role must be
+    # present and compared. The default CLI population remains Node/Bun/native.
+    if reference_runtime == product_runtime:
+        blocking_reasons.append("reference and product runtime roles must be distinct")
+    missing_roles = {reference_runtime, product_runtime}.difference(runtime_commands)
+    if missing_roles:
+        blocking_reasons.append(f"missing required runtime role(s): {sorted(missing_roles)}")
+    for field, value in (
+        ("timing_budget_ms", timing_budget_ms),
+        ("overall_min_pct", overall_min_pct),
+        ("family_min_pct", family_min_pct),
+    ):
+        try:
+            checked = _finite_nonnegative(value, field)
+            if field.endswith("_pct") and checked > 100:
+                raise ValueError(f"{field} must not exceed 100")
+        except ValueError as err:
+            blocking_reasons.append(str(err))
     # Fail-closed missing-runtime check
     missing_runtimes = [
         rt
@@ -1022,6 +1256,7 @@ def run_live_lockstep_fixtures(
     ]
     if missing_runtimes:
         blocking_reasons.append(f"missing required runtime executable(s): {sorted(missing_runtimes)}")
+    if blocking_reasons:
         return _finalize_gate_report(
             tid,
             mode="live_fixtures",
@@ -1063,6 +1298,7 @@ def run_live_lockstep_fixtures(
             observations,
             reference_runtime=reference_runtime,
             product_runtime=product_runtime,
+            required_runtimes=tuple(runtime_commands),
             receipts_by_case=receipts_by_case,
             timing_budget_ms=timing_budget_ms,
             now_utc=now_utc,
@@ -1157,6 +1393,8 @@ def run_live_lockstep_fixtures(
         output_artifact_path=output_artifact_path,
         extra={
             "runtimes": sorted(runtime_commands.keys()),
+            "comparison_scope": "configured_runtime_set",
+            "network_observation": "not_observed",
             "total_cases": len(case_results),
             "passed_cases": passed_total,
             "overall_pass_rate_pct": overall_pct,

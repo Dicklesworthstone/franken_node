@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_lockstep_validation.py"
@@ -138,6 +139,185 @@ class TestRunAll(unittest.TestCase):
 class TestExecutableLockstepPrimitives(unittest.TestCase):
     """Unit tests for normalization, classification, receipts, timing, baseline, and corpus evaluation."""
 
+    def test_every_configured_runtime_is_compared_and_pairs_remain_supported(self):
+        base = {"stdout": "right\n", "stderr": "", "exit_code": 0, "elapsed_ms": 1.0}
+        pair = {"node": base, "franken-node": base}
+        self.assertTrue(clv.classify_lockstep_case("pair", "core", pair)["passed"])
+        triad = {**pair, "bun": {**base, "stdout": "wrong\n"}}
+        result = clv.classify_lockstep_case("triad", "core", triad)
+        self.assertFalse(result["passed"])
+        self.assertIn("bun: stdout semantic mismatch", result["reason"])
+        for observations, required, reason in (
+            (pair, ("node", "bun", "franken-node"), "missing required runtime"),
+            (triad, ("node", "franken-node"), "unexpected runtime"),
+        ):
+            with self.subTest(reason=reason):
+                result = clv.classify_lockstep_case("roles", "core", observations, required_runtimes=required)
+                self.assertFalse(result["passed"])
+                self.assertIn(reason, result["reason"])
+        self.assertFalse(clv.classify_lockstep_case(
+            "self", "core", {"node": base}, product_runtime="node"
+        )["passed"])
+
+    def test_reference_divergence_receipt_binds_the_entire_configured_population(self):
+        now = datetime(2026, 11, 20, 12, 0, 0, tzinfo=timezone.utc)
+        base = {"stdout": "right\n", "stderr": "", "exit_code": 0, "elapsed_ms": 1.0}
+        observations = {"node": base, "franken-node": base, "bun": {**base, "stdout": "upstream-bug\n"}}
+        blocked = clv.classify_lockstep_case("upstream", "core", observations, now_utc=now)
+        self.assertFalse(blocked["passed"])
+        receipt = {
+            "receipt_id": "known-upstream-bug",
+            "case_id": "upstream",
+            "family": "core",
+            "divergence_sha256": blocked["divergence_sha256"],
+            "approver": "release-eng",
+            "reason": "documented known upstream difference",
+            "expires_at_utc": (now + timedelta(days=7)).isoformat(),
+        }
+        admitted = clv.classify_lockstep_case(
+            "upstream", "core", observations, receipts_by_case={"upstream": receipt}, now_utc=now
+        )
+        self.assertEqual(admitted["class"], "acceptable")
+        self.assertTrue(admitted["receipt_verified"])
+        changed = {**observations, "bun": {**base, "stdout": "another-upstream-bug\n"}}
+        stale = clv.classify_lockstep_case(
+            "upstream", "core", changed, receipts_by_case={"upstream": receipt}, now_utc=now
+        )
+        self.assertFalse(stale["passed"])
+        self.assertIn("does not match", stale["receipt_detail"])
+        pair_digest = clv.classify_lockstep_case(
+            "upstream", "core", {"node": base, "franken-node": base}
+        )["divergence_sha256"]
+        self.assertNotEqual(pair_digest, blocked["divergence_sha256"])
+
+    def test_equal_incomplete_and_invalid_observations_cannot_be_waived(self):
+        base = {"stdout": "prefix\n", "stderr": "", "exit_code": 0, "elapsed_ms": 1.0}
+        missing_exit = {key: value for key, value in base.items() if key != "exit_code"}
+        invalid = [
+            {**base, "timed_out": True, "exit_code": 124},
+            {**base, "exit_code": -9},
+            {**base, "execution_error": "incomplete filesystem observation"},
+            {**base, "exit_code": False},
+            {**base, "timed_out": "false"},
+            {**base, "elapsed_ms": float("nan")},
+            {**base, "elapsed_ms": float("inf")},
+            {**base, "elapsed_ms": -1},
+            {**base, "elapsed_ms": True},
+            {**base, "elapsed_ms": 10**1000},
+            {**base, "side_effects": {"fs_modified": ["result.txt"]}},
+            missing_exit,
+        ]
+        with mock.patch.object(clv, "verify_divergence_receipt", side_effect=AssertionError("invalid executions cannot reach receipt admission")):
+            for observation in invalid:
+                with self.subTest(observation=observation):
+                    report = clv.classify_lockstep_case(
+                        "invalid", "core", {"node": observation, "bun": observation, "franken-node": observation},
+                        receipts_by_case={"invalid": {"approver": "cannot-waive-interruption"}},
+                    )
+                    self.assertFalse(report["passed"])
+                    self.assertFalse(report["receipt_verified"])
+                    self.assertIn("cannot be waived", report["receipt_detail"])
+        # A completed intentional guest failure is still comparable.
+        ordinary_error = {**base, "exit_code": 23}
+        self.assertTrue(clv.classify_lockstep_case(
+            "guest-error", "core", {"node": ordinary_error, "franken-node": ordinary_error}
+        )["passed"])
+
+    def test_invalid_timing_budget_refuses_before_execution(self):
+        base = {"stdout": "same", "stderr": "", "exit_code": 0, "elapsed_ms": 1.0}
+        with mock.patch.object(clv, "_execute_one_runtime_fixture", side_effect=AssertionError("invalid budget must not spawn")):
+            for budget in (float("nan"), float("inf"), -1, True):
+                with self.subTest(budget=budget):
+                    self.assertFalse(clv.classify_lockstep_case(
+                        "budget", "core", {"node": base, "franken-node": base}, timing_budget_ms=budget
+                    )["passed"])
+                    report = clv.run_live_lockstep_fixtures(
+                        [{"case_id": "budget", "source": "unused"}],
+                        runtime_commands={"node": [sys.executable], "franken-node": [sys.executable]},
+                        timing_budget_ms=budget,
+                    )
+                    self.assertFalse(report["passed"])
+                    self.assertIn("timing_budget_ms", "; ".join(report["blocking_reasons"]))
+
+    @unittest.skipUnless(os.scandir in os.supports_fd, "fd-relative filesystem observation required")
+    def test_filesystem_fingerprints_bind_real_written_bytes_and_modes(self):
+        base = {"stdout": "same", "stderr": "", "exit_code": 0, "elapsed_ms": 1.0}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = clv._snapshot_directory(root)
+            target = root / "result.txt"
+            target.write_bytes(b"expected")
+            first = clv._diff_directory_snapshots(before, clv._snapshot_directory(root))
+            target.write_bytes(b"different")
+            second = clv._diff_directory_snapshots(before, clv._snapshot_directory(root))
+            self.assertEqual(first["fs_created"], second["fs_created"])
+            result = clv.classify_lockstep_case("bytes", "fs", {
+                "node": {**base, "side_effects": first},
+                "franken-node": {**base, "side_effects": second},
+            })
+            self.assertFalse(result["passed"])
+            self.assertIn("side-effect mismatch", result["reason"])
+            target.chmod(0o600)
+            private = clv._diff_directory_snapshots(before, clv._snapshot_directory(root))
+            target.chmod(0o644)
+            public = clv._diff_directory_snapshots(before, clv._snapshot_directory(root))
+            self.assertFalse(clv.classify_lockstep_case("mode", "fs", {
+                "node": {**base, "side_effects": private},
+                "franken-node": {**base, "side_effects": public},
+            })["passed"])
+            same = clv.classify_lockstep_case("same", "fs", {
+                "node": {**base, "side_effects": public},
+                "franken-node": {**base, "side_effects": public},
+            })
+            self.assertTrue(same["passed"])
+            self.assertEqual(same["observations"]["node"]["side_effects"]["network_observation"], "not_observed")
+
+    @unittest.skipUnless(os.scandir in os.supports_fd and hasattr(os, "mkfifo"), "POSIX no-follow snapshot required")
+    def test_snapshot_bounds_symlinks_and_special_files(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external:
+            root = Path(tmp)
+            outside = Path(external) / "secret"
+            outside.write_bytes(b"must-not-be-read-through-link")
+            (root / "link").symlink_to(outside)
+            snapshot = clv._snapshot_directory(root)
+            self.assertEqual(snapshot["link"]["kind"], "symlink")
+            self.assertEqual(snapshot["link"]["target"], str(outside))
+            self.assertNotIn("sha256", snapshot["link"])
+            (root / "data").write_bytes(b"1234")
+            with mock.patch.object(clv, "MAX_SNAPSHOT_BYTES", 3):
+                with self.assertRaisesRegex(ValueError, "byte limit"):
+                    clv._snapshot_directory(root)
+            with mock.patch.object(clv, "MAX_SNAPSHOT_ENTRIES", 1):
+                with self.assertRaisesRegex(ValueError, "entry limit"):
+                    clv._snapshot_directory(root)
+            with mock.patch.object(clv, "SNAPSHOT_TIMEOUT_SECS", 0):
+                with self.assertRaisesRegex(ValueError, "deadline"):
+                    clv._snapshot_directory(root)
+            os.mkfifo(root / "fifo")
+            with self.assertRaisesRegex(ValueError, "unsupported filesystem entry"):
+                clv._snapshot_directory(root)
+
+    @unittest.skipUnless(os.scandir in os.supports_fd, "fd-relative filesystem observation required")
+    def test_snapshot_refuses_nested_directory_mutation_before_descent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            original_open = os.open
+            mutated = False
+
+            def open_and_mutate(path, flags, *args, **kwargs):
+                nonlocal mutated
+                descriptor = original_open(path, flags, *args, **kwargs)
+                if path == "nested" and not mutated:
+                    mutated = True
+                    (root / "nested" / "new.txt").write_text("raced", encoding="utf-8")
+                return descriptor
+
+            with mock.patch.object(clv.os, "open", side_effect=open_and_mutate):
+                with self.assertRaisesRegex(ValueError, "directory changed before observation"):
+                    clv._snapshot_directory(root)
+            self.assertTrue(mutated)
+
     def test_normalization_and_harmless_vs_blocking_classification(self):
         ref = {"stdout": "ok /tmp/run-1/a.js 2026-11-20T00:00:00Z\r\n", "stderr": "", "exit_code": 0, "elapsed_ms": 12.0}
         harmless = {"stdout": "ok /tmp/run-2/b.js 2026-11-20T01:02:03Z\n", "stderr": "", "exit_code": 0, "elapsed_ms": 18.0}
@@ -180,6 +360,14 @@ class TestExecutableLockstepPrimitives(unittest.TestCase):
             "case-slow", "timers", obs, receipts_by_case={"case-slow": bad_receipt}, now_utc=now
         )
         self.assertEqual(still_blocked["class"], "blocking")
+        for invalid_waiver in ("false", "true", 1, [], {}):
+            with self.subTest(waiver=invalid_waiver):
+                invalid_receipt = {**bad_receipt, "allows_timing_anomaly": invalid_waiver}
+                refused = clv.classify_lockstep_case(
+                    "case-slow", "timers", obs, receipts_by_case={"case-slow": invalid_receipt}, now_utc=now
+                )
+                self.assertFalse(refused["passed"])
+                self.assertIn("does not authorize", refused["receipt_detail"])
 
         # Expired receipt fails closed
         expired_receipt = {**bad_receipt, "allows_timing_anomaly": True, "expires_at_utc": "2026-01-01T00:00:00Z"}
@@ -270,10 +458,72 @@ elif "CASE_SLOW" in src:
     print("slow-ok")
 elif "CASE_ACCEPTABLE" in src:
     print("{'prod-waived' if mode == 'prod' else 'node-orig'}")
+elif "CASE_FILE_CONTENT" in src:
+    with open("result.txt", "w", encoding="utf-8") as output:
+        output.write("{mode}")
+    print("same-output")
 """
         path.write_text(script, encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
+
+    def test_live_bun_disagreement_blocks_even_when_node_and_product_agree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            correct = self._make_runtime_shim(root / "correct.py", "ref")
+            divergent = self._make_runtime_shim(root / "divergent.py", "prod")
+            report = clv.run_live_lockstep_fixtures(
+                [{"case_id": "bun-disagreement", "family": "core", "source": "// CASE_BLOCKING"}],
+                runtime_commands={"node": [str(correct)], "bun": [str(divergent)], "franken-node": [str(correct)]},
+                timing_budget_ms=5000,
+            )
+            self.assertFalse(report["passed"])
+            case = report["cases"][0]
+            self.assertIn("bun: stdout semantic mismatch", case["reason"])
+            self.assertEqual(case["observations"]["node"]["stdout"], case["observations"]["franken-node"]["stdout"])
+
+    def test_live_same_path_with_different_file_content_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node = self._make_runtime_shim(root / "node.py", "ref")
+            native = self._make_runtime_shim(root / "native.py", "prod")
+            report = clv.run_live_lockstep_fixtures(
+                [{"case_id": "file-content", "family": "fs", "source": "// CASE_FILE_CONTENT"}],
+                runtime_commands={"node": [str(node)], "franken-node": [str(native)]},
+                timing_budget_ms=5000,
+            )
+            self.assertFalse(report["passed"])
+            case = report["cases"][0]
+            observations = case["observations"]
+            self.assertEqual(observations["node"]["stdout"], observations["franken-node"]["stdout"])
+            self.assertEqual(observations["node"]["side_effects"]["fs_created"], ["result.txt"])
+            self.assertEqual(observations["franken-node"]["side_effects"]["fs_created"], ["result.txt"])
+            self.assertIn("side-effect mismatch", case["reason"])
+
+    def test_live_equal_timeouts_cannot_be_agreement(self):
+        observations = {
+            runtime: clv._execute_one_runtime_fixture(
+                runtime, [sys.executable], "import time; time.sleep(2)", timeout_secs=0.03
+            )
+            for runtime in ("node", "bun", "franken-node")
+        }
+        self.assertTrue(all(row["timed_out"] for row in observations.values()))
+        self.assertEqual({row["exit_code"] for row in observations.values()}, {124})
+        result = clv.classify_lockstep_case("timeouts", "timers", observations)
+        self.assertFalse(result["passed"])
+        self.assertIn("incomplete execution", result["reason"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX special-file observation required")
+    def test_live_filesystem_observation_error_is_not_empty_agreement(self):
+        observations = {
+            runtime: clv._execute_one_runtime_fixture(
+                runtime, [sys.executable], "import os; os.mkfifo('fifo'); print('same')"
+            )
+            for runtime in ("node", "franken-node")
+        }
+        self.assertTrue(all(row["exit_code"] == 0 for row in observations.values()))
+        self.assertTrue(all("unsupported filesystem entry" in row["execution_error"] for row in observations.values()))
+        self.assertFalse(clv.classify_lockstep_case("observation-error", "fs", observations)["passed"])
 
     def test_live_e2e_covers_all_five_fixture_classes_and_all_lifecycle_events(self):
         with tempfile.TemporaryDirectory() as tmp:
