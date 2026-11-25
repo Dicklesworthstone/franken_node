@@ -10,7 +10,10 @@
 //! evidence against independent authorities and an explicit freshness policy.
 //! Neither establishes registry admission, source-graph completeness, execution,
 //! enforcement, or that the supplied revocation list is the newest available.
-//! The graph commitment is authenticated, not rederived by this SDK.
+//! Capsule-only verification authenticates the graph commitment without rehashing
+//! its preimage. The optional graph-report APIs independently rehash that witness
+//! and bind its observations to the capsule; parser/resolver semantics are still
+//! not reconstructed.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, SecondsFormat, Timelike, Utc};
@@ -22,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 
 use crate::incident_bundle::{decode_evidence_json, native_capture::module_capsule};
-pub use module_capsule::SourceCapsuleSummary;
+pub use module_capsule::{
+    MAX_SOURCE_GRAPH_REPORT_BYTES, SourceCapsuleSummary, SourceGraphCommitment,
+};
 
 /// Raw manifest and raw artifact bounds match installed registry admission.
 pub const MAX_PUBLISHER_SOURCE_BYTES: usize = 5 * 1024 * 1024;
@@ -79,6 +84,7 @@ pub enum PublisherSourceError {
     ArtifactHashMismatch,
     RuntimeAuthorityInvalid,
     CapsuleInvalid,
+    GraphReportInvalid,
     RevocationSignatureInvalid,
     RevocationListInvalid,
     RevocationFreshnessPolicyInvalid,
@@ -101,6 +107,9 @@ impl std::fmt::Display for PublisherSourceError {
             Self::ArtifactHashMismatch => "source artifact differs from the signed content hash",
             Self::RuntimeAuthorityInvalid => "invalid signed publisher runtime authority",
             Self::CapsuleInvalid => "invalid publisher source capsule",
+            Self::GraphReportInvalid => {
+                "source graph report does not match the authenticated capsule commitment"
+            }
             Self::RevocationSignatureInvalid => {
                 "revocation list signature does not verify under the trusted revocation authority"
             }
@@ -256,6 +265,10 @@ pub struct VerifiedPublisherSource {
     pub signer_public_key_hex: String,
     pub runtime_authority: Option<PublisherRuntimeAuthority>,
     pub capsule: SourceCapsuleSummary,
+    /// Present only when an independent report witness was supplied and checked.
+    /// This authenticates its hash preimage, not parser/resolver correctness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_report: Option<SourceGraphCommitment>,
 }
 
 /// Release identity selected from the caller's trusted configuration, never
@@ -272,7 +285,7 @@ pub struct PublisherSourceExpectedIdentity {
     /// Raw SHA-256 of source-capsule bytes, not the transport hash or the
     /// domain-separated `capsule_digest`.
     pub source_artifact_sha256: Option<String>,
-    /// Authenticated graph commitment; `graph_hash_recomputed` remains false.
+    /// Authenticated graph commitment. Capsule-only inspection does not recompute it.
     pub graph_input_hash: Option<String>,
 }
 
@@ -731,7 +744,52 @@ pub fn verify_publisher_source(
         signer_public_key_hex: hex::encode(trusted_publisher.as_bytes()),
         runtime_authority,
         capsule,
+        graph_report: None,
     })
+}
+
+/// Authenticate publisher source and independently rehash its v2/v3 graph report.
+/// The witness is the graph object emitted by the product, without a CLI outer
+/// envelope. Its input hash, options, modules and observations must match the
+/// authenticated capsule. No graph semantics or runtime execution are inferred.
+pub fn verify_publisher_source_with_graph_report(
+    manifest_bytes: &[u8],
+    signature: &[u8; 64],
+    capsule_bytes: &[u8],
+    trusted_publisher: &VerifyingKey,
+    graph_report_bytes: &[u8],
+) -> Result<VerifiedPublisherSource> {
+    if graph_report_bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(PublisherSourceError::InputTooLarge);
+    }
+    let mut source =
+        verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
+    source.graph_report = Some(
+        module_capsule::inspect_graph_report(capsule_bytes, graph_report_bytes)
+            .map_err(|_| PublisherSourceError::GraphReportInvalid)?,
+    );
+    Ok(source)
+}
+
+fn attach_graph_report(
+    source: &mut VerifiedPublisherSource,
+    verified_transport: &[u8],
+    graph_report_bytes: &[u8],
+) -> Result<()> {
+    // The whole transport has already passed its format-specific verifier.
+    // Decode this retained component rather than reopening any source path.
+    let value = decode_evidence_json(verified_transport)
+        .map_err(|_| PublisherSourceError::InputJsonInvalid)?;
+    let encoded = value
+        .get("capsule_base64")
+        .and_then(Value::as_str)
+        .ok_or(PublisherSourceError::InputInvalid)?;
+    let capsule_bytes = decode_component(encoded, MAX_PUBLISHER_SOURCE_BYTES)?;
+    source.graph_report = Some(
+        module_capsule::inspect_graph_report(&capsule_bytes, graph_report_bytes)
+            .map_err(|_| PublisherSourceError::GraphReportInvalid)?,
+    );
+    Ok(())
 }
 
 /// Authenticate source bytes and require the exact caller-selected release.
@@ -811,6 +869,29 @@ pub fn verify_publisher_source_input_with_expected_identity(
     expected.validate()?;
     let source = verify_publisher_source_input(input_bytes, signature, trusted_publisher)?;
     expected.require_match(&source)?;
+    Ok(source)
+}
+
+/// Authenticate a portable source transport and verify a separate graph witness.
+/// Optional expected identities come from caller policy, never from the witness.
+pub fn verify_publisher_source_input_with_graph_report(
+    input_bytes: &[u8],
+    signature: &[u8; 64],
+    trusted_publisher: &VerifyingKey,
+    graph_report_bytes: &[u8],
+    expected: Option<&PublisherSourceExpectedIdentity>,
+) -> IdentityResult<VerifiedPublisherSource> {
+    if let Some(expected) = expected {
+        expected.validate()?;
+    }
+    if graph_report_bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(PublisherSourceError::InputTooLarge.into());
+    }
+    let mut source = verify_publisher_source_input(input_bytes, signature, trusted_publisher)?;
+    if let Some(expected) = expected {
+        expected.require_match(&source)?;
+    }
+    attach_graph_report(&mut source, input_bytes, graph_report_bytes)?;
     Ok(source)
 }
 
@@ -992,6 +1073,32 @@ pub fn verify_publisher_source_trust_input_with_expected_identity(
     let verified =
         verify_publisher_source_trust_input(input_bytes, signature, trusted_publisher, anchors)?;
     expected.require_match(&verified.source)?;
+    Ok(verified)
+}
+
+/// Verify independent revocation/provenance policy, optional release identity,
+/// and a separate graph commitment witness. A graph report cannot replace a
+/// publisher signature, fresh revocation evidence or an independently held pin.
+pub fn verify_publisher_source_trust_input_with_graph_report(
+    input_bytes: &[u8],
+    signature: &[u8; 64],
+    trusted_publisher: &VerifyingKey,
+    anchors: &PublisherTrustAnchors<'_>,
+    graph_report_bytes: &[u8],
+    expected: Option<&PublisherSourceExpectedIdentity>,
+) -> IdentityResult<VerifiedPublisherSourceWithTrust> {
+    if let Some(expected) = expected {
+        expected.validate()?;
+    }
+    if graph_report_bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(PublisherSourceError::InputTooLarge.into());
+    }
+    let mut verified =
+        verify_publisher_source_trust_input(input_bytes, signature, trusted_publisher, anchors)?;
+    if let Some(expected) = expected {
+        expected.require_match(&verified.source)?;
+    }
+    attach_graph_report(&mut verified.source, input_bytes, graph_report_bytes)?;
     Ok(verified)
 }
 
@@ -1476,6 +1583,171 @@ mod tests {
             )),
             graph_input_hash: Some(metadata["graph_hash"].as_str().unwrap().into()),
         }
+    }
+
+    fn graph_witness_source() -> (Vec<u8>, Vec<u8>, [u8; 64]) {
+        let capsule_bytes = STANDARD
+            .decode(
+                producer_vectors()[2]["module_sources"]["capsule_base64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest(&capsule_bytes, true)).unwrap();
+        let signature = key().sign(&manifest_bytes).to_bytes();
+        (capsule_bytes, manifest_bytes, signature)
+    }
+
+    const GRAPH_WITNESS: &[u8] =
+        include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json");
+
+    #[test]
+    fn graph_witness_api_authenticates_and_pins_the_complete_source_commitment() {
+        let (capsule_bytes, manifest_bytes, signature) = graph_witness_source();
+        let expected = expected_release(&manifest_bytes, &capsule_bytes);
+        let verified = verify_publisher_source_with_graph_report(
+            &manifest_bytes,
+            &signature,
+            &capsule_bytes,
+            &key().verifying_key(),
+            GRAPH_WITNESS,
+        )
+        .unwrap();
+        let commitment = verified.graph_report.as_ref().unwrap();
+        assert!(commitment.graph_hash_recomputed);
+        assert!(!commitment.graph_semantics_reconstructed);
+        assert!(!verified.capsule.graph_hash_recomputed);
+        assert_eq!(
+            commitment.graph_input_hash,
+            verified.capsule.graph_input_hash
+        );
+        assert_eq!(commitment.capsule_digest, verified.capsule_digest);
+        assert_eq!(commitment.module_count, 3);
+        assert_eq!(
+            verify_publisher_source_input_with_graph_report(
+                &transport(&manifest_bytes, &capsule_bytes),
+                &signature,
+                &key().verifying_key(),
+                GRAPH_WITNESS,
+                Some(&expected),
+            )
+            .unwrap(),
+            verified,
+        );
+        let capsule_only = verify_signed(&manifest_bytes, &capsule_bytes).unwrap();
+        assert!(capsule_only.graph_report.is_none());
+        assert!(
+            serde_json::to_value(&capsule_only)
+                .unwrap()
+                .get("graph_report")
+                .is_none()
+        );
+
+        let mut wrong_release = expected;
+        wrong_release.manifest_sha256 = format!("sha256:{}", "0".repeat(64));
+        assert_eq!(
+            verify_publisher_source_input_with_graph_report(
+                &transport(&manifest_bytes, &capsule_bytes),
+                &signature,
+                &key().verifying_key(),
+                GRAPH_WITNESS,
+                Some(&wrong_release),
+            ),
+            Err(PublisherSourceIdentityError::ExpectedIdentityMismatch),
+        );
+        assert_eq!(
+            verify_publisher_source_with_graph_report(
+                &manifest_bytes,
+                &[0_u8; 64],
+                &capsule_bytes,
+                &key().verifying_key(),
+                GRAPH_WITNESS,
+            ),
+            Err(PublisherSourceError::SignatureInvalid),
+        );
+        assert_eq!(
+            verify_publisher_source_with_graph_report(
+                &manifest_bytes,
+                &signature,
+                &capsule_bytes,
+                &key().verifying_key(),
+                b"{}",
+            ),
+            Err(PublisherSourceError::GraphReportInvalid),
+        );
+    }
+
+    #[test]
+    fn graph_witness_trust_api_preserves_revocation_provenance_and_identity_policy() {
+        let (capsule_bytes, manifest_bytes, signature) = graph_witness_source();
+        let (mut packet, _) = trust_transport();
+        packet["manifest_base64"] = json!(STANDARD.encode(&manifest_bytes));
+        packet["capsule_base64"] = json!(STANDARD.encode(&capsule_bytes));
+        let revocation_signer = SigningKey::from_bytes(&[0x71; 32]);
+        let revocation_authority = revocation_signer.verifying_key();
+        let provenance_authority = SigningKey::from_bytes(&[0x72; 32]).verifying_key();
+        let mut anchors = PublisherTrustAnchors {
+            revocation_authority: &revocation_authority,
+            provenance_authority: Some(&provenance_authority),
+            evaluation_time: evaluation_time(),
+            max_revocation_age_secs: 3600,
+        };
+        let expected = expected_release(&manifest_bytes, &capsule_bytes);
+        // The old valid provenance statement binds a different source release.
+        assert_eq!(
+            verify_publisher_source_trust_input_with_graph_report(
+                &serde_json::to_vec(&packet).unwrap(),
+                &signature,
+                &key().verifying_key(),
+                &anchors,
+                GRAPH_WITNESS,
+                Some(&expected),
+            ),
+            Err(PublisherSourceIdentityError::Source(
+                PublisherSourceError::ProvenanceChainInvalid,
+            )),
+        );
+        packet.as_object_mut().unwrap().remove("provenance");
+        anchors.provenance_authority = None;
+        let verified = verify_publisher_source_trust_input_with_graph_report(
+            &serde_json::to_vec(&packet).unwrap(),
+            &signature,
+            &key().verifying_key(),
+            &anchors,
+            GRAPH_WITNESS,
+            Some(&expected),
+        )
+        .unwrap();
+        assert!(verified.source.graph_report.unwrap().graph_hash_recomputed);
+        assert!(verified.provenance_chain_sha256.is_none());
+
+        let revocations = serde_json::to_vec(&PublisherRevocationList {
+            schema_version: PUBLISHER_REVOCATION_LIST_SCHEMA.into(),
+            issued_at: "2026-11-11T00:00:00Z".into(),
+            revoked_publisher_ids: vec!["publisher-1".into()],
+            revoked_signer_key_ids: vec![],
+            revoked_package_versions: vec![],
+        })
+        .unwrap();
+        packet["revocation_list_base64"] = json!(STANDARD.encode(&revocations));
+        packet["revocation_signature_hex"] = json!(hex::encode(
+            revocation_signer
+                .sign(&revocation_list_signing_payload(&revocations))
+                .to_bytes(),
+        ));
+        assert_eq!(
+            verify_publisher_source_trust_input_with_graph_report(
+                &serde_json::to_vec(&packet).unwrap(),
+                &signature,
+                &key().verifying_key(),
+                &anchors,
+                GRAPH_WITNESS,
+                Some(&expected),
+            ),
+            Err(PublisherSourceIdentityError::Source(
+                PublisherSourceError::PublisherRevoked
+            )),
+        );
     }
 
     #[test]

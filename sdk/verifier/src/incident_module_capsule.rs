@@ -4,9 +4,11 @@
 //! publisher's signed registration manifest. This
 //! reader checks the capsule and all its recorded bytes without opening paths,
 //! extracting files, importing product code or evaluating JavaScript. The graph
-//! hash is bound to the signed capture, but is NOT recomputed here: completeness,
-//! resolution semantics, selected conditions and native replay still require the
-//! product's graph reconstruction and execution checks. Metadata-only file
+//! hash is bound to the signed capture. Capsule-only inspection does not
+//! recompute it. An explicit source-graph report witness additionally permits
+//! independent commitment recomputation and source-observation binding, without
+//! claiming parser/resolver semantic reconstruction or native execution.
+//! Metadata-only file
 //! observations bind recorded existence, without admitting file contents or
 //! supplying source bytes to execution.
 
@@ -45,7 +47,7 @@ struct Header {
     inputs: Vec<Input>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
     symlink_policy: SymlinkPolicy,
@@ -155,6 +157,517 @@ pub struct SourceCapsuleSummary {
     pub additional_condition_count: usize,
 }
 
+/// Maximum JSON witness size, matching the producer's graph evidence budget.
+pub const MAX_SOURCE_GRAPH_REPORT_BYTES: usize = 32 * 1024 * 1024;
+
+/// An independently rehashed graph report bound to authenticated capsule bytes.
+/// This checks the committed report and its recorded inputs, not whether the
+/// producer's parser and resolver derived the correct dependency graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceGraphCommitment {
+    pub schema_version: &'static str,
+    pub graph_input_hash: String,
+    pub graph_hash_recomputed: bool,
+    pub graph_semantics_reconstructed: bool,
+    pub capsule_digest: String,
+    pub report_sha256: String,
+    pub observation_count: usize,
+    pub module_count: usize,
+    pub resolution_target_count: usize,
+    pub edge_count: usize,
+    pub diagnostic_count: usize,
+    /// The authenticated producer claim; it is not an independent conclusion.
+    pub declared_fully_resolved: bool,
+}
+
+// Independent wire types. Their declaration order is the v3 hash preimage;
+// importing the product's resolver or serialization would erase that boundary.
+// No Debug implementations: reports can contain private paths and specifiers.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphModuleId {
+    path: String,
+    url_suffix: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphSite {
+    start_byte: usize,
+    end_byte: usize,
+    line: usize,
+    column: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphLanguage {
+    Javascript,
+    Typescript,
+    Tsx,
+    Declaration,
+    Json,
+    Unsupported,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphModule {
+    id: GraphModuleId,
+    content_sha256: String,
+    content_bytes: usize,
+    format_hint: String,
+    source_language: GraphLanguage,
+    analyzed: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphResolutionTarget {
+    id: GraphModuleId,
+    content_sha256: String,
+    content_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphLoadKind {
+    StaticImport,
+    Reexport,
+    Require,
+    RequireResolve,
+    ImportMetaResolve,
+    DynamicImport,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphEdgeState {
+    Resolved,
+    Unresolved,
+    RuntimeRequired,
+    NonLiteral,
+    TypeOnly,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum GraphSearch {
+    Paths { paths: Vec<String> },
+    LookupPaths,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum GraphUrl {
+    File { id: GraphModuleId },
+    Absolute { url: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphError {
+    code: String,
+    detail: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphMapKind {
+    Exports,
+    Imports,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphTargetKind {
+    PackageRelative,
+    ExternalPackage,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum GraphBranchStep {
+    Condition(String),
+    ArrayIndex(usize),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphSelection {
+    target: String,
+    target_kind: GraphTargetKind,
+    matched_key: String,
+    branch: Vec<GraphBranchStep>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphMapping {
+    manifest: String,
+    input_hash: String,
+    kind: GraphMapKind,
+    request: String,
+    selection: GraphSelection,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphEdge {
+    importer: GraphModuleId,
+    site: GraphSite,
+    kind: GraphLoadKind,
+    deferred_or_conditional: bool,
+    specifier: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    dirname_request: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commonjs_search: Option<GraphSearch>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    import_attributes: BTreeMap<String, String>,
+    conditions: Vec<String>,
+    state: GraphEdgeState,
+    target: Option<GraphModuleId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_url: Option<GraphUrl>,
+    error: Option<GraphError>,
+    mappings: Vec<GraphMapping>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphDiagnostic {
+    module: GraphModuleId,
+    site: Option<GraphSite>,
+    code: String,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphProbeKind {
+    Missing,
+    Directory,
+    File,
+    FileMetadata,
+    Symlink,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphProbe {
+    path: String,
+    kind: GraphProbeKind,
+    bytes: Option<usize>,
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link_target: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphReport {
+    schema_version: String,
+    scope: String,
+    entrypoint: String,
+    resolved_entrypoint: GraphModuleId,
+    options: Options,
+    modules: Vec<GraphModule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resolution_targets: Vec<GraphResolutionTarget>,
+    edges: Vec<GraphEdge>,
+    diagnostics: Vec<GraphDiagnostic>,
+    probes: Vec<GraphProbe>,
+    input_hash: String,
+    fully_resolved: bool,
+    runtime_completeness: bool,
+    type_resolution_performed: bool,
+    execution_performed: bool,
+    release_certification: bool,
+}
+
+fn graph_id_valid(id: &GraphModuleId) -> bool {
+    valid_path(&id.path)
+        && id.url_suffix.len() <= MAX_PATH_BYTES
+        && (id.url_suffix.is_empty() || id.url_suffix.starts_with(['?', '#']))
+        && !id.url_suffix.chars().any(char::is_control)
+}
+
+fn graph_site_valid(site: &GraphSite, source_bytes: usize) -> bool {
+    site.start_byte <= site.end_byte
+        && site.end_byte <= source_bytes
+        && site.line > 0
+        && site.column > 0
+}
+
+/// Rehash a separately supplied v2/v3 graph witness only after source authority
+/// has been established by the caller. Object order/whitespace are transport
+/// details; arrays, nulls, omitted optional fields and every schema field are
+/// preserved and checked. No pathname from either input is opened.
+pub(crate) fn inspect_graph_report(
+    capsule_bytes: &[u8],
+    report_bytes: &[u8],
+) -> Result<SourceGraphCommitment> {
+    if report_bytes.is_empty() || report_bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(invalid(FIELD, "source graph report exceeds its byte bound"));
+    }
+    let frame = verify_frame(capsule_bytes, None, None)?;
+    let value = crate::incident_bundle::decode_evidence_json(report_bytes)
+        .map_err(|_| invalid(FIELD, "source graph report is not unambiguous JSON"))?;
+    let mut report: GraphReport = serde_json::from_value(value.clone())
+        .map_err(|_| invalid(FIELD, "invalid source graph report schema"))?;
+    if serde_json::to_value(&report)
+        .map_err(|_| invalid(FIELD, "cannot encode source graph report"))?
+        != value
+    {
+        return Err(invalid(
+            FIELD,
+            "source graph report has noncanonical fields",
+        ));
+    }
+    let hash_domain: &[u8] = match report.schema_version.as_str() {
+        "franken-node/module-source-graph/v2" => b"franken-node/module-source-graph/v2\0",
+        "franken-node/module-source-graph/v3" => b"franken-node/module-source-graph/v3\0",
+        _ => return Err(invalid(FIELD, "unsupported source graph report schema")),
+    };
+    if report.scope != "static-and-literal-module-requests"
+        || report.entrypoint != frame.header.entrypoint
+        || report.options != frame.header.options
+        || report.input_hash != frame.header.graph_hash
+        || report.runtime_completeness
+        || report.type_resolution_performed
+        || report.execution_performed
+        || report.release_certification
+        || report.modules.is_empty()
+        || report.modules.len() > 256
+        || report.resolution_targets.len() > 256
+        || report.edges.len() > 4096
+        || report.diagnostics.len() > 4096
+        || report.probes.len() != frame.header.inputs.len()
+    {
+        return Err(invalid(
+            FIELD,
+            "source graph report disagrees with its capsule or scope",
+        ));
+    }
+
+    let mut files = BTreeMap::new();
+    let mut offset = 0;
+    for (probe, input) in report.probes.iter().zip(&frame.header.inputs) {
+        let path = if input.path.is_empty() {
+            "."
+        } else {
+            &input.path
+        };
+        let matches = probe.path == path
+            && match (&probe.kind, &input.content) {
+                (GraphProbeKind::Missing, Content::Missing)
+                | (GraphProbeKind::Directory, Content::Directory)
+                | (GraphProbeKind::FileMetadata, Content::FileMetadata) => {
+                    probe.bytes.is_none() && probe.sha256.is_none() && probe.link_target.is_none()
+                }
+                (GraphProbeKind::File, Content::File { bytes, sha256 }) => {
+                    let end = offset + bytes;
+                    files.insert(
+                        input.path.as_str(),
+                        (&frame.payload[offset..end], sha256.as_str()),
+                    );
+                    offset = end;
+                    probe.bytes == Some(*bytes)
+                        && probe.sha256.as_deref() == Some(sha256.as_str())
+                        && probe.link_target.is_none()
+                }
+                (GraphProbeKind::Symlink, Content::Symlink { target, sha256 }) => {
+                    probe.bytes == Some(target.len())
+                        && probe.sha256.as_deref() == Some(sha256.as_str())
+                        && probe.link_target.as_deref() == Some(target.as_str())
+                }
+                _ => false,
+            };
+        if !matches {
+            return Err(invalid(
+                FIELD,
+                "source graph probes differ from captured observations",
+            ));
+        }
+    }
+    let source_matches = |id: &GraphModuleId, bytes: usize, digest: &str| {
+        graph_id_valid(id)
+            && files
+                .get(id.path.as_str())
+                .is_some_and(|(source, sha256)| source.len() == bytes && *sha256 == digest)
+    };
+    if report
+        .modules
+        .windows(2)
+        .any(|pair| pair[0].id >= pair[1].id)
+        || report
+            .resolution_targets
+            .windows(2)
+            .any(|pair| pair[0].id >= pair[1].id)
+        || report
+            .modules
+            .iter()
+            .any(|module| !source_matches(&module.id, module.content_bytes, &module.content_sha256))
+        || report
+            .resolution_targets
+            .iter()
+            .any(|target| !source_matches(&target.id, target.content_bytes, &target.content_sha256))
+    {
+        return Err(invalid(
+            FIELD,
+            "source graph modules differ from captured source bytes",
+        ));
+    }
+    let modules: BTreeMap<_, _> = report
+        .modules
+        .iter()
+        .map(|module| (&module.id, module.content_bytes))
+        .collect();
+    let (entry, _) = frame.entry_file()?;
+    if report.resolved_entrypoint.path != entry
+        || !report.resolved_entrypoint.url_suffix.is_empty()
+        || !modules.contains_key(&report.resolved_entrypoint)
+    {
+        return Err(invalid(
+            FIELD,
+            "source graph resolved entry differs from the capsule",
+        ));
+    }
+    let mut manifest_hashes = BTreeMap::new();
+    for edge in &report.edges {
+        let source_bytes = modules
+            .get(&edge.importer)
+            .ok_or_else(|| invalid(FIELD, "source graph edge has an unrecorded importer"))?;
+        if !graph_site_valid(&edge.site, *source_bytes)
+            || edge.target.as_ref().is_some_and(|target| {
+                !modules.contains_key(target)
+                    && !report
+                        .resolution_targets
+                        .iter()
+                        .any(|entry| &entry.id == target)
+            })
+        {
+            return Err(invalid(
+                FIELD,
+                "source graph edge refers outside its source inventory",
+            ));
+        }
+        for mapping in &edge.mappings {
+            if mapping.manifest.rsplit('/').next() != Some("package.json") {
+                return Err(invalid(
+                    FIELD,
+                    "source graph mapping has no captured manifest",
+                ));
+            }
+            // Package-map reports retain logical lookup routes. A workspace
+            // symlink can make that route differ from the physical observation.
+            let expected = match manifest_hashes.entry(mapping.manifest.as_str()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let (_, source) = frame.file_at(&mapping.manifest)?;
+                    let mut hash = Sha256::new();
+                    hash.update(b"franken-node/package-map-input/v1\0");
+                    hash.update((source.len() as u64).to_le_bytes());
+                    hash.update(source);
+                    entry.insert(format!("sha256:{}", hex::encode(hash.finalize())))
+                }
+            };
+            if mapping.input_hash.as_str() != expected.as_str() {
+                return Err(invalid(
+                    FIELD,
+                    "source graph mapping differs from captured manifest bytes",
+                ));
+            }
+        }
+    }
+    for diagnostic in &report.diagnostics {
+        let source_bytes = modules
+            .get(&diagnostic.module)
+            .ok_or_else(|| invalid(FIELD, "source graph diagnostic has an unrecorded module"))?;
+        if diagnostic
+            .site
+            .as_ref()
+            .is_some_and(|site| !graph_site_valid(site, *source_bytes))
+        {
+            return Err(invalid(
+                FIELD,
+                "source graph diagnostic lies outside captured source",
+            ));
+        }
+    }
+    if report.edges.windows(2).any(|pair| {
+        (&pair[0].importer, pair[0].site.start_byte) > (&pair[1].importer, pair[1].site.start_byte)
+    }) || report.diagnostics.windows(2).any(|pair| {
+        (
+            &pair[0].module,
+            pair[0].site.as_ref().map(|site| site.start_byte),
+            &pair[0].code,
+        ) > (
+            &pair[1].module,
+            pair[1].site.as_ref().map(|site| site.start_byte),
+            &pair[1].code,
+        )
+    }) || report.fully_resolved
+        != (report.diagnostics.is_empty()
+            && report.edges.iter().all(|edge| {
+                matches!(
+                    edge.state,
+                    GraphEdgeState::Resolved | GraphEdgeState::TypeOnly
+                )
+            }))
+    {
+        return Err(invalid(
+            FIELD,
+            "source graph report ordering or resolution claim is inconsistent",
+        ));
+    }
+    let expected = std::mem::take(&mut report.input_hash);
+    let canonical = serde_json::to_vec(&report)
+        .map_err(|_| invalid(FIELD, "cannot encode source graph hash preimage"))?;
+    if canonical.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(invalid(
+            FIELD,
+            "source graph hash preimage exceeds its byte bound",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(hash_domain);
+    hash.update(&canonical);
+    if !ct_str_eq(
+        &expected,
+        &format!("sha256:{}", hex::encode(hash.finalize())),
+    ) {
+        return Err(invalid(
+            FIELD,
+            "source graph report does not match its authenticated commitment",
+        ));
+    }
+    Ok(SourceGraphCommitment {
+        schema_version: "franken-verifier/source-graph-commitment/v1",
+        graph_input_hash: expected,
+        graph_hash_recomputed: true,
+        graph_semantics_reconstructed: false,
+        capsule_digest: capsule_digest(capsule_bytes),
+        report_sha256: hex::encode(Sha256::digest(report_bytes)),
+        observation_count: report.probes.len(),
+        module_count: report.modules.len(),
+        resolution_target_count: report.resolution_targets.len(),
+        edge_count: report.edges.len(),
+        diagnostic_count: report.diagnostics.len(),
+        declared_fully_resolved: report.fully_resolved,
+    })
+}
+
 /// The caller authenticates and bounds these bytes before inspection. Incident
 /// verification additionally supplies its separately captured graph commitment.
 pub(crate) fn inspect_authenticated(bytes: &[u8]) -> Result<SourceCapsuleSummary> {
@@ -184,6 +697,13 @@ impl VerifiedFrame<'_> {
     /// Resolve only recorded physical observations, never the auditor's host.
     /// Expand a link before interpreting '..' in its target or remaining path.
     fn entry_file(&self) -> Result<(&str, &[u8])> {
+        self.file_at(&self.header.entrypoint)
+    }
+
+    fn file_at(&self, path: &str) -> Result<(&str, &[u8])> {
+        if !valid_path(path) {
+            return Err(invalid(FIELD, "source capsule file path is not canonical"));
+        }
         let mut entries = BTreeMap::new();
         let mut offset = 0_usize;
         for input in &self.header.inputs {
@@ -203,7 +723,7 @@ impl VerifiedFrame<'_> {
             entries.insert(input.path.as_str(), (&input.content, source));
         }
 
-        let mut pending: VecDeque<_> = self.header.entrypoint.split('/').collect();
+        let mut pending: VecDeque<_> = path.split('/').collect();
         let mut resolved = Vec::new();
         let mut links = 0_usize;
         while let Some(component) = pending.pop_front() {
@@ -635,6 +1155,218 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!(fixture["execution_performed"], false);
         fixture["vectors"].as_array().unwrap().clone()
+    }
+
+    // Exact preimage recovered from the retained producer vector (commit
+    // 642ab64fd638b21f493deb2cea12c9c605257853). Its fixed v2 hash is checked
+    // independently; this is not a newly executed native workload.
+    fn producer_graph_report() -> Vec<u8> {
+        include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json").to_vec()
+    }
+
+    fn graph_capsule() -> Vec<u8> {
+        decode_sources(&producer_vectors()[2]["module_sources"])
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn graph_commitment_recomputes_retained_producer_preimage_without_semantic_claims() {
+        let capsule = graph_capsule();
+        for report in [
+            producer_graph_report(),
+            serde_json::to_vec(&serde_json::from_slice::<Value>(&producer_graph_report()).unwrap())
+                .unwrap(),
+        ] {
+            let facts = inspect_graph_report(&capsule, &report).unwrap();
+            assert_eq!(
+                facts.graph_input_hash,
+                "sha256:5a28658ea038488586da68c54c902aefcb2fa9bff17fc80fcca87abc801dedea"
+            );
+            assert!(facts.graph_hash_recomputed);
+            assert!(!facts.graph_semantics_reconstructed);
+            assert_eq!(facts.module_count, 3);
+            assert_eq!(facts.edge_count, 2);
+            assert_eq!(facts.observation_count, 10);
+            assert_eq!(facts.capsule_digest, capsule_digest(&capsule));
+            assert!(
+                !inspect_authenticated(&capsule)
+                    .unwrap()
+                    .graph_hash_recomputed
+            );
+            let output = serde_json::to_string(&facts).unwrap();
+            assert!(!output.contains("packages/workspace"));
+            assert!(!format!("{facts:?}").contains("import 'workspace'"));
+        }
+    }
+
+    #[test]
+    fn graph_commitment_rejects_tampered_reordered_and_foreign_witnesses() {
+        let original: Value = serde_json::from_slice(&producer_graph_report()).unwrap();
+        let capsule = graph_capsule();
+        let changes = [
+            (
+                "/schema_version",
+                json!("franken-node/module-source-graph/v3"),
+            ),
+            ("/input_hash", json!(format!("sha256:{}", "1".repeat(64)))),
+            ("/entrypoint", json!("packages/workspace/main.mjs")),
+            ("/options/symlink_policy", json!("reject")),
+            ("/options/conditions", json!(["node", "import"])),
+            ("/modules/0/content_sha256", json!("0".repeat(64))),
+            ("/modules/0/content_bytes", json!(18)),
+            ("/edges/0/specifier", json!("forged-request")),
+            ("/edges/0/site/end_byte", json!(20)),
+            (
+                "/edges/0/mappings/0/selection/target",
+                json!("./forged.mjs"),
+            ),
+            (
+                "/edges/0/mappings/0/input_hash",
+                json!(format!("sha256:{}", "0".repeat(64))),
+            ),
+            ("/probes/3/link_target", json!("../foreign")),
+            ("/fully_resolved", json!(false)),
+            ("/runtime_completeness", json!(true)),
+            ("/type_resolution_performed", json!(true)),
+            ("/execution_performed", json!(true)),
+            ("/release_certification", json!(true)),
+        ];
+        for (pointer, replacement) in changes {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err(),
+                "{pointer}"
+            );
+        }
+        for field in ["modules", "edges", "probes"] {
+            let mut changed = original.clone();
+            changed[field].as_array_mut().unwrap().reverse();
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err()
+            );
+        }
+        let foreign = decode_sources(&producer_vectors()[0]["module_sources"])
+            .unwrap()
+            .0;
+        assert!(inspect_graph_report(&foreign, &producer_graph_report()).is_err());
+    }
+
+    fn reseal_graph_witness(value: &Value) -> (Vec<u8>, Vec<u8>) {
+        let mut report: GraphReport = serde_json::from_value(value.clone()).unwrap();
+        report.input_hash.clear();
+        let mut hash = Sha256::new();
+        hash.update(b"franken-node/module-source-graph/v2\0");
+        hash.update(serde_json::to_vec(&report).unwrap());
+        report.input_hash = format!("sha256:{}", hex::encode(hash.finalize()));
+        let (mut header, payload) = decode(&producer_vectors()[2]["module_sources"]);
+        header.graph_hash.clone_from(&report.input_hash);
+        (
+            frame(&serde_json::to_vec(&header).unwrap(), &payload),
+            serde_json::to_vec(&report).unwrap(),
+        )
+    }
+
+    #[test]
+    fn graph_commitment_binds_complete_observations_even_when_report_hash_is_resealed() {
+        let original: Value = serde_json::from_slice(&producer_graph_report()).unwrap();
+        for (pointer, replacement) in [
+            ("/probes/0/path", json!("wrong-root")),
+            ("/probes/1/sha256", json!("1".repeat(64))),
+            ("/probes/1/bytes", json!(18)),
+            ("/probes/3/link_target", json!("../foreign")),
+            ("/probes/4/kind", json!("directory")),
+            ("/modules/1/content_sha256", json!("2".repeat(64))),
+            (
+                "/resolved_entrypoint/path",
+                json!("packages/workspace/main.mjs"),
+            ),
+            ("/edges/0/importer/path", json!("unrecorded.mjs")),
+            ("/edges/0/target/path", json!("unrecorded.mjs")),
+            ("/edges/0/site/start_byte", json!(20)),
+            (
+                "/edges/0/mappings/0/input_hash",
+                json!(format!("sha256:{}", "3".repeat(64))),
+            ),
+            (
+                "/edges/0/mappings/0/manifest",
+                json!("unrecorded/package.json"),
+            ),
+            ("/fully_resolved", json!(false)),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            let (capsule, report) = reseal_graph_witness(&changed);
+            assert!(
+                inspect_graph_report(&capsule, &report).is_err(),
+                "{pointer}"
+            );
+        }
+        for remove in [true, false] {
+            let mut changed = original.clone();
+            let probes = changed["probes"].as_array_mut().unwrap();
+            if remove {
+                probes.pop();
+            } else {
+                probes.push(json!({"path":"z","kind":"missing","bytes":null,"sha256":null}));
+            }
+            let (capsule, report) = reseal_graph_witness(&changed);
+            assert!(inspect_graph_report(&capsule, &report).is_err());
+        }
+    }
+
+    #[test]
+    fn graph_commitment_rejects_ambiguous_unknown_and_noncanonical_fields() {
+        let original: Value = serde_json::from_slice(&producer_graph_report()).unwrap();
+        let capsule = graph_capsule();
+        let duplicate = producer_graph_report();
+        let duplicate = String::from_utf8(duplicate).unwrap().replacen(
+            "\"scope\":",
+            "\"scope\":\"ignored\", \"scope\":",
+            1,
+        );
+        assert!(inspect_graph_report(&capsule, duplicate.as_bytes()).is_err());
+        for pointer in ["", "/options", "/modules/0", "/edges/0", "/probes/0"] {
+            let mut changed = original.clone();
+            changed
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unrecognized".into(), json!(true));
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err()
+            );
+        }
+        for (pointer, field, value) in [
+            ("", "resolution_targets", json!([])),
+            ("/edges/0", "dirname_request", json!(false)),
+            ("/edges/0", "resolved_url", Value::Null),
+            ("/edges/0", "commonjs_search", Value::Null),
+            ("/edges/0", "import_attributes", json!({})),
+        ] {
+            let mut changed = original.clone();
+            changed
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), value);
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err()
+            );
+        }
+        let mut missing = original;
+        missing["probes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sha256");
+        assert!(inspect_graph_report(&capsule, &serde_json::to_vec(&missing).unwrap()).is_err());
+        assert!(
+            inspect_graph_report(&capsule, &vec![b' '; MAX_SOURCE_GRAPH_REPORT_BYTES + 1]).is_err()
+        );
+        assert!(inspect_graph_report(&capsule, b"").is_err());
     }
 
     pub(crate) fn producer_sources() -> Value {

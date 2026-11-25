@@ -1,0 +1,185 @@
+{
+  "schema_version": "franken-node/module-source-graph/v2",
+  "scope": "static-and-literal-module-requests",
+  "entrypoint": "app.mjs",
+  "resolved_entrypoint": {
+    "path": "app.mjs",
+    "url_suffix": ""
+  },
+  "options": {
+    "symlink_policy": "contained",
+    "conditions": null
+  },
+  "modules": [
+    {
+      "id": {
+        "path": "app.mjs",
+        "url_suffix": ""
+      },
+      "content_sha256": "502ce6735979d645cf2e6f64b629593df00a21a1b9d899cd5fdc6bb23ddf601e",
+      "content_bytes": 19,
+      "format_hint": "module",
+      "source_language": "javascript",
+      "analyzed": true
+    },
+    {
+      "id": {
+        "path": "packages/workspace/dep.mjs",
+        "url_suffix": ""
+      },
+      "content_sha256": "56332e0a55734bc2b73df56a2df8635ed5c5b24b6d7a456b41de7cab9a2f3814",
+      "content_bytes": 17,
+      "format_hint": "module",
+      "source_language": "javascript",
+      "analyzed": true
+    },
+    {
+      "id": {
+        "path": "packages/workspace/main.mjs",
+        "url_suffix": ""
+      },
+      "content_sha256": "eb682bb36869d49b16159c59958851e4fb4ed98455412ba63d2981d6a8ab4586",
+      "content_bytes": 19,
+      "format_hint": "module",
+      "source_language": "javascript",
+      "analyzed": true
+    }
+  ],
+  "edges": [
+    {
+      "importer": {
+        "path": "app.mjs",
+        "url_suffix": ""
+      },
+      "site": {
+        "start_byte": 0,
+        "end_byte": 19,
+        "line": 1,
+        "column": 1
+      },
+      "kind": "static_import",
+      "deferred_or_conditional": false,
+      "specifier": "workspace",
+      "conditions": [
+        "node",
+        "import"
+      ],
+      "state": "resolved",
+      "target": {
+        "path": "packages/workspace/main.mjs",
+        "url_suffix": ""
+      },
+      "error": null,
+      "mappings": [
+        {
+          "manifest": "node_modules/workspace/package.json",
+          "input_hash": "sha256:d19767efcd9e61fb9995027ee866d61d3987b988286fb94d4a540a92f88ed164",
+          "kind": "exports",
+          "request": ".",
+          "selection": {
+            "target": "./main.mjs",
+            "target_kind": "package_relative",
+            "matched_key": ".",
+            "branch": []
+          }
+        }
+      ]
+    },
+    {
+      "importer": {
+        "path": "packages/workspace/main.mjs",
+        "url_suffix": ""
+      },
+      "site": {
+        "start_byte": 0,
+        "end_byte": 19,
+        "line": 1,
+        "column": 1
+      },
+      "kind": "static_import",
+      "deferred_or_conditional": false,
+      "specifier": "./dep.mjs",
+      "conditions": [
+        "node",
+        "import"
+      ],
+      "state": "resolved",
+      "target": {
+        "path": "packages/workspace/dep.mjs",
+        "url_suffix": ""
+      },
+      "error": null,
+      "mappings": []
+    }
+  ],
+  "diagnostics": [],
+  "probes": [
+    {
+      "path": ".",
+      "kind": "directory",
+      "bytes": null,
+      "sha256": null
+    },
+    {
+      "path": "app.mjs",
+      "kind": "file",
+      "bytes": 19,
+      "sha256": "502ce6735979d645cf2e6f64b629593df00a21a1b9d899cd5fdc6bb23ddf601e"
+    },
+    {
+      "path": "node_modules",
+      "kind": "directory",
+      "bytes": null,
+      "sha256": null
+    },
+    {
+      "path": "node_modules/workspace",
+      "kind": "symlink",
+      "bytes": 21,
+      "sha256": "acc33312863e983325af043cf8ca1540e42048df011318d04ab0adaf83e64408",
+      "link_target": "../packages/workspace"
+    },
+    {
+      "path": "package.json",
+      "kind": "missing",
+      "bytes": null,
+      "sha256": null
+    },
+    {
+      "path": "packages",
+      "kind": "directory",
+      "bytes": null,
+      "sha256": null
+    },
+    {
+      "path": "packages/workspace",
+      "kind": "directory",
+      "bytes": null,
+      "sha256": null
+    },
+    {
+      "path": "packages/workspace/dep.mjs",
+      "kind": "file",
+      "bytes": 17,
+      "sha256": "56332e0a55734bc2b73df56a2df8635ed5c5b24b6d7a456b41de7cab9a2f3814"
+    },
+    {
+      "path": "packages/workspace/main.mjs",
+      "kind": "file",
+      "bytes": 19,
+      "sha256": "eb682bb36869d49b16159c59958851e4fb4ed98455412ba63d2981d6a8ab4586"
+    },
+    {
+      "path": "packages/workspace/package.json",
+      "kind": "file",
+      "bytes": 24,
+      "sha256": "24975ff00eebfb184311975b4818af7b8e22895bb3423cbfe6a5486ebf933ce6"
+    }
+  ],
+  "input_hash": "sha256:5a28658ea038488586da68c54c902aefcb2fa9bff17fc80fcca87abc801dedea",
+  "fully_resolved": true,
+  "runtime_completeness": false,
+  "type_resolution_performed": false,
+  "execution_performed": false,
+  "release_certification": false
+}

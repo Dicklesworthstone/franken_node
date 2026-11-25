@@ -3776,6 +3776,146 @@ mod tests {
             .collect()
     }
 
+    // The standalone graph tool includes this source without the product's SDK
+    // dev-dependency. Run the cross-crate wire contract in the default engine lane.
+    #[cfg(feature = "engine")]
+    #[test]
+    fn verifier_sdk_recomputes_current_graph_commitments_from_real_capture_reports() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use frankenengine_verifier_sdk::publisher_source::{
+            PublisherSourceError, verify_publisher_source_with_graph_report,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            r#"{"exports":{"development":{"import":"./import.mjs","require":"./require.cjs"},"default":"./default.mjs"}}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/dual/import.mjs",
+            "export default 1;",
+        );
+        put(
+            root.path(),
+            "node_modules/dual/require.cjs",
+            "module.exports=2;",
+        );
+        put(
+            root.path(),
+            "node_modules/dual/default.mjs",
+            "export default 3;",
+        );
+        put(root.path(), "value.json", r#"{"answer":42}"#);
+        put(root.path(), "opaque.asset", "location-only bytes");
+        put(
+            root.path(),
+            "bridge.cjs",
+            "require('dual'); require(__dirname + '/value.json'); require.resolve('./opaque.asset');",
+        );
+        let complete = r#"
+import 'dual';
+import './bridge.cjs';
+import data from './value.json' with { type: 'json' };
+import.meta.resolve('./absent.asset?mode=1#part');
+import.meta.resolve('https://example.com/a');
+"#;
+        let incomplete = "import './missing.mjs'; import(loadAtRuntime);";
+        for (source, fully_resolved) in [(complete, true), (incomplete, false)] {
+            put(root.path(), "app.mjs", source);
+            let captured = capture(
+                root.path(),
+                "app.mjs",
+                GraphOptions {
+                    additional_conditions: vec!["development".into()],
+                    ..GraphOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                captured.report().fully_resolved,
+                fully_resolved,
+                "{:?}",
+                captured.report(),
+            );
+            if fully_resolved {
+                assert!(!captured.report().resolution_targets.is_empty());
+                assert!(
+                    captured
+                        .report()
+                        .edges
+                        .iter()
+                        .any(|edge| { !edge.import_attributes.is_empty() })
+                );
+                assert!(
+                    captured
+                        .report()
+                        .edges
+                        .iter()
+                        .any(|edge| edge.dirname_request)
+                );
+                assert!(captured.report().edges.iter().any(|edge| {
+                    matches!(edge.resolved_url, Some(ResolutionUrl::Absolute { .. }))
+                }));
+                assert!(
+                    captured.report().edges.iter().any(|edge| {
+                        matches!(edge.resolved_url, Some(ResolutionUrl::File { .. }))
+                    })
+                );
+            }
+            let encoded = capsule::encode(&captured).unwrap();
+            let report = serde_json::to_vec(captured.report()).unwrap();
+            let signer = SigningKey::from_bytes(&[0x6d; 32]);
+            let manifest = serde_json::to_vec(&serde_json::json!({
+                "schema_version": "franken-node/extension-registration-manifest/v1",
+                "name": "graph-commitment-conformance",
+                "publisher_id": "conformance-publisher",
+                "initial_version": {
+                    "version": "1.0.0",
+                    "parent_version": null,
+                    "content_hash": hex::encode(Sha256::digest(encoded.bytes())),
+                    "registered_at": "2026-11-10T00:00:00Z",
+                    "compatible_with": [],
+                },
+                "tags": [],
+            }))
+            .unwrap();
+            let signature = signer.sign(&manifest).to_bytes();
+            // Verification consumes only the retained wire objects.
+            put(root.path(), "app.mjs", "changed after capture");
+            let verified = verify_publisher_source_with_graph_report(
+                &manifest,
+                &signature,
+                encoded.bytes(),
+                &signer.verifying_key(),
+                &report,
+            )
+            .unwrap();
+            let witness = verified.graph_report.unwrap();
+            assert!(witness.graph_hash_recomputed);
+            assert!(!witness.graph_semantics_reconstructed);
+            assert!(!verified.capsule.graph_hash_recomputed);
+            assert_eq!(witness.graph_input_hash, captured.report().input_hash);
+            assert_eq!(witness.declared_fully_resolved, fully_resolved);
+            assert_eq!(witness.module_count, captured.report().modules.len());
+            assert_eq!(witness.edge_count, captured.report().edges.len());
+            assert_eq!(witness.observation_count, captured.report().probes.len());
+            let mut tampered = serde_json::to_value(captured.report()).unwrap();
+            tampered["edges"][0]["specifier"] = serde_json::json!("forged-request");
+            assert_eq!(
+                verify_publisher_source_with_graph_report(
+                    &manifest,
+                    &signature,
+                    encoded.bytes(),
+                    &signer.verifying_key(),
+                    &serde_json::to_vec(&tampered).unwrap(),
+                ),
+                Err(PublisherSourceError::GraphReportInvalid),
+            );
+        }
+    }
+
     #[test]
     fn captured_package_identities_survive_live_metadata_mutation_and_source_retirement() {
         let directory = tempfile::tempdir().unwrap();

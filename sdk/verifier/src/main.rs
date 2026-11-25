@@ -32,11 +32,13 @@ use frankenengine_verifier_sdk::native_session::{
     verify_native_session_forensics_with_expected_identity,
 };
 use frankenengine_verifier_sdk::publisher_source::{
-    MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
-    PublisherSourceExpectedIdentity, PublisherSourceIdentityError, PublisherTrustAnchors,
-    verify_publisher_source_input, verify_publisher_source_input_with_expected_identity,
-    verify_publisher_source_trust_input,
+    MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
+    MAX_SOURCE_GRAPH_REPORT_BYTES, PublisherSourceError, PublisherSourceExpectedIdentity,
+    PublisherSourceIdentityError, PublisherTrustAnchors, verify_publisher_source_input,
+    verify_publisher_source_input_with_expected_identity,
+    verify_publisher_source_input_with_graph_report, verify_publisher_source_trust_input,
     verify_publisher_source_trust_input_with_expected_identity,
+    verify_publisher_source_trust_input_with_graph_report,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -61,7 +63,7 @@ const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] [--graph-report FILE] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -82,8 +84,61 @@ struct Request {
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
     expected_native_identity: Option<NativeSessionExpectedIdentity>,
+    graph_report: Option<GraphReportRequest>,
     session_policy: Option<SessionPolicyRequest>,
     fleet_policy: Option<FleetPolicyRequest>,
+}
+
+// Witnesses contain private module paths and dependency metadata.
+struct GraphReportRequest {
+    bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for GraphReportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GraphReportRequest { bytes: [redacted] }")
+    }
+}
+
+fn read_graph_report(path: &str) -> Result<GraphReportRequest, Failure> {
+    let io_error = || {
+        failure(
+            "GRAPH_REPORT_IO",
+            "cannot read the source graph report file",
+        )
+    };
+    if !std::fs::metadata(path).map_err(|_| io_error())?.is_file() {
+        return Err(io_error());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| io_error())?;
+    let metadata = file.metadata().map_err(|_| io_error())?;
+    if !metadata.is_file() {
+        return Err(io_error());
+    }
+    if metadata.len() > MAX_SOURCE_GRAPH_REPORT_BYTES as u64 {
+        return Err(failure(
+            "INPUT_TOO_LARGE",
+            "source graph report exceeds its byte bound",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE_GRAPH_REPORT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| io_error())?;
+    if bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(failure(
+            "INPUT_TOO_LARGE",
+            "source graph report exceeds its byte bound",
+        ));
+    }
+    Ok(GraphReportRequest { bytes })
 }
 
 #[derive(Debug)]
@@ -175,7 +230,8 @@ fn read_session_policy(path: &str) -> Result<SessionPolicyRequest, Failure> {
     file.take(MAX_SIGNED_SESSION_POLICY_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| io_error())?;
-    let policy = parse_signed_session_policy(&bytes).map_err(|error| session_policy_failure(&error))?;
+    let policy =
+        parse_signed_session_policy(&bytes).map_err(|error| session_policy_failure(&error))?;
     Ok(SessionPolicyRequest {
         policy,
         input_sha256: hex::encode(Sha256::digest(&bytes)),
@@ -268,6 +324,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let (mut expected_native_nonce, mut expected_admission) = (None, None);
     let mut fleet_policy_path = None;
     let mut session_policy_path = None;
+    let mut graph_report_path = None;
     let (mut coordinator_id, mut coordinator_key) = (None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
@@ -290,6 +347,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-admission-sha256" => &mut expected_admission,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
             "--trusted-session-policy" => &mut session_policy_path,
+            "--graph-report" => &mut graph_report_path,
             "--trusted-coordinator-id" => &mut coordinator_id,
             "--trusted-coordinator-key-hex" => &mut coordinator_key,
             _ => return Err(usage()),
@@ -320,6 +378,14 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "fleet-epoch-commit"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
+    }
+    if graph_report_path.is_some()
+        && !matches!(
+            format.as_str(),
+            "publisher-source" | "publisher-source-trust"
+        )
+    {
+        return Err(usage());
     }
     if session_policy_path.is_some() && format != "signed-session" {
         return Err(usage());
@@ -383,7 +449,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (Some(key), None)
     };
     let run_anchor = match (format.as_str(), run_anchor) {
-        ("incident-bundle" | "counterfactual-incident" | "counterfactual-promotion", Some(text)) => {
+        (
+            "incident-bundle" | "counterfactual-incident" | "counterfactual-promotion",
+            Some(text),
+        ) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -400,7 +469,11 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, None) => None,
     };
     let runtime_anchor = match (format.as_str(), run_anchor.as_ref(), runtime_anchor) {
-        ("incident-bundle" | "counterfactual-incident" | "counterfactual-promotion", Some(_), Some(text)) => {
+        (
+            "incident-bundle" | "counterfactual-incident" | "counterfactual-promotion",
+            Some(_),
+            Some(text),
+        ) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -587,6 +660,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             ));
         }
     };
+    let graph_report = graph_report_path
+        .as_deref()
+        .map(read_graph_report)
+        .transpose()?;
     Ok(Request {
         format,
         anchor,
@@ -597,6 +674,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         publisher_trust,
         expected_publisher_identity,
         expected_native_identity,
+        graph_report,
         session_policy,
         fleet_policy,
     })
@@ -652,6 +730,7 @@ fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
         | PublisherSourceError::RevocationSignatureInvalid
         | PublisherSourceError::ProvenanceSignatureInvalid => "SIGNATURE_INVALID",
         PublisherSourceError::ArtifactHashMismatch => "INTEGRITY_MISMATCH",
+        PublisherSourceError::GraphReportInvalid => "GRAPH_REPORT_INVALID",
         PublisherSourceError::PublisherRevoked => "PUBLISHER_REVOKED",
         PublisherSourceError::RevocationFreshnessPolicyInvalid => {
             "REVOCATION_FRESHNESS_POLICY_INVALID"
@@ -727,12 +806,22 @@ struct CounterfactualPromotionInputEnvelope {
 
 fn decode_counterfactual_evidence(encoded: &str, max_bytes: usize) -> Result<Vec<u8>, Failure> {
     if encoded.is_empty() || encoded.len() > max_bytes.div_ceil(3) * 4 {
-        return Err(failure("EVIDENCE_INVALID", "invalid counterfactual evidence encoding"));
+        return Err(failure(
+            "EVIDENCE_INVALID",
+            "invalid counterfactual evidence encoding",
+        ));
     }
-    let bytes = STANDARD.decode(encoded)
-        .map_err(|_| failure("EVIDENCE_INVALID", "invalid counterfactual evidence encoding"))?;
+    let bytes = STANDARD.decode(encoded).map_err(|_| {
+        failure(
+            "EVIDENCE_INVALID",
+            "invalid counterfactual evidence encoding",
+        )
+    })?;
     if bytes.len() > max_bytes || STANDARD.encode(&bytes) != encoded {
-        return Err(failure("EVIDENCE_INVALID", "noncanonical counterfactual evidence encoding"));
+        return Err(failure(
+            "EVIDENCE_INVALID",
+            "noncanonical counterfactual evidence encoding",
+        ));
     }
     Ok(bytes)
 }
@@ -950,18 +1039,30 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 evaluation_time: policy.evaluation_time,
                 max_revocation_age_secs: policy.max_revocation_age_secs,
             };
-            let verified = match request.expected_publisher_identity.as_ref() {
-                Some(expected) => verify_publisher_source_trust_input_with_expected_identity(
+            let verified = if let Some(report) = &request.graph_report {
+                verify_publisher_source_trust_input_with_graph_report(
                     bytes,
                     signature,
                     trusted_key,
                     &anchors,
-                    expected,
+                    &report.bytes,
+                    request.expected_publisher_identity.as_ref(),
                 )
-                .map_err(|error| publisher_identity_failure(&error)),
-                None => {
-                    verify_publisher_source_trust_input(bytes, signature, trusted_key, &anchors)
-                        .map_err(|error| publisher_source_failure(&error))
+                .map_err(|error| publisher_identity_failure(&error))
+            } else {
+                match request.expected_publisher_identity.as_ref() {
+                    Some(expected) => verify_publisher_source_trust_input_with_expected_identity(
+                        bytes,
+                        signature,
+                        trusted_key,
+                        &anchors,
+                        expected,
+                    )
+                    .map_err(|error| publisher_identity_failure(&error)),
+                    None => {
+                        verify_publisher_source_trust_input(bytes, signature, trusted_key, &anchors)
+                            .map_err(|error| publisher_source_failure(&error))
+                    }
                 }
             }?;
             Ok(json!({"scope": "authenticated_publisher_source_trust", "facts": verified}))
@@ -971,16 +1072,27 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 .signature
                 .as_ref()
                 .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
-            let verified = match request.expected_publisher_identity.as_ref() {
-                Some(expected) => verify_publisher_source_input_with_expected_identity(
+            let verified = if let Some(report) = &request.graph_report {
+                verify_publisher_source_input_with_graph_report(
                     bytes,
                     signature,
                     trusted_key,
-                    expected,
+                    &report.bytes,
+                    request.expected_publisher_identity.as_ref(),
                 )
-                .map_err(|error| publisher_identity_failure(&error)),
-                None => verify_publisher_source_input(bytes, signature, trusted_key)
-                    .map_err(|error| publisher_source_failure(&error)),
+                .map_err(|error| publisher_identity_failure(&error))
+            } else {
+                match request.expected_publisher_identity.as_ref() {
+                    Some(expected) => verify_publisher_source_input_with_expected_identity(
+                        bytes,
+                        signature,
+                        trusted_key,
+                        expected,
+                    )
+                    .map_err(|error| publisher_identity_failure(&error)),
+                    None => verify_publisher_source_input(bytes, signature, trusted_key)
+                        .map_err(|error| publisher_source_failure(&error)),
+                }
             }?;
             // These are authenticated publisher statements and captured bytes.
             // The independent reader does not reconstruct the native graph,
@@ -1167,19 +1279,31 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             }))
         }
         "counterfactual-promotion" => {
-            let policy = request.counterfactual_incident.as_ref()
+            let policy = request
+                .counterfactual_incident
+                .as_ref()
                 .ok_or_else(|| failure("USAGE", USAGE))?;
             let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
             let envelope: CounterfactualPromotionInputEnvelope = serde_json::from_value(value)
-                .map_err(|_| failure("EVIDENCE_INVALID", "invalid counterfactual promotion transport"))?;
+                .map_err(|_| {
+                    failure(
+                        "EVIDENCE_INVALID",
+                        "invalid counterfactual promotion transport",
+                    )
+                })?;
             if envelope.schema_version != COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA {
-                return Err(failure("EVIDENCE_INVALID", "unsupported counterfactual promotion transport"));
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "unsupported counterfactual promotion transport",
+                ));
             }
             let baseline_bytes = decode_counterfactual_evidence(
-                &envelope.baseline_bundle_base64, MAX_INCIDENT_BUNDLE_BYTES,
+                &envelope.baseline_bundle_base64,
+                MAX_INCIDENT_BUNDLE_BYTES,
             )?;
             let report_bytes = decode_counterfactual_evidence(
-                &envelope.report_base64, MAX_COUNTERFACTUAL_INCIDENT_OUTPUT_BYTES,
+                &envelope.report_base64,
+                MAX_COUNTERFACTUAL_INCIDENT_OUTPUT_BYTES,
             )?;
             let verified = verify_counterfactual_promotion(
                 &baseline_bytes,
@@ -1191,9 +1315,14 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     trusted_run_signer: request.run_anchor.as_ref(),
                     trusted_product_root: request.runtime_anchor.as_ref(),
                 },
-            ).map_err(|error| failure(error.code(), "counterfactual promotion verification failed"))?;
+            )
+            .map_err(|error| {
+                failure(error.code(), "counterfactual promotion verification failed")
+            })?;
             let baseline = incident_verification_response(
-                verified.baseline, verified.run_origin, verified.runtime_origin,
+                verified.baseline,
+                verified.run_origin,
+                verified.runtime_origin,
             );
             Ok(json!({
                 "scope": "authenticated_counterfactual_promotion",
@@ -1485,8 +1614,14 @@ mod tests {
             }
         }
         let mut wrong_format = args("capsule", ANCHOR);
-        wrong_format.extend(["--trusted-session-policy".into(), "never-opened.json".into()]);
-        assert_eq!(run(&wrong_format, &mut Unreadable).unwrap_err().code, "USAGE");
+        wrong_format.extend([
+            "--trusted-session-policy".into(),
+            "never-opened.json".into(),
+        ]);
+        assert_eq!(
+            run(&wrong_format, &mut Unreadable).unwrap_err().code,
+            "USAGE"
+        );
 
         let mut duplicate = args("signed-session", ANCHOR);
         duplicate.extend([
@@ -1541,6 +1676,7 @@ mod tests {
             publisher_trust: None,
             expected_publisher_identity: None,
             expected_native_identity: None,
+            graph_report: None,
             session_policy: None,
             fleet_policy: Some(FleetPolicyRequest {
                 policy: parse_fleet_quiescence_policy(&policy_bytes).unwrap(),
@@ -1959,6 +2095,13 @@ mod tests {
     }
 
     fn publisher_source_cli_fixture(with_authority: bool) -> (Vec<String>, Vec<u8>, Vec<u8>) {
+        publisher_source_cli_fixture_vector(with_authority, 0)
+    }
+
+    fn publisher_source_cli_fixture_vector(
+        with_authority: bool,
+        vector: usize,
+    ) -> (Vec<String>, Vec<u8>, Vec<u8>) {
         use base64::Engine as _;
         use ed25519_dalek::{Signer, SigningKey};
 
@@ -1971,7 +2114,7 @@ mod tests {
         .unwrap();
         let capsule = base64::engine::general_purpose::STANDARD
             .decode(
-                vectors["vectors"][0]["module_sources"]["capsule_base64"]
+                vectors["vectors"][vector]["module_sources"]["capsule_base64"]
                     .as_str()
                     .unwrap(),
             )
@@ -2024,6 +2167,97 @@ mod tests {
         }))
         .unwrap();
         (arguments, input, capsule)
+    }
+
+    #[test]
+    fn publisher_source_cli_consumes_graph_witness_and_reports_its_limited_scope() {
+        let (mut arguments, input, _) = publisher_source_cli_fixture_vector(true, 2);
+        arguments.extend([
+            "--graph-report".into(),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/module_source_graph_workspace_report.json"
+            )
+            .into(),
+        ]);
+        let verified = run(&arguments, &mut input.as_slice()).unwrap();
+        assert_eq!(verified["scope"], "authenticated_publisher_source_content");
+        assert_eq!(verified["facts"]["capsule"]["graph_hash_recomputed"], false);
+        assert_eq!(
+            verified["facts"]["graph_report"]["graph_hash_recomputed"],
+            true
+        );
+        assert_eq!(
+            verified["facts"]["graph_report"]["graph_semantics_reconstructed"],
+            false
+        );
+        assert_eq!(verified["facts"]["graph_report"]["module_count"], 3);
+        assert_eq!(
+            verified["facts"]["graph_report"]["graph_input_hash"],
+            verified["facts"]["capsule"]["graph_input_hash"],
+        );
+        let summary = verified.to_string();
+        for private in ["packages/workspace", "node_modules", "import 'workspace'"] {
+            assert!(!summary.contains(private));
+        }
+        let parsed = super::arguments(&arguments).unwrap();
+        let debug = format!("{:?}", parsed.graph_report.as_ref().unwrap());
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("workspace"));
+
+        // Another correctly signed capsule cannot borrow this graph witness.
+        let (mut foreign_arguments, foreign_input, _) = publisher_source_cli_fixture(true);
+        foreign_arguments.extend(arguments[arguments.len() - 2..].iter().cloned());
+        assert_eq!(
+            run(&foreign_arguments, &mut foreign_input.as_slice())
+                .unwrap_err()
+                .code,
+            "GRAPH_REPORT_INVALID",
+        );
+    }
+
+    #[test]
+    fn graph_report_cli_rejects_inapplicable_ambiguous_and_nonfile_options() {
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid graph arguments must not consume candidate evidence");
+            }
+        }
+        let mut wrong_format = args("capsule", ANCHOR);
+        wrong_format.extend(["--graph-report".into(), "never-opened.json".into()]);
+        assert_eq!(
+            run(&wrong_format, &mut Unreadable).unwrap_err().code,
+            "USAGE"
+        );
+
+        let (mut duplicate, _, _) = publisher_source_cli_fixture(true);
+        duplicate.extend([
+            "--graph-report".into(),
+            "first-never-opened.json".into(),
+            "--graph-report".into(),
+            "second-never-opened.json".into(),
+        ]);
+        assert_eq!(run(&duplicate, &mut Unreadable).unwrap_err().code, "USAGE");
+
+        assert_eq!(
+            read_graph_report(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
+                .unwrap_err()
+                .code,
+            "GRAPH_REPORT_IO",
+        );
+        let (mut malformed, input, _) = publisher_source_cli_fixture_vector(true, 2);
+        malformed.extend([
+            "--graph-report".into(),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/module_source_capsules.json"
+            )
+            .into(),
+        ]);
+        let error = run(&malformed, &mut input.as_slice()).unwrap_err();
+        assert_eq!(error.code, "GRAPH_REPORT_INVALID");
+        assert!(!error.message.contains("node_modules"));
     }
 
     #[test]
@@ -2464,10 +2698,7 @@ mod tests {
         assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
         request.extend(["--trusted-incident-key-hex".into(), ANCHOR.into()]);
         assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
-        request.extend([
-            "--expected-baseline-integrity-hash".into(),
-            "a".repeat(64),
-        ]);
+        request.extend(["--expected-baseline-integrity-hash".into(), "a".repeat(64)]);
         let parsed = arguments(&request).unwrap();
         assert!(parsed.signature.is_none());
         assert!(parsed.counterfactual_incident.is_some());
@@ -2479,8 +2710,10 @@ mod tests {
         runtime_without_run.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
         assert_eq!(arguments(&runtime_without_run).unwrap_err().code, "USAGE");
         request.extend([
-            "--trusted-run-key-hex".into(), ANCHOR.into(),
-            "--trusted-runtime-key-hex".into(), ANCHOR.into(),
+            "--trusted-run-key-hex".into(),
+            ANCHOR.into(),
+            "--trusted-runtime-key-hex".into(),
+            ANCHOR.into(),
         ]);
         let parsed = arguments(&request).unwrap();
         assert!(parsed.run_anchor.is_some());
@@ -2491,8 +2724,10 @@ mod tests {
     fn counterfactual_promotion_transport_rejects_ambiguous_or_noncanonical_inputs() {
         let mut request = args("counterfactual-promotion", ANCHOR);
         request.extend([
-            "--trusted-incident-key-hex".into(), ANCHOR.into(),
-            "--expected-baseline-integrity-hash".into(), "a".repeat(64),
+            "--trusted-incident-key-hex".into(),
+            ANCHOR.into(),
+            "--expected-baseline-integrity-hash".into(),
+            "a".repeat(64),
         ]);
         let transport = json!({
             "schema_version": COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA,
@@ -2500,7 +2735,10 @@ mod tests {
             "report_base64": STANDARD.encode(b"{}"),
         });
         for (field, value) in [
-            ("schema_version", json!("franken-verifier/counterfactual-promotion-input/v99")),
+            (
+                "schema_version",
+                json!("franken-verifier/counterfactual-promotion-input/v99"),
+            ),
             ("report_base64", json!("")),
             ("report_base64", json!("e30=\n")),
             ("baseline_bundle_base64", json!("not-base64")),
