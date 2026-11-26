@@ -7157,6 +7157,12 @@ type NativeEngineDispatchSuccess = (
     Option<crate::ops::native_replay::NativeReplayCapture>,
 );
 
+#[cfg(feature = "engine")]
+type OptionalDeferredFinalizer =
+    Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>;
+#[cfg(not(feature = "engine"))]
+type OptionalDeferredFinalizer = Option<()>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeExecutionMode {
     Explicit,
@@ -10347,6 +10353,76 @@ impl EngineDispatcher {
         trusted_extension_ids: &[String],
         now_secs: u64,
     ) -> Result<RunDispatchReport> {
+        let (report, finalizer) = self.dispatch_run_with_deferred_finalizer(
+            app_path,
+            config,
+            policy_mode,
+            trusted_extension_ids,
+            now_secs,
+        )?;
+        #[cfg(feature = "engine")]
+        if let Some(finalizer) = finalizer {
+            finalizer.finalize();
+        }
+        #[cfg(not(feature = "engine"))]
+        let _ = finalizer;
+        Ok(report)
+    }
+
+    /// Execute one profile-governed run, optionally returning a deferred
+    /// native-session inventory finalizer so the CLI caller can coalesce
+    /// `session-outcomes/` + `native-sessions.db` flushes with project-level
+    /// receipt, run-ledger, and evidence-ledger persistence.
+    #[cfg(feature = "engine")]
+    pub fn dispatch_run_with_deferred_finalizer(
+        &self,
+        app_path: &Path,
+        config: &Config,
+        policy_mode: &str,
+        trusted_extension_ids: &[String],
+        now_secs: u64,
+    ) -> Result<(
+        RunDispatchReport,
+        Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>,
+    )> {
+        self.dispatch_run_inner(
+            app_path,
+            config,
+            policy_mode,
+            trusted_extension_ids,
+            now_secs,
+            true,
+        )
+    }
+
+    #[cfg(not(feature = "engine"))]
+    pub fn dispatch_run_with_deferred_finalizer(
+        &self,
+        app_path: &Path,
+        config: &Config,
+        policy_mode: &str,
+        trusted_extension_ids: &[String],
+        now_secs: u64,
+    ) -> Result<(RunDispatchReport, Option<()>)> {
+        self.dispatch_run_inner(
+            app_path,
+            config,
+            policy_mode,
+            trusted_extension_ids,
+            now_secs,
+            false,
+        )
+    }
+
+    fn dispatch_run_inner(
+        &self,
+        app_path: &Path,
+        config: &Config,
+        policy_mode: &str,
+        trusted_extension_ids: &[String],
+        now_secs: u64,
+        defer_finalizer: bool,
+    ) -> Result<(RunDispatchReport, OptionalDeferredFinalizer)> {
         // Validate policy_mode to prevent command injection via unsanitized input
         const VALID_POLICY_MODES: &[&str] = &["strict", "balanced", "legacy-risky"];
         if !VALID_POLICY_MODES.contains(&policy_mode) {
@@ -10743,27 +10819,30 @@ impl EngineDispatcher {
                 )
             })?;
 
-            return Ok(Self::build_dispatch_report(DispatchReportInputs {
-                runtime: &plan.runtime,
-                runtime_path: &plan.runtime_path,
-                target: &plan.target,
-                working_dir: &plan.working_dir,
-                used_fallback_runtime: plan.mode
-                    == RuntimeExecutionMode::FallbackFrankenEngineUnavailable,
-                started_at,
-                duration: started.elapsed(),
-                output,
-                telemetry: None,
-                // External-runtime fallback path does not produce host effects.
-                host_effect_ledger: None,
-                #[cfg(feature = "engine")]
-                runtime_evidence_identity_capture: None,
-                #[cfg(feature = "engine")]
-                runtime_evidence_identity_capture_path: None,
-                engine_decision: None,
-                invocation_settings: None,
-                native_replay: None,
-            }));
+            return Ok((
+                Self::build_dispatch_report(DispatchReportInputs {
+                    runtime: &plan.runtime,
+                    runtime_path: &plan.runtime_path,
+                    target: &plan.target,
+                    working_dir: &plan.working_dir,
+                    used_fallback_runtime: plan.mode
+                        == RuntimeExecutionMode::FallbackFrankenEngineUnavailable,
+                    started_at,
+                    duration: started.elapsed(),
+                    output,
+                    telemetry: None,
+                    // External-runtime fallback path does not produce host effects.
+                    host_effect_ledger: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture_path: None,
+                    engine_decision: None,
+                    invocation_settings: None,
+                    native_replay: None,
+                }),
+                None,
+            ));
         }
 
         let DispatchPlan::FrankenEngine { binary: bin_path } = dispatch_plan else {
@@ -10859,15 +10938,7 @@ impl EngineDispatcher {
         };
 
         #[cfg(feature = "engine")]
-        let (
-            output,
-            report,
-            host_effect_ledger,
-            runtime_evidence_identity_capture,
-            runtime_evidence_identity_capture_path,
-            engine_decision,
-            native_replay,
-        ) = {
+        let (native_dispatch, deferred_finalizer) = {
             tracing::info!(
                 execution_mode = "native",
                 engine = "franken_engine",
@@ -10875,8 +10946,9 @@ impl EngineDispatcher {
                 policy_mode,
                 "Using native franken_engine execution instead of external process"
             );
+            let mut deferred_finalizer = None;
             let native_session_worker_path = self.resolve_native_session_worker_path()?;
-            Self::run_engine_native_with_error_handling(
+            let native_result = Self::run_engine_native_with_error_handling_and_finalizer(
                 app_path,
                 &project_paths,
                 &trust_requirements,
@@ -10889,6 +10961,11 @@ impl EngineDispatcher {
                 process_spawn_trust_key_hex.as_deref(),
                 &self.app_args,
                 self.capture_replay,
+                if defer_finalizer {
+                    Some(&mut deferred_finalizer)
+                } else {
+                    None
+                },
             )
             .map_err(|mut error| {
                 record_native_panic_for_run(
@@ -10914,8 +10991,19 @@ impl EngineDispatcher {
                     );
                 }
                 error
-            })
-        }?;
+            })?;
+            (native_result, deferred_finalizer)
+        };
+        #[cfg(feature = "engine")]
+        let (
+            output,
+            report,
+            host_effect_ledger,
+            runtime_evidence_identity_capture,
+            runtime_evidence_identity_capture_path,
+            engine_decision,
+            native_replay,
+        ) = native_dispatch;
         #[cfg(not(feature = "engine"))]
         let (output, report, host_effect_ledger, engine_decision, native_replay) = {
             if config.profile == Profile::Strict {
@@ -10930,6 +11018,11 @@ impl EngineDispatcher {
                 .map_err(|err| anyhow::anyhow!("{err}"))
                 .map(|(output, report)| (output, report, None::<HostEffectLedger>, None, None))
         }?;
+        #[cfg(not(feature = "engine"))]
+        let deferred_finalizer = {
+            let _ = defer_finalizer;
+            None
+        };
         if !report.drain_completed {
             eprintln!(
                 "Warning: telemetry drain did not complete within {}ms ({} events persisted, {} shed, {} dropped)",
@@ -10943,25 +11036,30 @@ impl EngineDispatcher {
         // Clean up temp directory explicitly before potential process exit
         drop(temp_dir);
 
-        Ok(Self::build_dispatch_report(DispatchReportInputs {
-            runtime: "franken_engine",
-            runtime_path: Path::new(&bin_path),
-            target: app_path,
-            working_dir: project_paths.project_root(),
-            used_fallback_runtime: false,
-            started_at,
-            duration: started.elapsed(),
-            output,
-            telemetry: Some(report),
-            host_effect_ledger,
-            #[cfg(feature = "engine")]
-            runtime_evidence_identity_capture: Some(runtime_evidence_identity_capture),
-            #[cfg(feature = "engine")]
-            runtime_evidence_identity_capture_path: Some(runtime_evidence_identity_capture_path),
-            engine_decision,
-            native_replay,
-            invocation_settings: None,
-        }))
+        Ok((
+            Self::build_dispatch_report(DispatchReportInputs {
+                runtime: "franken_engine",
+                runtime_path: Path::new(&bin_path),
+                target: app_path,
+                working_dir: project_paths.project_root(),
+                used_fallback_runtime: false,
+                started_at,
+                duration: started.elapsed(),
+                output,
+                telemetry: Some(report),
+                host_effect_ledger,
+                #[cfg(feature = "engine")]
+                runtime_evidence_identity_capture: Some(runtime_evidence_identity_capture),
+                #[cfg(feature = "engine")]
+                runtime_evidence_identity_capture_path: Some(
+                    runtime_evidence_identity_capture_path,
+                ),
+                engine_decision,
+                native_replay,
+                invocation_settings: None,
+            }),
+            deferred_finalizer,
+        ))
     }
 
     fn build_dispatch_report(inputs: DispatchReportInputs<'_>) -> RunDispatchReport {
@@ -11501,6 +11599,7 @@ impl EngineDispatcher {
     // The same independently-sourced supervision inputs as
     // `run_engine_native_with_timeout` below, minus the deadline.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn run_engine_native_with_error_handling(
         app_path: &Path,
         project_paths: &RunProjectPaths,
@@ -11515,6 +11614,43 @@ impl EngineDispatcher {
         app_args: &[String],
         capture_replay: bool,
     ) -> Result<NativeEngineDispatchSuccess> {
+        Self::run_engine_native_with_error_handling_and_finalizer(
+            app_path,
+            project_paths,
+            trust_requirements,
+            fleet_policy,
+            config,
+            policy_mode,
+            telemetry_socket_path,
+            native_session_worker_path,
+            process_spawn_admission,
+            process_spawn_trust_key_hex,
+            app_args,
+            capture_replay,
+            None,
+        )
+    }
+
+    #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    fn run_engine_native_with_error_handling_and_finalizer(
+        app_path: &Path,
+        project_paths: &RunProjectPaths,
+        trust_requirements: &RunTrustRequirements,
+        fleet_policy: Option<&ActiveFleetPolicy>,
+        config: &Config,
+        policy_mode: &str,
+        telemetry_socket_path: &Path,
+        native_session_worker_path: &Path,
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_spawn_trust_key_hex: Option<&str>,
+        app_args: &[String],
+        capture_replay: bool,
+        deferred_finalizer: Option<
+            &mut Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>,
+        >,
+    ) -> Result<NativeEngineDispatchSuccess> {
         use std::time::Duration;
 
         // Default to 5 minute timeout, but allow override via env var for testing
@@ -11524,7 +11660,7 @@ impl EngineDispatcher {
             .unwrap_or(crate::config::timeouts::ENGINE_DISPATCH_DEFAULT_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
 
-        Self::run_engine_native_with_timeout(
+        Self::run_engine_native_with_timeout_and_finalizer(
             app_path,
             project_paths,
             trust_requirements,
@@ -11538,12 +11674,50 @@ impl EngineDispatcher {
             app_args,
             capture_replay,
             timeout,
+            deferred_finalizer,
         )
     }
 
     /// Supervise one native execution with an explicit deadline. Keeping the
     /// duration as an argument makes timeout regressions deterministic without
     /// mutating process-wide environment state.
+    #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn run_engine_native_with_timeout(
+        app_path: &Path,
+        project_paths: &RunProjectPaths,
+        trust_requirements: &RunTrustRequirements,
+        fleet_policy: Option<&ActiveFleetPolicy>,
+        config: &Config,
+        policy_mode: &str,
+        telemetry_socket_path: &Path,
+        native_session_worker_path: &Path,
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_spawn_trust_key_hex: Option<&str>,
+        app_args: &[String],
+        capture_replay: bool,
+        timeout: std::time::Duration,
+    ) -> Result<NativeEngineDispatchSuccess> {
+        Self::run_engine_native_with_timeout_and_finalizer(
+            app_path,
+            project_paths,
+            trust_requirements,
+            fleet_policy,
+            config,
+            policy_mode,
+            telemetry_socket_path,
+            native_session_worker_path,
+            process_spawn_admission,
+            process_spawn_trust_key_hex,
+            app_args,
+            capture_replay,
+            timeout,
+            None,
+        )
+    }
+
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
     // Nine arguments, two over the lint's threshold. Every one is a distinct,
@@ -11560,7 +11734,7 @@ impl EngineDispatcher {
     // Surfaced 2026-07-28: this was introduced by a51b429fd (bd-muy9u) and could
     // not be seen until bd-3mj98 made the workspace compile again.
     #[allow(clippy::too_many_arguments)]
-    fn run_engine_native_with_timeout(
+    fn run_engine_native_with_timeout_and_finalizer(
         app_path: &Path,
         project_paths: &RunProjectPaths,
         trust_requirements: &RunTrustRequirements,
@@ -11574,6 +11748,9 @@ impl EngineDispatcher {
         app_args: &[String],
         capture_replay: bool,
         timeout: std::time::Duration,
+        deferred_finalizer: Option<
+            &mut Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>,
+        >,
     ) -> Result<NativeEngineDispatchSuccess> {
         use base64::Engine as _;
         use std::sync::mpsc;
@@ -13270,12 +13447,21 @@ impl EngineDispatcher {
                         "worker protocol",
                     ));
                 }
-                session_inventory.finish(
-                    NativeSessionOutcomeKind::Completed,
-                    NativeSessionEffectObservation::from_verified_ledger(
-                        host_effect_ledger.as_ref(),
-                    ),
+                let effect_observation = NativeSessionEffectObservation::from_verified_ledger(
+                    host_effect_ledger.as_ref(),
                 );
+                if let Some(slot) = deferred_finalizer {
+                    *slot = Some(
+                        crate::ops::native_session_inventory::DeferredNativeSessionFinalizer::new(
+                            session_inventory,
+                            NativeSessionOutcomeKind::Completed,
+                            effect_observation,
+                        ),
+                    );
+                } else {
+                    session_inventory
+                        .finish(NativeSessionOutcomeKind::Completed, effect_observation);
+                }
                 Ok((
                     Output {
                         status: exit_status_from_code(exit_code),
@@ -22969,7 +23155,11 @@ exec "$2" pinned-worker-image"#,
     #[test]
     fn run_directory_paths_preserve_literal_main_and_commonjs_candidate_order() {
         for (manifest, files, expected) in [
-            (r#"{}"#, vec!["index.js", "index.json", "index.node"], "index.js"),
+            (
+                r#"{}"#,
+                vec!["index.js", "index.json", "index.node"],
+                "index.js",
+            ),
             (r#"{"main":true}"#, vec!["index.js"], "index.js"),
             (r#"{"main":""}"#, vec!["index.node"], "index.node"),
             (
@@ -22989,10 +23179,19 @@ exec "$2" pinned-worker-image"#,
                 vec!["start.json", "start.node", "index.js"],
                 "start.json",
             ),
-            (r#"{"main":"start"}"#, vec!["start.node", "index.js"], "start.node"),
+            (
+                r#"{"main":"start"}"#,
+                vec!["start.node", "index.js"],
+                "start.node",
+            ),
             (
                 r#"{"main":"lib"}"#,
-                vec!["lib/index.js", "lib/index.json", "lib/alternate.js", "index.js"],
+                vec![
+                    "lib/index.js",
+                    "lib/index.json",
+                    "lib/alternate.js",
+                    "index.js",
+                ],
                 "lib/index.js",
             ),
             (
@@ -23000,9 +23199,21 @@ exec "$2" pinned-worker-image"#,
                 vec!["lib/index.json", "lib/index.node", "index.js"],
                 "lib/index.json",
             ),
-            (r#"{"main":"lib"}"#, vec!["lib/index.node", "index.js"], "lib/index.node"),
-            (r#"{"main":"lib/"}"#, vec!["lib.js", "lib/index.js"], "lib.js"),
-            (r#"{"main":"lib/."}"#, vec!["lib.js", "lib/index.js"], "lib.js"),
+            (
+                r#"{"main":"lib"}"#,
+                vec!["lib/index.node", "index.js"],
+                "lib/index.node",
+            ),
+            (
+                r#"{"main":"lib/"}"#,
+                vec!["lib.js", "lib/index.js"],
+                "lib.js",
+            ),
+            (
+                r#"{"main":"lib/."}"#,
+                vec!["lib.js", "lib/index.js"],
+                "lib.js",
+            ),
             (
                 r#"{"main":"missing"}"#,
                 vec!["index.json", "index.node"],
@@ -23022,14 +23233,11 @@ exec "$2" pinned-worker-image"#,
                 std::fs::write(path, [0xff]).expect("candidate file");
             }
             if root.join("lib").is_dir() {
-                std::fs::write(
-                    root.join("lib/package.json"),
-                    r#"{"main":"alternate.js"}"#,
-                )
-                .expect("nested package metadata");
+                std::fs::write(root.join("lib/package.json"), r#"{"main":"alternate.js"}"#)
+                    .expect("nested package metadata");
             }
-            let selected = RunProjectPaths::resolve(Path::new("."), &root)
-                .expect("directory entrypoint");
+            let selected =
+                RunProjectPaths::resolve(Path::new("."), &root).expect("directory entrypoint");
             assert_eq!(selected.entrypoint(), root.join(expected), "{manifest}");
             assert_eq!(selected.project_root(), root, "{manifest}");
         }
@@ -23043,13 +23251,17 @@ exec "$2" pinned-worker-image"#,
             std::fs::write(root.join("package.json"), r#"{"main":"start"}"#)
                 .expect("project metadata");
             std::fs::write(root.join(initial), [0xff]).expect("initial candidate");
-            let selected = RunProjectPaths::resolve(Path::new("."), root)
-                .expect("original entrypoint");
+            let selected =
+                RunProjectPaths::resolve(Path::new("."), root).expect("original entrypoint");
             std::fs::write(root.join("start.js"), [0xff]).expect("new winning candidate");
             let error = selected
                 .verify_target_with_operator_project(Path::new("."), root, None, None)
                 .expect_err("a new main winner invalidates preflight");
-            assert!(error.to_string().contains("authority changed after preflight"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("authority changed after preflight")
+            );
         }
 
         let directory = tempfile::tempdir().expect("manifest commitment fixture");
@@ -23063,13 +23275,20 @@ exec "$2" pinned-worker-image"#,
         let error = selected
             .verify_target_with_operator_project(Path::new("."), root, None, None)
             .expect_err("equivalent paths do not replace original manifest bytes");
-        assert!(error.to_string().contains("authority changed after preflight"));
+        assert!(
+            error
+                .to_string()
+                .contains("authority changed after preflight")
+        );
     }
 
     #[test]
     fn run_directory_paths_keep_main_inside_the_selected_authority() {
         let directory = tempfile::tempdir().expect("directory authority fixture");
-        let root = directory.path().canonicalize().expect("canonical invocation");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("canonical invocation");
         let project = root.join("package");
         std::fs::create_dir(&project).expect("selected project");
         std::fs::write(project.join("index.js"), [0xff]).expect("fallback source");

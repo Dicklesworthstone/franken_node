@@ -14190,6 +14190,17 @@ fn archive_excess_run_receipts(receipts_root: &Path, max_receipts: usize) -> Res
     Ok(())
 }
 
+fn planned_run_execution_receipt_path(
+    project_root: &Path,
+    receipt: &RunExecutionReceipt,
+) -> Result<PathBuf> {
+    let receipts_root = run_execution_receipts_root(project_root)?;
+    let ended_at = DateTime::parse_from_rfc3339(&receipt.core.end_time_utc)
+        .context("run receipt end_time_utc was not valid RFC3339")?;
+    let day_dir = receipts_root.join(ended_at.format("%Y-%m-%d").to_string());
+    Ok(day_dir.join(format!("{}.json", receipt.core.receipt_id)))
+}
+
 fn persist_run_execution_receipt(
     project_root: &Path,
     receipt: &RunExecutionReceipt,
@@ -49282,14 +49293,15 @@ fn main() -> Result<()> {
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
-            let (dispatch, execution_error) = match dispatcher.dispatch_run(
-                &app_path,
-                &resolved.config,
-                &policy,
-                &trusted_extension_ids,
-                now_unix_secs(),
-            ) {
-                Ok(dispatch) => (dispatch, None),
+            let (dispatch, mut session_finalizer, execution_error) = match dispatcher
+                .dispatch_run_with_deferred_finalizer(
+                    &app_path,
+                    &resolved.config,
+                    &policy,
+                    &trusted_extension_ids,
+                    now_unix_secs(),
+                ) {
+                Ok((dispatch, session_finalizer)) => (dispatch, session_finalizer, None),
                 Err(err) => {
                     let recovered_dispatch = err
                         .downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
@@ -49308,7 +49320,7 @@ fn main() -> Result<()> {
                         // touched external state. Retain the evidence actually
                         // recovered and apply the shared containment and durable
                         // recording path before propagating the original error.
-                        (dispatch, Some(err))
+                        (dispatch, None, Some(err))
                     } else {
                         if let Some(refusal) = err
                             .downcast_ref::<ops::engine_dispatcher::DeploymentActivationRefused>(
@@ -49481,30 +49493,75 @@ fn main() -> Result<()> {
                     receipt.core.incident_capture = Some(capture);
                     receipt.receipt_hash = compute_run_execution_receipt_hash(&receipt.core)?;
                 }
-                let receipt_path = persist_run_execution_receipt(
-                    &project_root,
-                    &receipt,
-                    configured_run_receipt_limit(&resolved.config),
-                )?;
+                let planned_receipt_path =
+                    planned_run_execution_receipt_path(&project_root, &receipt)?;
                 let receipt_signing = load_receipt_signing_material(None);
+                let receipt_limit = configured_run_receipt_limit(&resolved.config);
+                // Coalesce the four disjoint post-spawn durability flushes
+                // (execution receipt, signed run host-effect ledger, durable
+                // evidence ledger, and native-session inventory completion)
+                // into one concurrent barrier so ext4 jbd2 commits them
+                // together without weakening any durability guarantee.
+                let (receipt_result, persisted_ledger, evidence_append_result) =
+                    std::thread::scope(|scope| {
+                        let receipt_handle = scope.spawn(|| {
+                            persist_run_execution_receipt(&project_root, &receipt, receipt_limit)
+                        });
+                        let ledger_handle = scope.spawn(|| {
+                            if dispatch.host_effect_ledger.is_none() {
+                                Ok(None)
+                            } else {
+                                match &receipt_signing {
+                                    Ok(signing) => persist_run_host_effect_ledger_with_signing(
+                                        &project_root,
+                                        &policy,
+                                        &receipt,
+                                        &planned_receipt_path,
+                                        &dispatch,
+                                        &trace_id,
+                                        signing.as_ref(),
+                                    ),
+                                    Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                                }
+                            }
+                        });
+                        let evidence_handle = scope.spawn(|| match &receipt_signing {
+                            Ok(signing) => append_run_evidence_entry_with_signing(
+                                &project_root,
+                                &receipt,
+                                &planned_receipt_path,
+                                &dispatch,
+                                &trace_id,
+                                signing.as_ref(),
+                            ),
+                            Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                        });
+
+                        #[cfg(feature = "engine")]
+                        if let Some(finalizer) = session_finalizer.take() {
+                            finalizer.finalize();
+                        }
+                        #[cfg(not(feature = "engine"))]
+                        let _ = session_finalizer.take();
+
+                        let receipt_result = receipt_handle.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!(
+                                "run execution receipt persistence panicked"
+                            ))
+                        });
+                        let persisted_ledger = ledger_handle.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!(
+                                "run host-effect ledger persistence panicked"
+                            ))
+                        });
+                        let evidence_append_result = evidence_handle.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("evidence ledger append panicked"))
+                        });
+                        (receipt_result, persisted_ledger, evidence_append_result)
+                    });
+                let receipt_path = receipt_result?;
                 // Explicit replay capture and publisher-approved source must
                 // be durably bound to a signed record before command success.
-                let persisted_ledger = if dispatch.host_effect_ledger.is_none() {
-                    Ok(None)
-                } else {
-                    match &receipt_signing {
-                        Ok(signing) => persist_run_host_effect_ledger_with_signing(
-                            &project_root,
-                            &policy,
-                            &receipt,
-                            &receipt_path,
-                            &dispatch,
-                            &trace_id,
-                            signing.as_ref(),
-                        ),
-                        Err(err) => Err(anyhow::anyhow!("{err:#}")),
-                    }
-                };
                 if dispatch.native_replay.is_some() {
                     persisted_ledger
                         .context("failed persisting requested native replay capture")?
@@ -49541,17 +49598,6 @@ fn main() -> Result<()> {
                     }
                 };
                 // Likewise a ledger append failure is reported, not fatal.
-                let evidence_append_result = match &receipt_signing {
-                    Ok(signing) => append_run_evidence_entry_with_signing(
-                        &project_root,
-                        &receipt,
-                        &receipt_path,
-                        &dispatch,
-                        &trace_id,
-                        signing.as_ref(),
-                    ),
-                    Err(err) => Err(anyhow::anyhow!("{err:#}")),
-                };
                 if let Err(err) = evidence_append_result
                     && !structured_logs_jsonl
                 {
@@ -49559,6 +49605,12 @@ fn main() -> Result<()> {
                 }
                 Ok((receipt, receipt_path, captured_incident))
             })();
+            #[cfg(feature = "engine")]
+            if let Some(finalizer) = session_finalizer.take() {
+                finalizer.finalize();
+            }
+            #[cfg(not(feature = "engine"))]
+            let _ = session_finalizer.take();
             let (receipt, receipt_path, captured_incident) = match persisted_run {
                 Ok(persisted) => persisted,
                 Err(persistence_error) => {

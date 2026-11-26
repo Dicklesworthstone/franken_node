@@ -1788,6 +1788,7 @@ fn retain_admission_record(
     retain_admission_record_with_root(protected_root, admission, &key, None, false)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn retain_admission_record_with_root(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -1857,6 +1858,145 @@ fn retain_admission_record_with_root(
     Ok(())
 }
 
+/// Stage and durably flush both the signed admission receipt and the canonical
+/// admission record in parallel before publishing them in strict receipt-first
+/// order and coalescing their directory `fsync`s. Preserves every crash-recovery
+/// and capacity invariant while collapsing 4 serial `fsync`s + directory scan
+/// into 2 ext4 journal commits.
+fn retain_admission_receipt_and_record_with_root(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    root: &ed25519_dalek::SigningKey,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+    admission_json: &str,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    let receipt_dir = protected_root.join(ADMISSION_RECEIPT_DIRECTORY);
+    let record_dir = protected_root.join(ADMISSION_RECORD_DIRECTORY);
+    let receipt_path = admission_receipt_path(protected_root, &admission.session_nonce);
+    let record_path = admission_record_path(protected_root, &admission.session_nonce);
+
+    // Phase 1: Sign, validate capacity, write temp files, and flush both staged
+    // files concurrently so ext4 jbd2 coalesces both temp-file `fsync`s and
+    // overlaps `check_admission_record_capacity` with signing + disk flush.
+    // Neither final path is published yet.
+    let (receipt_stage, record_stage) = std::thread::scope(|scope| {
+        let receipt_handle = scope.spawn(|| -> Result<(tempfile::NamedTempFile, bool)> {
+            let receipt = NativeSessionAdmissionReceipt::issue_with_verifying_key(
+                admission,
+                root,
+                verifying_key,
+            )?;
+            let bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
+            let created_dir = ensure_runtime_evidence_directory_with_status(&receipt_dir, true)?;
+            let mut staged = tempfile::NamedTempFile::new_in(&receipt_dir)
+                .context("stage private native-session admission receipt")?;
+            staged.write_all(bytes.as_bytes())?;
+            staged.as_file().sync_all()?;
+            Ok((staged, created_dir))
+        });
+
+        let record_result = (|| -> Result<(Option<tempfile::NamedTempFile>, bool)> {
+            let created_dir = ensure_runtime_evidence_directory_with_status(&record_dir, true)?;
+            let exists = validate_private_path_if_present(&record_path)?;
+            check_admission_record_capacity(
+                &record_dir,
+                usize::from(!exists),
+                if exists { 0 } else { admission_json.len() },
+                MAX_STORED_SESSIONS,
+                MAX_RETAINED_ADMISSION_BYTES,
+            )?;
+            let staged = if exists {
+                None
+            } else {
+                let mut staged = tempfile::NamedTempFile::new_in(&record_dir)
+                    .context("stage private native-session admission record")?;
+                staged.write_all(admission_json.as_bytes())?;
+                staged.as_file().sync_all()?;
+                Some(staged)
+            };
+            Ok((staged, created_dir))
+        })();
+
+        let receipt_result = receipt_handle
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("admission receipt staging thread panicked")));
+        (receipt_result, record_result)
+    });
+
+    let (receipt_staged, created_receipt_dir) = receipt_stage?;
+    let (record_staged, created_record_dir) = record_stage?;
+
+    // Phase 2: Publish strictly receipt-first, then record, preserving the
+    // invariant that an admission record never exists without its signed receipt.
+    let mut published_receipt = false;
+    match receipt_staged.persist_noclobber(&receipt_path) {
+        Ok(_) => published_receipt = true,
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_admission_receipt(protected_root, admission, verifying_key)?
+                .context("retained native-session admission disappeared during publication")?;
+        }
+        Err(error) => return Err(error.error).context("publish native-session admission receipt"),
+    }
+
+    let mut published_record = false;
+    if let Some(staged) = record_staged {
+        match staged.persist_noclobber(&record_path) {
+            Ok(_) => published_record = true,
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error.error).context("publish native-session admission record");
+            }
+        }
+    }
+    if !published_record {
+        let (retained, _) = read_retained_admission_record(
+            protected_root,
+            &admission.session_nonce,
+            verifying_key,
+        )?
+        .context("retained native-session admission record disappeared during publication")?;
+        if &retained != admission {
+            bail!("retained native-session admission record conflicts with the admitted body");
+        }
+    }
+
+    // Phase 3: Coalesce directory `fsync`s concurrently before DB insertion.
+    #[cfg(unix)]
+    {
+        let sync_protected_root =
+            (published_receipt && created_receipt_dir) || (published_record && created_record_dir);
+        if published_receipt && published_record {
+            let (receipt_sync, record_sync) = std::thread::scope(|scope| {
+                let receipt_handle = scope.spawn(|| std::fs::File::open(&receipt_dir)?.sync_all());
+                let record_res = std::fs::File::open(&record_dir).and_then(|dir| dir.sync_all());
+                let receipt_res = receipt_handle
+                    .join()
+                    .unwrap_or_else(|_| Err(std::io::Error::other("receipt dir sync panicked")));
+                (receipt_res, record_res)
+            });
+            receipt_sync?;
+            record_sync?;
+        } else if published_receipt {
+            std::fs::File::open(&receipt_dir)?.sync_all()?;
+        } else if published_record {
+            std::fs::File::open(&record_dir)?.sync_all()?;
+        }
+        if sync_protected_root {
+            std::fs::File::open(protected_root)?.sync_all()?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (
+        created_receipt_dir,
+        created_record_dir,
+        published_receipt,
+        published_record,
+    );
+    Ok(())
+}
+
 fn read_admission_receipt(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -1892,6 +2032,7 @@ fn retain_admission_receipt(
     retain_admission_receipt_with_root(protected_root, admission, &root, &key)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn retain_admission_receipt_with_root(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -2240,6 +2381,43 @@ pub(crate) struct NativeSessionInventoryGuard {
     finished: bool,
 }
 
+/// Deferred completion handle for an already-reaped native session. Allows the
+/// CLI `run` handler to coalesce `session-outcomes/` + `native-sessions.db`
+/// durability flushes with project-level receipt/ledger/evidence-ledger writes
+/// in a single `std::thread::scope`. Dropping this handle without calling
+/// [`Self::finalize`] still persists the exact completed observation
+/// synchronously so no early error or panic path can leave a session pending.
+#[must_use = "finalize or drop the deferred native-session finalizer to persist the outcome"]
+pub struct DeferredNativeSessionFinalizer {
+    guard: NativeSessionInventoryGuard,
+    kind: NativeSessionOutcomeKind,
+    effects: NativeSessionEffectObservation,
+}
+
+impl DeferredNativeSessionFinalizer {
+    pub(crate) fn new(
+        guard: NativeSessionInventoryGuard,
+        kind: NativeSessionOutcomeKind,
+        effects: NativeSessionEffectObservation,
+    ) -> Self {
+        Self {
+            guard,
+            kind,
+            effects,
+        }
+    }
+
+    pub fn finalize(mut self) {
+        self.guard.finish(self.kind, self.effects.clone());
+    }
+}
+
+impl Drop for DeferredNativeSessionFinalizer {
+    fn drop(&mut self) {
+        self.guard.finish(self.kind, self.effects.clone());
+    }
+}
+
 pub(crate) struct NativeSessionAdmissionTicket {
     generation: u64,
     protected_root: Option<PathBuf>,
@@ -2346,20 +2524,14 @@ impl NativeSessionInventoryGuard {
                     .context("native-session inventory was not created")?,
             },
         );
-        retain_admission_receipt_with_root(
+        retain_admission_receipt_and_record_with_root(
             protected_root,
             &admission,
             &product_root,
             &verifying_key,
+            &admission_json,
         )?;
         drop(product_root);
-        retain_admission_record_with_root(
-            protected_root,
-            &admission,
-            &verifying_key,
-            Some(&admission_json),
-            true,
-        )?;
         // A refused attempt keeps the same decision and timestamp through
         // transaction retries. Its receipt is issued only after this unique
         // insertion commits, so a duplicate/losing admission cannot create a
