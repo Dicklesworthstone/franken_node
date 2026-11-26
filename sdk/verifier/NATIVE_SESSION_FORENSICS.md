@@ -460,3 +460,70 @@ reconstruct the full epoch/action history, or prove that admission holds remain
 active now. The fixture `tests/fixtures/fleet_epoch_commit.json` was signed
 independently using Node's Ed25519 implementation and includes canonical digest
 expectations. It exercises the wire protocol, not a live multi-node campaign.
+
+## Independently verify compacted native sessions
+
+`ops session-inventory compact --archive-dir ...` retains completed clean
+sessions in a product-root-signed `franken-node/native-session-cold-archive/v1`
+archive. The standalone Rust SDK and CLI can authenticate those portable
+archives without the product database or the original session files:
+
+```sh
+franken-verifier verify --format native-session-cold-archive \
+  --trusted-key-hex "$ENROLLED_PRODUCT_ROOT_PUBLIC_KEY" \
+  --expected-archive-root-sha256 "$RECORDED_ARCHIVE_MERKLE_ROOT" \
+  < native-session-archive.json
+```
+
+Supply the root public key from independent enrollment. The optional expected
+Merkle root is a raw, lowercase, 64-character SHA-256 recorded separately from
+the candidate archive. It pins the ordered session population. It does not pin
+operator text or the archival timestamp, which may be re-attested over the
+same population. `artifact_sha256` and `facts.archive_sha256` identify the exact
+transported bytes.
+
+Rust callers use `native_session::verify_native_session_cold_archive(bytes,
+&trusted_root)` or
+`native_session::verify_native_session_cold_archive_with_expected_root(bytes,
+&trusted_root, expected_merkle_root)`. This archive format is currently exposed
+through Rust and the CLI; the Python and JavaScript clients do not yet expose it.
+
+Verification rejects duplicate JSON members, unknown fields, duplicate session
+nonces, entry/root identity disagreement, invalid admission paths and metadata,
+and outcomes that are not completed, worker-reaped, non-panic observations with
+a consistent final-ledger summary and zero denied/failed effects. It recomputes
+each leaf from the producer's ordered typed JSON, including UTC timestamp
+normalization and historical optional-field omission. Leaf components use
+eight-byte big-endian UTF-8 byte lengths. Merkle nodes hash the lowercase hex
+children separated by `:`, duplicating the final child at each odd level.
+The strict Ed25519 signature authenticates the domain-prefixed ordered archive
+metadata; this signature protocol has no length prefix.
+
+Success uses scope `authenticated_archived_supervisor_observations`. Returned
+facts contain the trusted root identity, archive timestamp, session count,
+source-bound session count, Merkle root, and exact archive digest. They omit
+operator text, project paths, dependency names, and individual session records.
+Captured paths are never opened.
+
+The archive contains a compaction-time statement, not the original signed
+admission/outcome receipts, source capsule bytes, final effect ledger, or durable
+effect journal. Therefore `original_receipt_signatures_verified`,
+`replay_certified`, `quiescence_certified`, and `historical_completeness` remain
+false. A source-binding count only describes retained commitments. An archived
+clean supervisor outcome does not independently prove external-effect cleanup,
+historical completeness, current freshness, or current revocation status.
+
+The SDK accepts at most 64 MiB of archive JSON and 16,384 sessions, with canonical
+admission/outcome limits of 4 MiB and 5 MiB per entry. The 64 MiB outer limit is
+an explicit standalone-verifier bound; the producer can create larger archives.
+Use smaller `--max-sessions-to-archive` compaction batches for those populations.
+Oversized input fails with `INPUT_TOO_LARGE`; wrong population pins fail with
+`EXPECTED_ARCHIVE_ROOT_MISMATCH`. Signature, session, leaf, and Merkle failures
+have distinct stable codes without captured values in diagnostics.
+
+`tests/fixtures/native_session_cold_archives.json` contains synthetic protocol
+vectors generated independently with Python `hashlib` and `cryptography` using
+the public RFC 8032 test key. It covers singleton and odd-sized trees, alternate
+timestamp spellings, full-width integers, Windows paths, historical option
+omission, and validly signed semantic failures. It establishes wire-protocol
+compatibility, not live compaction or recovery qualification.

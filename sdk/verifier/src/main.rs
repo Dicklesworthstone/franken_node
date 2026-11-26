@@ -27,8 +27,9 @@ use frankenengine_verifier_sdk::incident_bundle::{
     verify_incident_bundle_with_run_key, verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
-    MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionExpectedIdentity,
-    NativeSessionForensicError, verify_native_session_forensics,
+    MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
+    NativeSessionExpectedIdentity, NativeSessionForensicError, verify_native_session_cold_archive,
+    verify_native_session_cold_archive_with_expected_root, verify_native_session_forensics,
     verify_native_session_forensics_with_expected_identity,
 };
 use frankenengine_verifier_sdk::publisher_source::{
@@ -63,7 +64,7 @@ const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] [--graph-report FILE] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|native-session-cold-archive|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] [--expected-archive-root-sha256 HEX] [--graph-report FILE] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -84,6 +85,7 @@ struct Request {
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
     expected_native_identity: Option<NativeSessionExpectedIdentity>,
+    expected_archive_root: Option<String>,
     graph_report: Option<GraphReportRequest>,
     session_policy: Option<SessionPolicyRequest>,
     fleet_policy: Option<FleetPolicyRequest>,
@@ -322,6 +324,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None);
     let (mut incident_anchor, mut expected_baseline) = (None, None);
     let (mut expected_native_nonce, mut expected_admission) = (None, None);
+    let mut expected_archive_root = None;
     let mut fleet_policy_path = None;
     let mut session_policy_path = None;
     let mut graph_report_path = None;
@@ -345,6 +348,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-graph-input-hash" => &mut expected_graph,
             "--expected-session-nonce" => &mut expected_native_nonce,
             "--expected-admission-sha256" => &mut expected_admission,
+            "--expected-archive-root-sha256" => &mut expected_archive_root,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
             "--trusted-session-policy" => &mut session_policy_path,
             "--graph-report" => &mut graph_report_path,
@@ -364,6 +368,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         format.as_str(),
         "incident-bundle"
             | "native-session-forensics"
+            | "native-session-cold-archive"
             | "capsule"
             | "signed-bundle"
             | "signed-session"
@@ -660,6 +665,18 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             ));
         }
     };
+    if let Some(root) = &expected_archive_root
+        && (format != "native-session-cold-archive"
+            || root.len() != 64
+            || !root
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    {
+        return Err(failure(
+            "EXPECTED_ARCHIVE_ROOT_INVALID",
+            "an archive root pin requires native-session-cold-archive and a lowercase SHA-256",
+        ));
+    }
     let graph_report = graph_report_path
         .as_deref()
         .map(read_graph_report)
@@ -674,6 +691,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         publisher_trust,
         expected_publisher_identity,
         expected_native_identity,
+        expected_archive_root,
         graph_report,
         session_policy,
         fleet_policy,
@@ -1009,6 +1027,23 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 facts["trusted_session_policy_sha256"] = json!(policy.input_sha256);
             }
             Ok(json!({"scope": "authenticated_verification_session", "facts": facts}))
+        }
+        "native-session-cold-archive" => {
+            let verified = match request.expected_archive_root.as_deref() {
+                Some(root) => {
+                    verify_native_session_cold_archive_with_expected_root(bytes, trusted_key, root)
+                }
+                None => verify_native_session_cold_archive(bytes, trusted_key),
+            }
+            .map_err(|error| {
+                failure(
+                    error.code(),
+                    "native session cold archive verification failed",
+                )
+            })?;
+            Ok(
+                json!({"scope": "authenticated_archived_supervisor_observations", "facts": verified}),
+            )
         }
         "native-session-forensics" => {
             let verified = match request.expected_native_identity.as_ref() {
@@ -1538,6 +1573,7 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
             MAX_FLEET_QUIESCENCE_RESPONSE_BYTES
         }
         "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
+        "native-session-cold-archive" => MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
         _ => MAX_INCIDENT_BUNDLE_BYTES,
@@ -1625,6 +1661,107 @@ mod tests {
     }
 
     #[test]
+    fn cold_archive_cli_authenticates_the_requested_population_without_promoting_scope() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native_session_cold_archives.json"
+        ))
+        .unwrap();
+        let case = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "triple")
+            .unwrap();
+        let bytes = serde_json::to_vec(&case["archive"]).unwrap();
+        let root = case["expected"]["merkle_root_sha256"].as_str().unwrap();
+        let mut arguments = args("native-session-cold-archive", ANCHOR);
+        arguments.extend(["--expected-archive-root-sha256".into(), root.into()]);
+        let verified = run(&arguments, &mut bytes.as_slice()).unwrap();
+        assert_eq!(verified["format"], "native-session-cold-archive");
+        assert_eq!(
+            verified["scope"],
+            "authenticated_archived_supervisor_observations"
+        );
+        assert_eq!(verified["facts"]["session_count"], 3);
+        assert_eq!(verified["facts"]["source_bound_sessions"], 1);
+        assert_eq!(verified["facts"]["merkle_root_sha256"], root);
+        for flag in [
+            "original_receipt_signatures_verified",
+            "replay_certified",
+            "quiescence_certified",
+            "historical_completeness",
+        ] {
+            assert_eq!(verified["facts"][flag], false, "{flag}");
+        }
+        arguments.pop();
+        arguments.push("0".repeat(64));
+        assert_eq!(
+            run(&arguments, &mut bytes.as_slice()).unwrap_err().code,
+            "EXPECTED_ARCHIVE_ROOT_MISMATCH"
+        );
+        let invalid = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "foreign_entry_root")
+            .unwrap();
+        let bytes = serde_json::to_vec(&invalid["archive"]).unwrap();
+        assert_eq!(
+            run(
+                &args("native-session-cold-archive", ANCHOR),
+                &mut bytes.as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "ARCHIVE_SESSION_INVALID"
+        );
+    }
+
+    #[test]
+    fn cold_archive_cli_rejects_malformed_and_misapplied_pins_before_reading() {
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid archive options must not consume candidate evidence");
+            }
+        }
+        for (format, root) in [
+            ("native-session-cold-archive", "short".to_owned()),
+            ("native-session-cold-archive", "A".repeat(64)),
+            (
+                "native-session-cold-archive",
+                format!("sha256:{}", "a".repeat(64)),
+            ),
+            ("incident-bundle", "a".repeat(64)),
+            ("native-session-forensics", "a".repeat(64)),
+        ] {
+            let mut arguments = args(format, ANCHOR);
+            arguments.extend(["--expected-archive-root-sha256".into(), root]);
+            assert_eq!(
+                run(&arguments, &mut Unreadable).unwrap_err().code,
+                "EXPECTED_ARCHIVE_ROOT_INVALID"
+            );
+        }
+        let mut duplicate = args("native-session-cold-archive", ANCHOR);
+        duplicate.extend([
+            "--expected-archive-root-sha256".into(),
+            "a".repeat(64),
+            "--expected-archive-root-sha256".into(),
+            "a".repeat(64),
+        ]);
+        assert_eq!(run(&duplicate, &mut Unreadable).unwrap_err().code, "USAGE");
+        for option in [
+            "--trusted-run-key-hex",
+            "--trusted-runtime-key-hex",
+            "--signature-hex",
+        ] {
+            let mut arguments = args("native-session-cold-archive", ANCHOR);
+            arguments.extend([option.into(), ANCHOR.into()]);
+            assert_eq!(run(&arguments, &mut Unreadable).unwrap_err().code, "USAGE");
+        }
+    }
+
+    #[test]
     fn cli_session_policy_is_format_scoped_and_duplicate_options_are_refused() {
         struct Unreadable;
         impl Read for Unreadable {
@@ -1695,6 +1832,7 @@ mod tests {
             publisher_trust: None,
             expected_publisher_identity: None,
             expected_native_identity: None,
+            expected_archive_root: None,
             graph_report: None,
             session_policy: None,
             fleet_policy: Some(FleetPolicyRequest {
