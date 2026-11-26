@@ -1,0 +1,13 @@
+const { Readable } = require('stream');
+const r = new Readable({ read() {} });
+console.log(r.readableLength);
+r.push(Buffer.from('12345'));
+console.log(r.readableLength);
+r.push(Buffer.from('67890'));
+console.log(r.readableLength);
+const a = r.read(4);
+console.log(a.toString('utf8'), r.readableLength);
+const b = r.read(4);
+console.log(b.toString('utf8'), r.readableLength);
+const c = r.read(2);
+console.log(c.toString('utf8'), r.readableLength);

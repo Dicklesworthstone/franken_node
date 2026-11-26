@@ -1,0 +1,12 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+const seq = [];
+const a = () => seq.push('a');
+const b = () => seq.push('b');
+e.on('k', a);
+e.on('k', b);
+e.on('k', a);
+e.removeListener('k', a);
+e.emit('k');
+console.log(seq.join(','));
+console.log(e.listenerCount('k'));

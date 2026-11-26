@@ -616,6 +616,426 @@
       ],
       "band": "high-value",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0051",
+      "file": "0051_http_status_201_created.js",
+      "api": "http.ServerResponse.writeHead (201)",
+      "requirement": "writeHead(201) sends status 201 with default statusMessage Created and body.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0052",
+      "file": "0052_http_status_302_found.js",
+      "api": "http.ServerResponse.writeHead (302)",
+      "requirement": "A 302 redirect delivers status 302, default statusMessage Found, and the Location header without auto-following.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0053",
+      "file": "0053_http_status_400_bad_request.js",
+      "api": "http.ServerResponse.writeHead (400)",
+      "requirement": "writeHead(400) delivers status 400 with default statusMessage Bad Request and body.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0054",
+      "file": "0054_http_status_404_not_found.js",
+      "api": "http.ServerResponse.writeHead (404)",
+      "requirement": "writeHead(404) delivers status 404 with default statusMessage Not Found and body.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0055",
+      "file": "0055_http_status_500_internal_error.js",
+      "api": "http.ServerResponse.writeHead (500)",
+      "requirement": "writeHead(500) delivers status 500 with default statusMessage Internal Server Error and body.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0056",
+      "file": "0056_http_request_patch.js",
+      "api": "http.request PATCH",
+      "requirement": "A PATCH request delivers its method and JSON body intact to the server.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0057",
+      "file": "0057_http_request_options.js",
+      "api": "http.request OPTIONS",
+      "requirement": "An OPTIONS request reaches the server and receives the Allow response header.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0058",
+      "file": "0058_http_post_buffer_roundtrip.js",
+      "api": "http.ClientRequest.write(Buffer)",
+      "requirement": "Binary Buffer chunks uploaded via POST write()+end() roundtrip byte-exact through the server.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0059",
+      "file": "0059_http_serverresponse_getheader_case_insensitive.js",
+      "api": "http.ServerResponse.getHeader",
+      "requirement": "getHeader performs case-insensitive lookup and returns undefined for unset headers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0060",
+      "file": "0060_http_serverresponse_removeheader_case_insensitive.js",
+      "api": "http.ServerResponse.removeHeader",
+      "requirement": "removeHeader deletes a header case-insensitively so hasHeader is false and the client never receives it.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0061",
+      "file": "0061_http_writehead_overrides_setheader.js",
+      "api": "http.ServerResponse.writeHead",
+      "requirement": "Headers passed to writeHead override prior setHeader values case-insensitively while preserving unrelated headers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0062",
+      "file": "0062_http_writehead_two_arg_headers.js",
+      "api": "http.ServerResponse.writeHead (2-arg)",
+      "requirement": "The two-argument writeHead(status, headers) form preserves the default statusMessage while applying headers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0063",
+      "file": "0063_http_serverresponse_writable_ended.js",
+      "api": "http.ServerResponse.writableEnded",
+      "requirement": "ServerResponse writable is true and writableEnded flips from false to true across res.end().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0064",
+      "file": "0064_http_clientrequest_writable_ended.js",
+      "api": "http.ClientRequest.writableEnded",
+      "requirement": "ClientRequest writable is true before end() and writableEnded flips from false to true across req.end().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0065",
+      "file": "0065_http_req_rawheaders_casing.js",
+      "api": "http.IncomingMessage.rawHeaders (request)",
+      "requirement": "Server req.rawHeaders preserves original client header name casing while req.headers lowercases keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0066",
+      "file": "0066_http_res_rawheaders_casing.js",
+      "api": "http.IncomingMessage.rawHeaders (response)",
+      "requirement": "Client res.rawHeaders preserves original server response header casing while res.headers lowercases keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0067",
+      "file": "0067_http_explicit_content_length_no_chunked.js",
+      "api": "http.ServerResponse Content-Length",
+      "requirement": "Setting an explicit Content-Length delivers the body without adding transfer-encoding: chunked.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0068",
+      "file": "0068_http_utf8_multibyte_json_roundtrip.js",
+      "api": "http UTF-8 multibyte JSON roundtrip",
+      "requirement": "UTF-8 multibyte text including accented characters, CJK, and emoji roundtrips intact inside JSON bodies.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0069",
+      "file": "0069_http_encoded_url_query_forwarding.js",
+      "api": "http.IncomingMessage.url (percent-encoded)",
+      "requirement": "Percent-encoded path segments and query parameters arrive verbatim on req.url.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0070",
+      "file": "0070_http_request_url_string_with_options.js",
+      "api": "http.request(url, options, cb)",
+      "requirement": "http.request combines a URL string target with an options object supplying method and headers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0071",
+      "file": "0071_http_server_listening_lifecycle.js",
+      "api": "http.Server.listening",
+      "requirement": "http.Server.listening transitions false -> true on listen and back to false after close.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0072",
+      "file": "0072_http_server_address_null_lifecycle.js",
+      "api": "http.Server.address lifecycle",
+      "requirement": "http.Server.address() returns null before listen and after close, and a port object while listening.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0073",
+      "file": "0073_http_concurrent_four_requests.js",
+      "api": "http concurrent requests",
+      "requirement": "Four concurrent in-flight HTTP requests via Promise.all each receive their distinct path-specific response.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0074",
+      "file": "0074_http_large_64k_response_streaming.js",
+      "api": "http 64KiB response streaming",
+      "requirement": "A 64KiB binary response streamed in multiple Buffer write() chunks arrives byte-exact at the client.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0075",
+      "file": "0075_http_large_64k_request_upload.js",
+      "api": "http 64KiB request upload",
+      "requirement": "A 64KiB binary request uploaded in multiple Buffer write() chunks arrives byte-exact at the server.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::http::0076",
+      "file": "0076_http_request_hostname_option.js",
+      "api": "http.request hostname option",
+      "requirement": "http.request accepts hostname as an alternative to host for targeting a loopback server.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0077",
+      "file": "0077_http_get_url_string_with_headers.js",
+      "api": "http.get(url, options, cb)",
+      "requirement": "http.get accepts a URL string together with an options object supplying custom request headers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0078",
+      "file": "0078_http_serverresponse_getheader_array.js",
+      "api": "http.ServerResponse.getHeader (array)",
+      "requirement": "getHeader returns the array of values when a response header was set with setHeader(name, array).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::http::0079",
+      "file": "0079_http_clientrequest_end_callback.js",
+      "api": "http.ClientRequest.end(data, cb)",
+      "requirement": "ClientRequest.end(data, callback) delivers the final chunk and invokes its finish callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0080",
+      "file": "0080_http_agent_keepalive_true.js",
+      "api": "http.Agent({ keepAlive: true })",
+      "requirement": "An Agent constructed with keepAlive: true exposes keepAlive=true, protocol='http:', and defaultPort=80.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::http::0081",
+      "file": "0081_http_status_codes_specific.js",
+      "api": "http.STATUS_CODES",
+      "requirement": "STATUS_CODES maps 204, 301, 418, and 500 to their standard HTTP reason phrases.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::http::0082",
+      "file": "0082_http_methods_extended.js",
+      "api": "http.METHODS",
+      "requirement": "METHODS includes DELETE, HEAD, OPTIONS, and PATCH.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::http::0083",
+      "file": "0083_http_serverresponse_direct_status_props.js",
+      "api": "http.ServerResponse statusCode/statusMessage",
+      "requirement": "Directly assigning statusCode and statusMessage without writeHead transmits both to the client.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::http::0084",
+      "file": "0084_http_incomingmessage_readable_transition.js",
+      "api": "http.IncomingMessage.readable",
+      "requirement": "IncomingMessage.readable transitions from true upon response arrival to false once end fires.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::http::0085",
+      "file": "0085_http_invalid_protocol_error.js",
+      "api": "http.get protocol validation",
+      "requirement": "Passing an https:// URL to http.get throws synchronously with code ERR_INVALID_PROTOCOL.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
     }
   ]
 }

@@ -256,6 +256,366 @@
       ],
       "band": "high-value",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::zlib::0021",
+      "file": "0021_zlib_gzipsync_binary_256.js",
+      "api": "zlib.gzipSync",
+      "requirement": "All 256 byte values (0x00..0xff) survive a gzipSync/gunzipSync round-trip byte-for-byte intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0022",
+      "file": "0022_zlib_gzipsync_utf8_multibyte.js",
+      "api": "zlib.gzipSync",
+      "requirement": "Multibyte UTF-8 text including CJK, Cyrillic, accented Latin, and 4-byte emoji round-trips through gzipSync/gunzipSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0023",
+      "file": "0023_zlib_gzipsync_level_0_vs_9.js",
+      "api": "zlib.gzipSync",
+      "requirement": "gzipSync at Z_BEST_COMPRESSION (9) compresses repetitive input smaller than Z_NO_COMPRESSION (0), and both round-trip identically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0024",
+      "file": "0024_zlib_gzipsync_isize_trailer.js",
+      "api": "zlib.gzipSync",
+      "requirement": "The final 4 bytes of gzipSync output encode the uncompressed byte length (RFC 1952 ISIZE) as little-endian uint32.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0025",
+      "file": "0025_zlib_deflatesync_rfc1950_header.js",
+      "api": "zlib.deflateSync",
+      "requirement": "deflateSync emits a valid RFC 1950 header with deflate method 8 and (CMF*256 + FLG) % 31 === 0.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0026",
+      "file": "0026_zlib_deflatesync_utf8_and_large.js",
+      "api": "zlib.deflateSync",
+      "requirement": "deflateSync/inflateSync round-trip multibyte UTF-8 text and compress a 12KB repetitive buffer to under a quarter of its size.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0027",
+      "file": "0027_zlib_deflaterawsync_shorter_than_deflate.js",
+      "api": "zlib.deflateRawSync",
+      "requirement": "deflateRawSync omits the 2-byte zlib header and 4-byte Adler-32 trailer, outputting 6 fewer bytes than deflateSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0028",
+      "file": "0028_zlib_deflaterawsync_binary_and_empty.js",
+      "api": "zlib.deflateRawSync",
+      "requirement": "deflateRawSync/inflateRawSync round-trip all 256 byte values and an empty zero-length buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0029",
+      "file": "0029_zlib_deflaterawsync_levels.js",
+      "api": "zlib.deflateRawSync",
+      "requirement": "deflateRawSync honors level 0 vs level 9 compression options and both payloads inflateRawSync back byte-identically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0030",
+      "file": "0030_zlib_unzipsync_empty_and_binary.js",
+      "api": "zlib.unzipSync",
+      "requirement": "unzipSync auto-detects and decompresses empty buffers and 256-byte binary buffers framed with both gzip and deflate.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0031",
+      "file": "0031_zlib_brotlicompresssync_empty.js",
+      "api": "zlib.brotliCompressSync",
+      "requirement": "brotliCompressSync/brotliDecompressSync round-trip empty buffers and empty strings to zero-length Buffer outputs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0032",
+      "file": "0032_zlib_brotlicompresssync_binary_utf8.js",
+      "api": "zlib.brotliCompressSync",
+      "requirement": "brotliCompressSync/brotliDecompressSync round-trip all 256 binary byte values and multibyte UTF-8 text intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0033",
+      "file": "0033_zlib_brotlicompresssync_large_quality.js",
+      "api": "zlib.brotliCompressSync",
+      "requirement": "brotliCompressSync compresses a repetitive 16KB payload well below 10% size and quality 11 is no larger than quality 0.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0034",
+      "file": "0034_zlib_typedarray_uint8array_inputs.js",
+      "api": "zlib.gzipSync",
+      "requirement": "Uint8Array inputs are accepted by gzipSync, deflateSync, deflateRawSync, and brotliCompressSync and round-trip to Buffer outputs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0035",
+      "file": "0035_zlib_gzip_async_options.js",
+      "api": "zlib.gzip",
+      "requirement": "Async zlib.gzip accepts { level } options (0 vs 9) and round-trips cleanly through async zlib.gunzip.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0036",
+      "file": "0036_zlib_gzip_async_binary_and_empty.js",
+      "api": "zlib.gzip",
+      "requirement": "Async zlib.gzip/gunzip round-trips all 256 byte values and an empty Buffer via callbacks.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0037",
+      "file": "0037_zlib_deflate_async_options.js",
+      "api": "zlib.deflate",
+      "requirement": "Async zlib.deflate accepts { level } options (0 vs 9) and round-trips through async zlib.inflate.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0038",
+      "file": "0038_zlib_deflate_async_empty_and_utf8.js",
+      "api": "zlib.deflate",
+      "requirement": "Async zlib.deflate/inflate round-trips multibyte UTF-8 text and empty buffers via callbacks.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0039",
+      "file": "0039_zlib_gzip_sync_async_interop.js",
+      "api": "zlib.gunzip",
+      "requirement": "gzipSync output decompresses via async gunzip and async gzip output decompresses via gunzipSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0040",
+      "file": "0040_zlib_deflate_sync_async_interop.js",
+      "api": "zlib.inflate",
+      "requirement": "deflateSync output decompresses via async inflate and async deflate output decompresses via inflateSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0041",
+      "file": "0041_zlib_brotlicompresssync_lgwin_sizehint.js",
+      "api": "zlib.brotliCompressSync",
+      "requirement": "brotliCompressSync honors BROTLI_PARAM_QUALITY, BROTLI_PARAM_LGWIN, and BROTLI_PARAM_SIZE_HINT options and round-trips accurately.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0042",
+      "file": "0042_zlib_constants_brotli.js",
+      "api": "zlib.constants",
+      "requirement": "zlib.constants exposes Brotli mode (0, 1, 2), default quality (11), default window (22), and numeric param keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::zlib::0043",
+      "file": "0043_zlib_inflate_async_error.js",
+      "api": "zlib.inflate",
+      "requirement": "Async zlib.inflate on invalid deflate input invokes callback with Error (Z_DATA_ERROR) and undefined result.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0044",
+      "file": "0044_zlib_gunzipsync_corrupt_crc.js",
+      "api": "zlib.gunzipSync",
+      "requirement": "gunzipSync rejects a gzip stream whose CRC32 trailer has been corrupted with Error (Z_DATA_ERROR).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0045",
+      "file": "0045_zlib_inflatesync_invalid_header.js",
+      "api": "zlib.inflateSync",
+      "requirement": "inflateSync throws an Error with code Z_DATA_ERROR when given non-zlib bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0046",
+      "file": "0046_zlib_inflaterawsync_corrupt.js",
+      "api": "zlib.inflateRawSync",
+      "requirement": "inflateRawSync throws an Error with code Z_DATA_ERROR on malformed raw deflate bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0047",
+      "file": "0047_zlib_unzipsync_rejects_raw_and_garbage.js",
+      "api": "zlib.unzipSync",
+      "requirement": "unzipSync rejects unframed deflateRawSync output and garbage payloads with Error (Z_DATA_ERROR).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0048",
+      "file": "0048_zlib_truncated_gzip_and_deflate.js",
+      "api": "zlib.gunzipSync",
+      "requirement": "Truncated gzip and deflate buffers both fail closed by throwing an Error with a Z_* error code.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0049",
+      "file": "0049_zlib_inflatesync_missing_dictionary.js",
+      "api": "zlib.inflateSync",
+      "requirement": "inflateSync on preset-dictionary deflate bytes without the dictionary throws an Error with code Z_NEED_DICT.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::zlib::0050",
+      "file": "0050_zlib_brotlidecompresssync_truncated.js",
+      "api": "zlib.brotliDecompressSync",
+      "requirement": "brotliDecompressSync throws an Error on a truncated brotli buffer rather than returning partial data.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

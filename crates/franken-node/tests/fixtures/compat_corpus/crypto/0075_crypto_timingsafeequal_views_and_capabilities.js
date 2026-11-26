@@ -1,0 +1,11 @@
+const crypto = require('crypto');
+const u1 = new Uint8Array([9, 10, 20, 30, 40, 9]).subarray(1, 5);
+const u2 = new Uint8Array([0, 10, 20, 30, 40, 0]).subarray(1, 5);
+const u3 = new Uint8Array([0, 10, 20, 30, 41, 0]).subarray(1, 5);
+console.log(crypto.timingSafeEqual(u1, u2));
+console.log(crypto.timingSafeEqual(u1, u3));
+console.log(crypto.timingSafeEqual(Buffer.alloc(0), Buffer.alloc(0)));
+const hashes = crypto.getHashes();
+const ciphers = crypto.getCiphers();
+console.log(hashes.includes('md5'), hashes.includes('sha1'), ciphers.includes('aes-256-gcm'));
+console.log(crypto.constants.RSA_NO_PADDING, crypto.constants.RSA_PKCS1_OAEP_PADDING);

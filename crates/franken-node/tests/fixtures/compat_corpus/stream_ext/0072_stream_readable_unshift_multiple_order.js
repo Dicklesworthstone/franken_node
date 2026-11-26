@@ -1,0 +1,10 @@
+const { Readable } = require('stream');
+const r = new Readable({ encoding: 'utf8', read() {} });
+r.push('tail');
+r.push(null);
+r.unshift('mid-');
+r.unshift('head-');
+const out = [];
+let chunk;
+while ((chunk = r.read()) !== null) out.push(chunk);
+console.log(out.join(''));

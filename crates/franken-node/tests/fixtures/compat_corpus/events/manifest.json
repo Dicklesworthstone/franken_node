@@ -376,6 +376,426 @@
       ],
       "band": "high-value",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0031",
+      "file": "0031_events_eventemitter_addlistener.js",
+      "api": "events.EventEmitter.addListener",
+      "requirement": "addListener() is an exact alias of on(), returns the emitter for chaining, and invokes listeners on emit.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::events::0032",
+      "file": "0032_events_eventemitter_off_alias.js",
+      "api": "events.EventEmitter.off",
+      "requirement": "off() is an exact alias of removeListener() and returns the emitter as a safe no-op for unregistered listeners.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0033",
+      "file": "0033_events_eventemitter_chaining_mutations.js",
+      "api": "events.EventEmitter.prependOnceListener",
+      "requirement": "prependOnceListener(), removeListener(), off(), and removeAllListeners(name) all return the emitter for chaining.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::events::0034",
+      "file": "0034_events_eventemitter_newlistener_once.js",
+      "api": "events.EventEmitter.once",
+      "requirement": "The 'newListener' meta-event fires before once() insertion with the event name and original unwrapped listener function.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0035",
+      "file": "0035_events_eventemitter_removelistener_after.js",
+      "api": "events.EventEmitter.removeListener",
+      "requirement": "The 'removeListener' meta-event fires after the listener is removed so listenerCount() reflects the decremented count.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0036",
+      "file": "0036_events_eventemitter_removelistener_once_fire.js",
+      "api": "events.EventEmitter.once",
+      "requirement": "When a once() listener fires and auto-removes itself, the 'removeListener' meta-event fires with the original listener function.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0037",
+      "file": "0037_events_eventemitter_removealllisteners_meta_order.js",
+      "api": "events.EventEmitter.removeAllListeners",
+      "requirement": "removeAllListeners(name) emits 'removeListener' for each removed listener in reverse (LIFO) order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0038",
+      "file": "0038_events_eventemitter_duplicate_listener.js",
+      "api": "events.EventEmitter.on",
+      "requirement": "Registering the same listener function twice increments listenerCount to 2 and invokes it twice per emit.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0039",
+      "file": "0039_events_eventemitter_duplicate_lifo_removal.js",
+      "api": "events.EventEmitter.removeListener",
+      "requirement": "Removing a duplicated listener from [a, b, a] removes the most recently registered instance, leaving [a, b].",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0040",
+      "file": "0040_events_eventemitter_emit_add_during_emit.js",
+      "api": "events.EventEmitter.emit",
+      "requirement": "A listener added for the same event during emit() does not run in the current emit and runs on the next emit.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0041",
+      "file": "0041_events_eventemitter_symbol_on_emit.js",
+      "api": "events.EventEmitter.on",
+      "requirement": "Symbol event names work with on(), emit(), listenerCount(), and are included in eventNames().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0042",
+      "file": "0042_events_eventemitter_symbol_once_off.js",
+      "api": "events.EventEmitter.once",
+      "requirement": "Symbol event names work with once(), listeners(), and off(), and are removed from eventNames() once cleared.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0043",
+      "file": "0043_events_eventemitter_symbol_removeall.js",
+      "api": "events.EventEmitter.removeAllListeners",
+      "requirement": "removeAllListeners(sym) clears only the specified Symbol event while preserving string and other Symbol events.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0044",
+      "file": "0044_events_eventemitter_emit_zero_and_many_args.js",
+      "api": "events.EventEmitter.emit",
+      "requirement": "emit() preserves arguments.length === 0 with no payload and forwards six positional arguments intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0045",
+      "file": "0045_events_eventemitter_emit_reentrant.js",
+      "api": "events.EventEmitter.emit",
+      "requirement": "Nested re-entrant emit() inside a listener executes synchronously before returning to the outer listener.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0046",
+      "file": "0046_events_eventemitter_setmaxlisteners_zero.js",
+      "api": "events.EventEmitter.setMaxListeners",
+      "requirement": "setMaxListeners(0) configures unlimited listeners and allows attaching 15 listeners without warning or error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0047",
+      "file": "0047_events_setmaxlisteners_module.js",
+      "api": "events.setMaxListeners",
+      "requirement": "events.setMaxListeners(n, ...emitters) updates the max listener limit on one or more EventEmitter instances.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0048",
+      "file": "0048_events_getmaxlisteners_module.js",
+      "api": "events.getMaxListeners",
+      "requirement": "events.getMaxListeners(emitter) returns the emitter's effective max listeners before and after updates.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::events::0049",
+      "file": "0049_events_geteventlisteners.js",
+      "api": "events.getEventListeners",
+      "requirement": "events.getEventListeners(emitter, name) returns a defensive copy of listeners for string and Symbol events.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0050",
+      "file": "0050_events_eventemitter_listenercount_static.js",
+      "api": "events.EventEmitter.listenerCount",
+      "requirement": "Static EventEmitter.listenerCount(emitter, name) reports the same count as emitter.listenerCount(name).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::events::0051",
+      "file": "0051_events_eventemitter_off_pending_once.js",
+      "api": "events.EventEmitter.off",
+      "requirement": "off(name, originalFn) removes a pending once() listener before emit so it is never invoked.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0052",
+      "file": "0052_events_eventemitter_rawlisteners_invoke_and_copy.js",
+      "api": "events.EventEmitter.rawListeners",
+      "requirement": "rawListeners() returns a copy, and invoking a returned once-wrapper manually fires the callback and unregisters it.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0053",
+      "file": "0053_events_eventemitter_eventnames_cleanup.js",
+      "api": "events.EventEmitter.eventNames",
+      "requirement": "eventNames() omits an event name once its last listener is removed via off() or consumed by once().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0054",
+      "file": "0054_events_eventemitter_subclass.js",
+      "api": "events.EventEmitter",
+      "requirement": "ES6 class subclassing EventEmitter preserves instanceof, inherited methods, and listener this binding.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0055",
+      "file": "0055_events_once_zero_and_multi_args.js",
+      "api": "events.once",
+      "requirement": "events.once() resolves to an empty array for zero-arg emits and a full argument array for multi-arg emits.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0056",
+      "file": "0056_events_once_abortsignal_preaborted.js",
+      "api": "events.once",
+      "requirement": "events.once() rejects immediately with AbortError (ABORT_ERR) for a pre-aborted AbortSignal and leaves no listeners.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0057",
+      "file": "0057_events_once_abortsignal_midflight.js",
+      "api": "events.once",
+      "requirement": "events.once() rejects with AbortError (ABORT_ERR) when aborted mid-flight and cleans up its listeners.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0058",
+      "file": "0058_events_on_async_iterator.js",
+      "api": "events.on",
+      "requirement": "events.on() yields emitted argument arrays via async iteration and cleans up listeners upon break.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0059",
+      "file": "0059_events_on_buffering.js",
+      "api": "events.on",
+      "requirement": "events.on() buffers events emitted before next() is awaited in FIFO order and detaches on return().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0060",
+      "file": "0060_events_on_error_rejects.js",
+      "api": "events.on",
+      "requirement": "events.on() rejects pending async iteration when an 'error' event is emitted on the target emitter.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0061",
+      "file": "0061_events_errormonitor.js",
+      "api": "events.errorMonitor",
+      "requirement": "An events.errorMonitor listener observes emitted errors without suppressing the uncaught 'error' throw.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::events::0062",
+      "file": "0062_events_addabortlistener.js",
+      "api": "events.addAbortListener",
+      "requirement": "events.addAbortListener() invokes the callback once on abort and cancels registration via [Symbol.dispose]().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0063",
+      "file": "0063_events_eventemitter_emit_error_no_arg.js",
+      "api": "events.EventEmitter.emit",
+      "requirement": "Emitting 'error' with no payload and no error listener throws an Error instance synchronously.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::events::0064",
+      "file": "0064_events_eventemitter_setmaxlisteners_invalid.js",
+      "api": "events.EventEmitter.setMaxListeners",
+      "requirement": "setMaxListeners() rejects negative numbers and NaN with a RangeError while leaving the existing limit intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::events::0065",
+      "file": "0065_events_eventemitter_prepend_multiple.js",
+      "api": "events.EventEmitter.prependListener",
+      "requirement": "Repeated prependListener() calls execute in LIFO order ahead of listeners registered via on().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

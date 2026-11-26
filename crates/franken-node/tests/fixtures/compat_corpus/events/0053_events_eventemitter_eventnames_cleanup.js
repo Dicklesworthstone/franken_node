@@ -1,0 +1,10 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+const fn = () => {};
+e.on('stay', () => {});
+e.on('drop', fn);
+e.once('single', () => {});
+console.log(e.eventNames().slice().sort().join(','));
+e.off('drop', fn);
+e.emit('single');
+console.log(e.eventNames().join(','));

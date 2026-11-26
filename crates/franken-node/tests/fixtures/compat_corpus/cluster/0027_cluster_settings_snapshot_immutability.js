@@ -1,0 +1,11 @@
+const cluster = require('cluster');
+const s0 = cluster.settings;
+cluster.setupPrimary({ exec: 'worker_one.js' });
+const s1 = cluster.settings;
+cluster.setupPrimary({ exec: 'worker_two.js', args: ['--v2'] });
+const s2 = cluster.settings;
+console.log('fresh-refs:' + (s0 !== s1 && s1 !== s2));
+console.log('s0-empty:' + (Object.keys(s0).length === 0));
+console.log('s1-exec:' + s1.exec.endsWith('worker_one.js'));
+console.log('s2-exec:' + s2.exec.endsWith('worker_two.js'));
+console.log('s2-args:' + s2.args.join(','));

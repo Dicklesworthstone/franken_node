@@ -1,0 +1,11 @@
+const os = require('os');
+const e = os.constants.errno;
+console.log(e.EPERM === 1);
+console.log(e.EBADF === 9);
+console.log(e.EAGAIN === 11);
+console.log(e.EACCES === 13);
+console.log(e.EEXIST === 17);
+console.log(e.ENOTDIR === 20);
+console.log(e.EISDIR === 21);
+console.log(e.EINVAL === 22);
+console.log(e.EPIPE === 32);

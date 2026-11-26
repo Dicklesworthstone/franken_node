@@ -496,6 +496,306 @@
       ],
       "band": "high-value",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::net::0041",
+      "file": "0041_net_isip_ipv6_edge_forms.js",
+      "api": "net.isIP (IPv6 edge forms)",
+      "requirement": "isIP classifies ::, IPv4-mapped ::ffff:127.0.0.1, link-local fe80::1, and compressed 2001:db8::1 as 6.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0042",
+      "file": "0042_net_isip_invalid_forms.js",
+      "api": "net.isIP (invalid forms)",
+      "requirement": "isIP rejects CIDR notation, bracketed IPv6, hostnames, double :: compression, and leading whitespace.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0043",
+      "file": "0043_net_isipv4_boundaries.js",
+      "api": "net.isIPv4 (boundaries)",
+      "requirement": "isIPv4 accepts 0.0.0.0 and 255.255.255.255 while rejecting IPv4-mapped IPv6 and leading-zero octets.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0044",
+      "file": "0044_net_isipv6_edge_forms.js",
+      "api": "net.isIPv6 (edge forms)",
+      "requirement": "isIPv6 accepts :: and ::ffff:127.0.0.1 while rejecting dotted-quad IPv4 and bracketed IPv6.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0045",
+      "file": "0045_net_server_address_lifecycle.js",
+      "api": "net.Server.address lifecycle",
+      "requirement": "net.Server.address() returns null before listen and after close, and a port object while listening.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0046",
+      "file": "0046_net_server_listen_options.js",
+      "api": "net.Server.listen(options)",
+      "requirement": "server.listen({ port: 0, host: '127.0.0.1' }, cb) binds loopback and serves connections.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0047",
+      "file": "0047_net_socket_connecting_transition.js",
+      "api": "net.Socket.connecting",
+      "requirement": "socket.connecting transitions from true immediately after connect() to false when 'connect' fires.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0048",
+      "file": "0048_net_socket_destroyed_flags.js",
+      "api": "net.Socket destroyed/readable/writable",
+      "requirement": "destroy() transitions destroyed/readable/writable from false/true/true to true/false/false by 'close'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0049",
+      "file": "0049_net_socket_end_callback.js",
+      "api": "net.Socket.end(data, cb)",
+      "requirement": "socket.end(data, cb) delivers final data, emits 'finish', and invokes the completion callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0050",
+      "file": "0050_net_socket_finish_event.js",
+      "api": "net.Socket finish event",
+      "requirement": "Ending the writable side of a connected socket emits the 'finish' event exactly once.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0051",
+      "file": "0051_net_client_destroy_closes_peer.js",
+      "api": "net.Socket.destroy (client to server)",
+      "requirement": "Destroying the client socket tears down the connection and closes the peer server socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0052",
+      "file": "0052_net_server_destroy_closes_client.js",
+      "api": "net.Socket.destroy (server to client)",
+      "requirement": "Destroying the server socket propagates teardown and emits 'close' on the client socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0053",
+      "file": "0053_net_createconnection_options_cb.js",
+      "api": "net.createConnection(options, cb)",
+      "requirement": "net.createConnection accepts an options object with a connect callback and completes a roundtrip.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0054",
+      "file": "0054_net_connect_localhost_alias.js",
+      "api": "net.connect (localhost)",
+      "requirement": "Connecting to host 'localhost' reaches a server bound on 127.0.0.1 and completes a roundtrip.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0055",
+      "file": "0055_net_utf8_multibyte_roundtrip.js",
+      "api": "net UTF-8 multibyte roundtrip",
+      "requirement": "UTF-8 multibyte strings with accented characters, CJK, and emoji roundtrip intact over TCP.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0056",
+      "file": "0056_net_three_concurrent_clients.js",
+      "api": "net concurrent clients",
+      "requirement": "Three simultaneous TCP echo clients against one server each receive their distinct echoed payload.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0057",
+      "file": "0057_net_bidirectional_simultaneous_writes.js",
+      "api": "net bidirectional simultaneous writes",
+      "requirement": "Simultaneous client and server writes upon connection deliver both payloads without deadlock.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0058",
+      "file": "0058_net_length_prefixed_binary_framing.js",
+      "api": "net binary framing roundtrip",
+      "requirement": "Multiple 4-byte big-endian length-prefixed binary frames roundtrip intact over a single TCP stream.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0059",
+      "file": "0059_net_server_close_waits_for_sockets.js",
+      "api": "net.Server close ordering",
+      "requirement": "net.Server.close waits until active sockets close before firing the server close callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0060",
+      "file": "0060_net_write_before_connect_buffered.js",
+      "api": "net.Socket pre-connect write buffering",
+      "requirement": "Writes issued before the 'connect' event are buffered and delivered to the server once connected.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0061",
+      "file": "0061_net_bytes_read_written_both_sides.js",
+      "api": "net.Socket bytesRead/bytesWritten",
+      "requirement": "Both client and server sockets accurately accumulate bytesRead and bytesWritten across multiple writes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0062",
+      "file": "0062_net_pause_buffers_chunks_and_end.js",
+      "api": "net.Socket pause/resume buffering",
+      "requirement": "Pausing a socket queues multiple incoming chunks and 'end', delivering all data before 'end' on resume.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0063",
+      "file": "0063_net_server_eventemitter_surface.js",
+      "api": "net.Server EventEmitter methods",
+      "requirement": "net.Server supports on, once, off, and listenerCount for managing connection listeners.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::net::0064",
+      "file": "0064_net_connect_error_close_haderror.js",
+      "api": "net.Socket error -> close(hadError=true)",
+      "requirement": "A refused connection emits 'error' with code ECONNREFUSED followed by 'close' with hadError=true.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::net::0065",
+      "file": "0065_net_socket_double_end_idempotent.js",
+      "api": "net.Socket.end idempotence",
+      "requirement": "Calling socket.end() twice is idempotent and emits 'finish' only once.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
     }
   ]
 }

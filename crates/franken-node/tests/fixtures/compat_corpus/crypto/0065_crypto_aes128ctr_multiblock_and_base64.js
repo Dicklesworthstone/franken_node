@@ -1,0 +1,14 @@
+const crypto = require('crypto');
+const key = Buffer.alloc(16, 0x77);
+const iv1 = Buffer.alloc(16, 0x01);
+const iv2 = Buffer.alloc(16, 0x02);
+const msg = 'The quick brown fox jumps over the lazy dog across three AES-128-CTR blocks.';
+const c1 = crypto.createCipheriv('aes-128-ctr', key, iv1);
+const b64_1 = c1.update(msg, 'utf8', 'base64') + c1.final('base64');
+const c2 = crypto.createCipheriv('aes-128-ctr', key, iv2);
+const b64_2 = c2.update(msg, 'utf8', 'base64') + c2.final('base64');
+const d1 = crypto.createDecipheriv('aes-128-ctr', key, iv1);
+const out = d1.update(b64_1, 'base64', 'utf8') + d1.final('utf8');
+console.log(b64_1 !== b64_2);
+console.log(out === msg);
+console.log(b64_1);

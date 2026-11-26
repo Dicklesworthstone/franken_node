@@ -1,0 +1,15 @@
+const events = require('events');
+const {EventEmitter} = events;
+const e = new EventEmitter();
+const f1 = () => {};
+const f2 = () => {};
+const sym = Symbol('s');
+e.on('a', f1);
+e.on('a', f2);
+e.on(sym, f1);
+const listA = events.getEventListeners(e, 'a');
+console.log(listA.length + ':' + (listA[0] === f1) + ':' + (listA[1] === f2));
+listA.pop();
+console.log(events.getEventListeners(e, 'a').length);
+console.log(events.getEventListeners(e, sym).length + ':' + (events.getEventListeners(e, sym)[0] === f1));
+console.log(events.getEventListeners(e, 'none').length);

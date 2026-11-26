@@ -376,6 +376,306 @@
       ],
       "band": "high-value",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::os::0031",
+      "file": "0031_os_eol_lines.js",
+      "api": "os.EOL",
+      "requirement": "os.EOL has character code 10 on Linux, contains no CR, and cleanly joins and splits multi-line text.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0032",
+      "file": "0032_os_devnull_path.js",
+      "api": "os.devNull",
+      "requirement": "os.devNull is an absolute path located at dirname '/dev' and basename 'null' on Linux.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0033",
+      "file": "0033_os_endianness_typedarray.js",
+      "api": "os.endianness",
+      "requirement": "os.endianness() is stable across calls and agrees with TypedArray byte-order detection.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0034",
+      "file": "0034_os_arch_machine_consistency.js",
+      "api": "os.arch",
+      "requirement": "os.arch() and os.machine() are stable across calls and form a consistent architecture pair.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0035",
+      "file": "0035_os_release_format.js",
+      "api": "os.release",
+      "requirement": "os.release() is stable across repeated calls, starts with major.minor digits, and contains no NUL bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::os::0036",
+      "file": "0036_os_version_stable.js",
+      "api": "os.version",
+      "requirement": "os.version() is stable across repeated calls, has non-whitespace content, and contains no NUL bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::os::0037",
+      "file": "0037_os_hostname_invariants.js",
+      "api": "os.hostname",
+      "requirement": "os.hostname() is stable across calls and contains no whitespace or path separator characters.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::os::0038",
+      "file": "0038_os_homedir_userinfo.js",
+      "api": "os.homedir",
+      "requirement": "os.homedir() is stable, matches os.userInfo().homedir, and omits a trailing slash unless root.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0039",
+      "file": "0039_os_tmpdir_normalized.js",
+      "api": "os.tmpdir",
+      "requirement": "os.tmpdir() is stable across calls, begins with '/', and omits a trailing slash unless root.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0040",
+      "file": "0040_os_totalmem_invariants.js",
+      "api": "os.totalmem",
+      "requirement": "os.totalmem() returns a constant integer byte count of at least 1 MiB across repeated calls.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0041",
+      "file": "0041_os_freemem_bounds.js",
+      "api": "os.freemem",
+      "requirement": "os.freemem() returns a finite non-negative integer bounded above by os.totalmem().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0042",
+      "file": "0042_os_uptime_monotonic.js",
+      "api": "os.uptime",
+      "requirement": "os.uptime() returns finite non-negative values that are monotonic non-decreasing across successive calls.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::os::0043",
+      "file": "0043_os_loadavg_fresh_copy.js",
+      "api": "os.loadavg",
+      "requirement": "os.loadavg() returns a fresh 3-element array on each call so mutating one result does not affect later calls.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0044",
+      "file": "0044_os_cpus_full_times_schema.js",
+      "api": "os.cpus",
+      "requirement": "Every entry in os.cpus() has string model, non-negative speed, and all five non-negative finite times fields (user, nice, sys, idle, irq).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0045",
+      "file": "0045_os_cpus_fresh_and_parallelism.js",
+      "api": "os.availableParallelism",
+      "requirement": "os.cpus() returns a fresh array of consistent length per call and os.availableParallelism() is within [1, cpus().length].",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0046",
+      "file": "0046_os_userinfo_gid_and_utf8.js",
+      "api": "os.userInfo",
+      "requirement": "os.userInfo() includes non-negative integer gid, and { encoding: 'utf8' } returns a fresh object with identical fields.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0047",
+      "file": "0047_os_constants_signals_posix.js",
+      "api": "os.constants.signals",
+      "requirement": "POSIX signals SIGQUIT, SIGABRT, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, and SIGCHLD have exact Linux values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0048",
+      "file": "0048_os_constants_errno_fs_io.js",
+      "api": "os.constants.errno",
+      "requirement": "Filesystem and I/O errno constants EPERM, EBADF, EAGAIN, EACCES, EEXIST, ENOTDIR, EISDIR, EINVAL, and EPIPE match Linux values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0049",
+      "file": "0049_os_constants_errno_system.js",
+      "api": "os.constants.errno",
+      "requirement": "System errno constants ESRCH, EINTR, EIO, ENOMEM, EBUSY, EMFILE, ENOSPC, EROFS, and ERANGE are distinct positive Linux integers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0050",
+      "file": "0050_os_constants_signals_jobcontrol.js",
+      "api": "os.constants.signals",
+      "requirement": "Job-control and trap signals SIGILL, SIGTRAP, SIGBUS, SIGFPE, SIGCONT, SIGSTOP, and SIGTSTP match exact Linux numbers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0051",
+      "file": "0051_os_constants_priority_ordering.js",
+      "api": "os.constants.priority",
+      "requirement": "os.constants.priority exposes all six niceness levels (-20, -14, -7, 0, 10, 19) in strict ascending order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0052",
+      "file": "0052_os_networkinterfaces_schema_fresh.js",
+      "api": "os.networkInterfaces",
+      "requirement": "os.networkInterfaces() returns a fresh object per call with non-empty string keys and entries containing string address/netmask/mac and boolean internal.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::os::0053",
+      "file": "0053_os_setpriority_idempotent.js",
+      "api": "os.setPriority",
+      "requirement": "os.setPriority(0, current) and one-argument os.setPriority(current) succeed and keep the process priority unchanged.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0054",
+      "file": "0054_os_setpriority_boundaries.js",
+      "api": "os.setPriority",
+      "requirement": "os.setPriority() rejects boundary out-of-range priorities (-21, 20) and non-integer pid (1.5) with RangeError (ERR_OUT_OF_RANGE).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::os::0055",
+      "file": "0055_os_getpriority_invalid_args.js",
+      "api": "os.getPriority",
+      "requirement": "os.getPriority() throws TypeError (ERR_INVALID_ARG_TYPE) for string pid and RangeError (ERR_OUT_OF_RANGE) for non-integer pid.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

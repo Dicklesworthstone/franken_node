@@ -1,0 +1,12 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+let seen = '';
+const fn = (v) => { seen = v; };
+e.once('step', fn);
+const raw = e.rawListeners('step');
+const copy = e.rawListeners('step');
+copy.length = 0;
+console.log(e.listenerCount('step'));
+raw[0]('manual');
+console.log(seen);
+console.log(e.listenerCount('step'));

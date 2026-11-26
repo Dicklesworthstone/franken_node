@@ -376,6 +376,246 @@
       ],
       "band": "core",
       "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0031",
+      "file": "0031_child_process_spawnsync_buffer_input.js",
+      "api": "child_process.spawnSync",
+      "requirement": "spawnSync with a binary Buffer input pipes exact bytes through cat and returns a Buffer stdout.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0032",
+      "file": "0032_child_process_spawnsync_utf8_both_streams.js",
+      "api": "child_process.spawnSync",
+      "requirement": "With encoding 'utf8', spawnSync decodes both stdout and stderr as strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0033",
+      "file": "0033_child_process_spawnsync_output_stderr_slot.js",
+      "api": "child_process.spawnSync",
+      "requirement": "spawnSync result.output has null at index 0 and captures stderr at index 2 matching result.stderr.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0034",
+      "file": "0034_child_process_spawnsync_printf_args.js",
+      "api": "child_process.spawnSync",
+      "requirement": "spawnSync passes format and positional arguments directly to printf without adding trailing newlines.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0035",
+      "file": "0035_child_process_spawnsync_shell_chaining.js",
+      "api": "child_process.spawnSync",
+      "requirement": "With shell: true, spawnSync evaluates && and || shell control operators.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0036",
+      "file": "0036_child_process_execfilesync_printf_utf8.js",
+      "api": "child_process.execFileSync",
+      "requirement": "execFileSync with printf arguments and encoding 'utf8' returns the formatted string directly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0037",
+      "file": "0037_child_process_execfilesync_cat_input.js",
+      "api": "child_process.execFileSync",
+      "requirement": "execFileSync with the input option feeds cat's stdin and returns the echoed utf8 string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0038",
+      "file": "0038_child_process_execfilesync_nonzero_throws.js",
+      "api": "child_process.execFileSync",
+      "requirement": "execFileSync throws an Error carrying error.status when the child exits nonzero.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0039",
+      "file": "0039_child_process_execsync_utf8_env_pipeline.js",
+      "api": "child_process.execSync",
+      "requirement": "execSync with encoding 'utf8' and env runs a shell pipeline and returns the string stdout.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0040",
+      "file": "0040_child_process_execsync_input_buffer.js",
+      "api": "child_process.execSync",
+      "requirement": "execSync feeds a Buffer input into cat and returns the echoed Buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0041",
+      "file": "0041_child_process_spawn_stdout_and_stderr.js",
+      "api": "child_process.spawn",
+      "requirement": "Async spawn delivers stdout and stderr bytes on their separate streams before 'close'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0042",
+      "file": "0042_child_process_spawn_multichunk_stdin.js",
+      "api": "child_process.ChildProcess.stdin",
+      "requirement": "Multiple string and Buffer writes to child.stdin followed by end() arrive at cat in exact order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0043",
+      "file": "0043_child_process_spawn_pid_and_spawn_event.js",
+      "api": "child_process.spawn",
+      "requirement": "spawn exposes a positive numeric child.pid and emits 'spawn' before 'exit' and 'close'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0044",
+      "file": "0044_child_process_spawn_close_args.js",
+      "api": "child_process.spawn",
+      "requirement": "Both 'exit' and 'close' receive the child's nonzero exit code and null signal.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0045",
+      "file": "0045_child_process_exec_both_streams.js",
+      "api": "child_process.exec",
+      "requirement": "exec passes err === null along with both captured stdout and stderr strings to its callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0046",
+      "file": "0046_child_process_exec_env_and_cwd.js",
+      "api": "child_process.exec",
+      "requirement": "exec honors both env and cwd options when running a shell command asynchronously.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0047",
+      "file": "0047_child_process_execfile_args_and_env.js",
+      "api": "child_process.execFile",
+      "requirement": "execFile passes positional arguments and env variables and delivers stdout with empty stderr.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0048",
+      "file": "0048_child_process_execfile_nonzero_error.js",
+      "api": "child_process.execFile",
+      "requirement": "execFile on nonzero exit passes an Error with code equal to exit status and captured stderr.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::child_process::0049",
+      "file": "0049_child_process_spawnsync_stdio_ignore_both.js",
+      "api": "child_process.spawnSync",
+      "requirement": "With stdio 'ignore', spawnSync sets stdout, stderr, and all output slots to null.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::child_process::0050",
+      "file": "0050_child_process_spawn_kill_sigkill.js",
+      "api": "child_process.ChildProcess.kill",
+      "requirement": "kill('SIGKILL') terminates a running child, flips killed to true, and reports signal SIGKILL in 'exit'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
     }
   ]
 }

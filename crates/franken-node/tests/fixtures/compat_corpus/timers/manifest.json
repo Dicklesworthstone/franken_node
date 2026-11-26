@@ -378,6 +378,366 @@
       ],
       "band": "core",
       "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0031",
+      "file": "0031_timers_settimeout_omitted_delay.js",
+      "api": "timers.setTimeout",
+      "requirement": "setTimeout with an omitted or undefined delay defaults to immediate timeout and runs in FIFO order after sync code.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0032",
+      "file": "0032_timers_settimeout_arg_identities.js",
+      "api": "timers.setTimeout",
+      "requirement": "setTimeout preserves null, undefined, object, and array extra arguments by exact reference identity.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0033",
+      "file": "0033_timers_cleartimeout_from_callback.js",
+      "api": "timers.clearTimeout",
+      "requirement": "An earlier setTimeout callback can cancel a later pending setTimeout via clearTimeout before it fires.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0034",
+      "file": "0034_timers_cleartimeout_idempotent.js",
+      "api": "timers.clearTimeout",
+      "requirement": "Calling clearTimeout twice on the same handle is idempotent and does not disturb other pending timeouts.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0035",
+      "file": "0035_timers_setinterval_extra_args.js",
+      "api": "timers.setInterval",
+      "requirement": "setInterval forwards additional arguments after the delay to every callback tick.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0036",
+      "file": "0036_timers_clearinterval_before_first_tick.js",
+      "api": "timers.clearInterval",
+      "requirement": "Calling clearInterval synchronously after setInterval prevents even the first tick from firing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0037",
+      "file": "0037_timers_clearinterval_noop_inputs.js",
+      "api": "timers.clearInterval",
+      "requirement": "clearInterval is a safe no-op on already-cleared handles, null, and undefined.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0038",
+      "file": "0038_timers_setinterval_two_concurrent.js",
+      "api": "timers.setInterval",
+      "requirement": "Two concurrent setInterval timers maintain independent ticks and stop cleanly via their own handles.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0039",
+      "file": "0039_timers_clearinterval_from_timeout.js",
+      "api": "timers.clearInterval",
+      "requirement": "A setTimeout callback can clear an active setInterval externally to prevent further ticks.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0040",
+      "file": "0040_timers_setimmediate_fifo.js",
+      "api": "timers.setImmediate",
+      "requirement": "Multiple setImmediate callbacks scheduled synchronously execute in strict FIFO registration order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0041",
+      "file": "0041_timers_setimmediate_extra_args.js",
+      "api": "timers.setImmediate",
+      "requirement": "setImmediate forwards additional arguments after the callback in positional order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0042",
+      "file": "0042_timers_clearimmediate_from_immediate.js",
+      "api": "timers.clearImmediate",
+      "requirement": "An earlier setImmediate callback can cancel a later queued setImmediate via clearImmediate.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0043",
+      "file": "0043_timers_clearimmediate_noop_inputs.js",
+      "api": "timers.clearImmediate",
+      "requirement": "clearImmediate is a safe no-op on already-executed handles, null, and undefined.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0044",
+      "file": "0044_global_queuemicrotask_nested_drain.js",
+      "api": "global.queueMicrotask",
+      "requirement": "Nested queueMicrotask callbacks drain completely before any setImmediate or setTimeout runs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0045",
+      "file": "0045_global_queuemicrotask_promise_interleave.js",
+      "api": "global.queueMicrotask",
+      "requirement": "Interleaved queueMicrotask and Promise.resolve().then callbacks run in FIFO enqueue order before timers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0046",
+      "file": "0046_timers_setimmediate_microtask_drain.js",
+      "api": "timers.setImmediate",
+      "requirement": "A queueMicrotask scheduled inside a setImmediate callback drains before subsequent timers run.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0047",
+      "file": "0047_timers_timeout_ref_chaining.js",
+      "api": "timers.setTimeout",
+      "requirement": "Timeout#unref() and Timeout#ref() return the timeout handle itself for method chaining.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0048",
+      "file": "0048_timers_immediate_ref_unref.js",
+      "api": "timers.setImmediate",
+      "requirement": "Immediate handles support hasRef(), unref(), and ref() with chaining return values and still execute.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0049",
+      "file": "0049_timers_interval_ref_unref.js",
+      "api": "timers.setInterval",
+      "requirement": "Interval handles support hasRef(), unref(), and ref() with chaining return values and continue firing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0050",
+      "file": "0050_timers_module_exports_identity.js",
+      "api": "timers.promises",
+      "requirement": "require('timers') exposes clearInterval, setImmediate, clearImmediate, and promises matching global/subpath exports.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0051",
+      "file": "0051_timers_promises_settimeout_default_undef.js",
+      "api": "timers/promises.setTimeout",
+      "requirement": "timers/promises.setTimeout(delay) resolves to undefined when no value argument is provided.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0052",
+      "file": "0052_timers_promises_settimeout_all_identity.js",
+      "api": "timers/promises.setTimeout",
+      "requirement": "timers/promises.setTimeout resolves with exact object reference identity and composes with Promise.all.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0053",
+      "file": "0053_timers_promises_setimmediate.js",
+      "api": "timers/promises.setImmediate",
+      "requirement": "timers/promises.setImmediate() resolves to undefined by default and to the exact supplied value when passed.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0054",
+      "file": "0054_timers_promises_setinterval_value.js",
+      "api": "timers/promises.setInterval",
+      "requirement": "timers/promises.setInterval(delay, value) yields the supplied value on each iteration until break.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0055",
+      "file": "0055_timers_nexttick_microtask_ordering.js",
+      "api": "timers.setTimeout",
+      "requirement": "process.nextTick drains before Promise.then and queueMicrotask, which all drain before setTimeout(0).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::timers::0056",
+      "file": "0056_timers_nexttick_inside_timeout.js",
+      "api": "timers.setTimeout",
+      "requirement": "process.nextTick queued inside a timer callback runs before a queueMicrotask queued in the same callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0057",
+      "file": "0057_timers_module_setinterval_clearinterval.js",
+      "api": "timers.setInterval",
+      "requirement": "require('timers').setInterval and clearInterval schedule and cancel recurring ticks through the module exports.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0058",
+      "file": "0058_timers_module_setimmediate_clearimmediate.js",
+      "api": "timers.setImmediate",
+      "requirement": "require('timers').setImmediate and clearImmediate schedule and cancel immediate callbacks via the module exports.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::timers::0059",
+      "file": "0059_timers_settimeout_null_false_delay.js",
+      "api": "timers.setTimeout",
+      "requirement": "setTimeout coerces null and false delays to 0 and runs both callbacks in FIFO order after sync code.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::timers::0060",
+      "file": "0060_timers_settimeout_fractional_delay.js",
+      "api": "timers.setTimeout",
+      "requirement": "Fractional millisecond delays (5.4ms vs 25.9ms) preserve ascending firing order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

@@ -302,6 +302,7 @@
         "output",
         "exit"
       ],
+      "suppress_runtime_warnings": true,
       "band": "high-value",
       "risk_band": "medium"
     },
@@ -316,6 +317,486 @@
       ],
       "band": "edge",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::url::0026",
+      "file": "0026_url_canparse_valid_invalid.js",
+      "api": "URL.canParse",
+      "requirement": "URL.canParse returns true for valid absolute URLs and false for invalid or relative strings without throwing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0027",
+      "file": "0027_url_canparse_with_base.js",
+      "api": "URL.canParse",
+      "requirement": "URL.canParse(input, base) validates relative URLs against a valid base and returns false when base is invalid.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0028",
+      "file": "0028_url_parse_static.js",
+      "api": "URL.parse",
+      "requirement": "URL.parse(input, base) returns a URL instance for valid inputs and null instead of throwing for invalid URLs or bases.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0029",
+      "file": "0029_url_setter_protocol.js",
+      "api": "URL.protocol",
+      "requirement": "Assigning URL.protocol updates the scheme, origin, and serialized href between special schemes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0030",
+      "file": "0030_url_setter_hostname.js",
+      "api": "URL.hostname",
+      "requirement": "Assigning URL.hostname updates the host while retaining port, pathname, and query components.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0031",
+      "file": "0031_url_setter_port.js",
+      "api": "URL.port",
+      "requirement": "Assigning URL.port updates the port, elides scheme default ports, clears on '', and ignores invalid port values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0032",
+      "file": "0032_url_setter_host.js",
+      "api": "URL.host",
+      "requirement": "Assigning URL.host updates both hostname and port together, clearing port when absent.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0033",
+      "file": "0033_url_setter_search.js",
+      "api": "URL.search",
+      "requirement": "Assigning URL.search with or without leading '?' or '' updates href and live-syncs URL.searchParams.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0034",
+      "file": "0034_url_setter_href.js",
+      "api": "URL.href",
+      "requirement": "Assigning URL.href reparses and replaces all URL components on the existing instance.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0035",
+      "file": "0035_url_setter_credentials.js",
+      "api": "URL.username",
+      "requirement": "Assigning URL.username and URL.password percent-encodes reserved userinfo characters and reflects them in href.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0036",
+      "file": "0036_url_tostring_tojson.js",
+      "api": "URL.toJSON",
+      "requirement": "URL.toString() and URL.toJSON() return href and serialize cleanly via JSON.stringify.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0037",
+      "file": "0037_url_ws_wss_ftp_schemes.js",
+      "api": "URL",
+      "requirement": "Special schemes ws:, wss:, and ftp: elide default ports (80, 443, 21) and produce scheme-host origins.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0038",
+      "file": "0038_url_file_scheme.js",
+      "api": "URL",
+      "requirement": "file: URLs parse an empty hostname, preserve POSIX pathname, and report opaque 'null' origin.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0039",
+      "file": "0039_url_opaque_schemes.js",
+      "api": "URL.origin",
+      "requirement": "Non-special opaque schemes (mailto:, data:, urn:) retain opaque paths and report origin === 'null'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0040",
+      "file": "0040_url_ipv6_hostname.js",
+      "api": "URL.hostname",
+      "requirement": "IPv6 literal hosts are bracketed in hostname/host, preserve explicit ports, and compress zero runs canonically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0041",
+      "file": "0041_url_resolve_dot_segments.js",
+      "api": "URL",
+      "requirement": "Relative '.' and '..' dot segments resolve against base paths per WHATWG URL path normalization.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0042",
+      "file": "0042_url_resolve_query_hash_empty.js",
+      "api": "URL",
+      "requirement": "Resolving '?query', '#fragment', and '' against a base URL replaces only the trailing query/fragment components.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0043",
+      "file": "0043_url_resolve_protocol_relative.js",
+      "api": "URL",
+      "requirement": "Protocol-relative URLs ('//host/path') inherit the base URL scheme while replacing host and path.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0044",
+      "file": "0044_url_clone_from_url.js",
+      "api": "URL",
+      "requirement": "new URL(existingUrl) clones the URL independently so mutations to the clone do not affect the original.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0045",
+      "file": "0045_urlsearchparams_ctor_leading_q.js",
+      "api": "URLSearchParams",
+      "requirement": "URLSearchParams strips a single leading '?' and parses bare keys, empty keys, and values containing '='.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0046",
+      "file": "0046_urlsearchparams_ctor_entries.js",
+      "api": "URLSearchParams",
+      "requirement": "new URLSearchParams([[k, v], ...]) constructs query pairs preserving order and repeated keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0047",
+      "file": "0047_urlsearchparams_ctor_object.js",
+      "api": "URLSearchParams",
+      "requirement": "new URLSearchParams(object) initializes key/value pairs from own enumerable properties.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0048",
+      "file": "0048_urlsearchparams_ctor_clone.js",
+      "api": "URLSearchParams",
+      "requirement": "new URLSearchParams(otherParams) copies all entries into an independent instance.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0049",
+      "file": "0049_urlsearchparams_entries_keys_values.js",
+      "api": "URLSearchParams.entries",
+      "requirement": "entries(), keys(), and values() iterate all parameter pairs including duplicates in insertion order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0050",
+      "file": "0050_urlsearchparams_foreach_iterator.js",
+      "api": "URLSearchParams.forEach",
+      "requirement": "forEach((value, key) => ...) and Symbol.iterator yield matching [key, value] sequences.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0051",
+      "file": "0051_url_searchparams_live_sync.js",
+      "api": "URL.searchParams",
+      "requirement": "Mutating url.searchParams (append, set, delete) live-updates url.search and url.href and drops '?' when empty.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::url::0052",
+      "file": "0052_urlsearchparams_set_new_and_dup.js",
+      "api": "URLSearchParams.set",
+      "requirement": "searchParams.set appends absent keys at the end and collapses duplicates in place at the first occurrence.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0053",
+      "file": "0053_url_fileurltopath_url_object.js",
+      "api": "url.fileURLToPath",
+      "requirement": "url.fileURLToPath accepts URL objects directly and decodes percent-encoded spaces and UTF-8 sequences.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::url::0054",
+      "file": "0054_urlsearchparams_sort_codeunits.js",
+      "api": "URLSearchParams.sort",
+      "requirement": "searchParams.sort orders keys by UTF-16 code units (uppercase before lowercase) while remaining stable for equal keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0055",
+      "file": "0055_urlsearchparams_special_encoding.js",
+      "api": "URLSearchParams.toString",
+      "requirement": "URLSearchParams.toString uses application/x-www-form-urlencoded encoding (space as '+', preserving _-.* and escaping ~!*()).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0056",
+      "file": "0056_url_ipv4_normalization.js",
+      "api": "URL.hostname",
+      "requirement": "IPv4 shorthand and hex hostnames normalize to canonical dotted-quad decimal notation.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0057",
+      "file": "0057_url_empty_search_and_hash.js",
+      "api": "URL.search",
+      "requirement": "Bare '?' and '#' suffixes produce empty search and hash properties while retaining the delimiters in href.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0058",
+      "file": "0058_url_whitespace_stripping.js",
+      "api": "URL",
+      "requirement": "WHATWG URL parsing strips leading/trailing ASCII whitespace and removes embedded tab, LF, and CR characters.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0059",
+      "file": "0059_url_searchparams_empty_ctor.js",
+      "api": "URLSearchParams",
+      "requirement": "new URLSearchParams() and new URLSearchParams('') initialize empty collections with '' serialization.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0060",
+      "file": "0060_url_hash_percent_encoding.js",
+      "api": "URL.hash",
+      "requirement": "URL.hash percent-encodes spaces and UTF-8 characters while preserving allowed ASCII punctuation.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0061",
+      "file": "0061_url_search_percent_encoding.js",
+      "api": "URL.search",
+      "requirement": "URL.search percent-encodes spaces, angle brackets, and quotes on URL construction.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0062",
+      "file": "0062_url_resolve_different_origin.js",
+      "api": "URL",
+      "requirement": "new URL(absoluteUrl, base) ignores base when the input already specifies a scheme and origin.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0063",
+      "file": "0063_url_invalid_base_error.js",
+      "api": "URL",
+      "requirement": "new URL(relative, invalidBase) throws a TypeError when the base URL cannot be parsed.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0064",
+      "file": "0064_url_fileurltopath_nonfile_error.js",
+      "api": "url.fileURLToPath",
+      "requirement": "url.fileURLToPath throws a TypeError when passed a non-file: URL.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::url::0065",
+      "file": "0065_url_invalid_port_error.js",
+      "api": "URL",
+      "requirement": "new URL throws a TypeError for ports outside the valid 0..65535 TCP port range.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

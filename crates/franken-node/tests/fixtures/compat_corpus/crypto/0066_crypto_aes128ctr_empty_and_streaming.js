@@ -1,0 +1,11 @@
+const crypto = require('crypto');
+const key = Buffer.alloc(16, 0x88);
+const iv = Buffer.alloc(16, 0x99);
+const cEmpty = crypto.createCipheriv('aes-128-ctr', key, iv);
+const ctEmpty = Buffer.concat([cEmpty.update(Buffer.alloc(0)), cEmpty.final()]);
+const c = crypto.createCipheriv('aes-128-ctr', key, iv);
+const ct = Buffer.concat([c.update('chunk-one-and-'), c.update('chunk-two'), c.final()]);
+const d = crypto.createDecipheriv('aes-128-ctr', key, iv);
+const pt = Buffer.concat([d.update(ct.subarray(0, 5)), d.update(ct.subarray(5)), d.final()]);
+console.log(ctEmpty.length);
+console.log(ct.length, pt.toString('utf8'));

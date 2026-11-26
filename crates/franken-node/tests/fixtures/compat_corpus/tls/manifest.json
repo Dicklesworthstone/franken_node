@@ -496,6 +496,246 @@
       ],
       "band": "edge",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0041",
+      "file": "0041_tls_bidirectional_simultaneous.js",
+      "api": "tls bidirectional exchange",
+      "requirement": "Client and server can write simultaneously over an established TLS channel without deadlock.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0042",
+      "file": "0042_tls_server_socket_encrypted_remote.js",
+      "api": "tls.TLSSocket.encrypted (server)",
+      "requirement": "The server-side TLSSocket reports encrypted=true and remoteAddress='127.0.0.1'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0043",
+      "file": "0043_tls_server_listening_address_lifecycle.js",
+      "api": "tls.Server.listening/address",
+      "requirement": "tls.Server listening flips false->true->false and address() returns null before listen and after close.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0044",
+      "file": "0044_tls_server_event_ordering.js",
+      "api": "tls.Server event ordering",
+      "requirement": "tls.Server emits listening, then secureConnection, then close in order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0045",
+      "file": "0045_tls_minversion_tlsv1_3.js",
+      "api": "tls minVersion TLSv1.3",
+      "requirement": "Configuring minVersion TLSv1.3 on client and server negotiates getProtocol() === 'TLSv1.3'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0046",
+      "file": "0046_tls_alpn_server_preference_h2.js",
+      "api": "tls ALPN preference",
+      "requirement": "ALPN selects the server's preferred mutual protocol ('h2') and exposes it on both client and server sockets.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0047",
+      "file": "0047_tls_alpn_unconfigured_server_false.js",
+      "api": "tls ALPN unconfigured server",
+      "requirement": "When the server advertises no ALPNProtocols, the client TLSSocket reports alpnProtocol === false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0048",
+      "file": "0048_tls_custom_sni_servername.js",
+      "api": "tls SNI custom servername",
+      "requirement": "The server-side TLSSocket.servername exposes a custom non-localhost SNI requested by the client.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0049",
+      "file": "0049_tls_getcipher_standardname.js",
+      "api": "tls.TLSSocket.getCipher",
+      "requirement": "getCipher returns standardName, name, and version strings for the negotiated TLS suite.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0050",
+      "file": "0050_tls_utf8_multibyte_roundtrip.js",
+      "api": "tls UTF-8 multibyte roundtrip",
+      "requirement": "UTF-8 multibyte text including accented characters, CJK, and emoji roundtrips intact over TLS.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0051",
+      "file": "0051_tls_two_concurrent_clients.js",
+      "api": "tls concurrent clients",
+      "requirement": "Two simultaneous TLS clients against one server each complete isolated encrypted echo roundtrips.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0052",
+      "file": "0052_tls_32k_binary_roundtrip.js",
+      "api": "tls 32KiB binary roundtrip",
+      "requirement": "A 32KiB non-ASCII binary Buffer roundtrips byte-exact across a TLS echo server.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0053",
+      "file": "0053_tls_socket_pause_resume.js",
+      "api": "tls.TLSSocket pause/resume",
+      "requirement": "Pausing a TLSSocket buffers incoming encrypted chunks and delivers all bytes before 'end' on resume.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0054",
+      "file": "0054_tls_socket_end_callback.js",
+      "api": "tls.TLSSocket.end(data, cb)",
+      "requirement": "TLSSocket.end(data, cb) delivers encrypted data, emits 'finish', and invokes the completion callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0055",
+      "file": "0055_tls_socket_destroy_clean.js",
+      "api": "tls.TLSSocket.destroy",
+      "requirement": "Calling destroy() on a connected TLSSocket sets destroyed=true and emits close with hadError=false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0056",
+      "file": "0056_tls_checkserveridentity_wildcard.js",
+      "api": "tls.checkServerIdentity (wildcard)",
+      "requirement": "checkServerIdentity accepts a single-label wildcard match and rejects multi-label and apex mismatches.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0057",
+      "file": "0057_tls_checkserveridentity_ip_and_case.js",
+      "api": "tls.checkServerIdentity (IP/case)",
+      "requirement": "checkServerIdentity matches DNS SANs case-insensitively and validates IP Address SAN entries exactly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0058",
+      "file": "0058_tls_checkserveridentity_san_precedence.js",
+      "api": "tls.checkServerIdentity (SAN precedence)",
+      "requirement": "When subjectaltname is present, checkServerIdentity rejects a CN-only match with ERR_TLS_CERT_ALTNAME_INVALID.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0059",
+      "file": "0059_tls_checkserveridentity_reject_tld_idn_wildcard.js",
+      "api": "tls.checkServerIdentity (wildcard safety)",
+      "requirement": "checkServerIdentity rejects TLD wildcards (*.com) and IDN punycode wildcards (xn--*).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0060",
+      "file": "0060_tls_connect_closed_port_econnrefused.js",
+      "api": "tls.connect ECONNREFUSED",
+      "requirement": "Connecting via TLS to a closed port emits 'error' with code ECONNREFUSED followed by 'close' with hadError=true.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
     }
   ]
 }

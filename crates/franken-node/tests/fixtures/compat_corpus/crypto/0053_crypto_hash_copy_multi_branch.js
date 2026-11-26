@@ -1,0 +1,10 @@
+const crypto = require('crypto');
+const base = crypto.createHash('sha512').update('common-prefix:');
+const b1 = base.copy().update('branch-A').digest('hex');
+const b2 = base.copy().update('branch-B').digest('hex');
+const b3 = base.update('branch-C').digest('hex');
+const ref1 = crypto.createHash('sha512').update('common-prefix:branch-A').digest('hex');
+const ref2 = crypto.createHash('sha512').update('common-prefix:branch-B').digest('hex');
+const ref3 = crypto.createHash('sha512').update('common-prefix:branch-C').digest('hex');
+console.log(b1 === ref1, b2 === ref2, b3 === ref3);
+console.log(b1 !== b2 && b2 !== b3);

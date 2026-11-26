@@ -556,6 +556,426 @@
       ],
       "band": "high-value",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0066",
+      "file": "0066_stream_readable_from_generator.js",
+      "api": "stream.Readable.from",
+      "requirement": "Readable.from(generator()) consumes a synchronous generator lazily and emits values in yield order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0067",
+      "file": "0067_stream_readable_from_set.js",
+      "api": "stream.Readable.from",
+      "requirement": "Readable.from(Set) emits unique Set entries in insertion order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0068",
+      "file": "0068_stream_readable_from_map.js",
+      "api": "stream.Readable.from",
+      "requirement": "Readable.from(Map) emits [key, value] entry tuples in insertion order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0069",
+      "file": "0069_stream_readable_from_uint8array.js",
+      "api": "stream.Readable.from",
+      "requirement": "Readable.from(Uint8Array) iterates numeric elements in default objectMode and emits raw bytes when objectMode is false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0070",
+      "file": "0070_stream_readable_from_buffer_non_objectmode.js",
+      "api": "stream.Readable.from",
+      "requirement": "Readable.from(Buffer) yields the entire Buffer as a single chunk rather than iterating byte integers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0071",
+      "file": "0071_stream_readable_pause_resume_cycles.js",
+      "api": "stream.Readable.pause",
+      "requirement": "Repeated pause() and resume() transitions suspend and resume flowing delivery without losing chunks.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0072",
+      "file": "0072_stream_readable_unshift_multiple_order.js",
+      "api": "stream.Readable.unshift",
+      "requirement": "Multiple unshift() calls prepend chunks in LIFO order at the head of the readable buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0073",
+      "file": "0073_stream_readable_setencoding_utf8_split_3byte.js",
+      "api": "stream.Readable.setEncoding",
+      "requirement": "setEncoding('utf8') reassembles a 3-byte UTF-8 character split one byte per chunk without replacement characters.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0074",
+      "file": "0074_stream_readable_setencoding_utf8_split_4byte.js",
+      "api": "stream.Readable.setEncoding",
+      "requirement": "setEncoding('utf8') reassembles a 4-byte UTF-8 astral code point split across separate chunk pushes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0075",
+      "file": "0075_stream_readable_setencoding_hex_base64.js",
+      "api": "stream.Readable.setEncoding",
+      "requirement": "setEncoding('hex') and setEncoding('base64') decode pushed binary Buffers into encoded strings across chunks.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0076",
+      "file": "0076_stream_readable_readablelength_tracking.js",
+      "api": "stream.Readable.readableLength",
+      "requirement": "readableLength tracks exact buffered byte counts across push() and partial read(n) calls.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0077",
+      "file": "0077_stream_readable_pipe_fanout_two_writables.js",
+      "api": "stream.Readable.pipe",
+      "requirement": "Piping one Readable to two Writables fans out every chunk to both destinations and finishes both.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0078",
+      "file": "0078_stream_readable_pipe_end_false.js",
+      "api": "stream.Readable.pipe",
+      "requirement": "pipe(dest, { end: false }) keeps the destination writable open after source end so subsequent writes succeed.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0079",
+      "file": "0079_stream_readable_pipe_event_on_dest.js",
+      "api": "stream.Readable.pipe",
+      "requirement": "pipe() emits the 'pipe' event on the destination Writable passing the source Readable reference.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0080",
+      "file": "0080_stream_writable_writev_cork_batching.js",
+      "api": "stream.Writable._writev",
+      "requirement": "A Writable defining _writev receives corked writes as a single batch on uncork().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0081",
+      "file": "0081_stream_writable_nested_cork_uncork.js",
+      "api": "stream.Writable.cork",
+      "requirement": "Nested cork() calls increment writableCorked and flush only once matching uncork() calls return it to zero.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0082",
+      "file": "0082_stream_writable_length_and_needdrain.js",
+      "api": "stream.Writable.writableNeedDrain",
+      "requirement": "writableLength, writableNeedDrain, and writableHighWaterMark reflect exact buffer pressure and clear on 'drain'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0083",
+      "file": "0083_stream_writable_end_chunk_encoding_cb.js",
+      "api": "stream.Writable.end",
+      "requirement": "Writable#end(chunk, encoding, cb) decodes the final hex chunk and invokes its callback after 'finish'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0084",
+      "file": "0084_stream_writable_write_callback_order.js",
+      "api": "stream.Writable.write",
+      "requirement": "Per-write completion callbacks execute in strict FIFO order as async _write operations finish.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0085",
+      "file": "0085_stream_writable_objectmode_props.js",
+      "api": "stream.Writable.writableObjectMode",
+      "requirement": "An objectMode Writable reports writableObjectMode true, default highWaterMark 16, and object-counted writableLength.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0086",
+      "file": "0086_stream_writable_destroy_error.js",
+      "api": "stream.Writable.destroy",
+      "requirement": "Writable#destroy(err) sets destroyed true, emits 'error' then 'close', and suppresses 'finish'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0087",
+      "file": "0087_stream_duplex_allow_half_open_false.js",
+      "api": "stream.Duplex",
+      "requirement": "Duplex with allowHalfOpen:false automatically ends its writable side when its readable side ends.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0088",
+      "file": "0088_stream_duplex_objectmode_independent.js",
+      "api": "stream.Duplex",
+      "requirement": "An objectMode Duplex processes inbound written objects and outbound readable objects independently.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0089",
+      "file": "0089_stream_transform_one_to_many_expand.js",
+      "api": "stream.Transform",
+      "requirement": "A Transform pushing multiple chunks per input chunk delivers all expanded items in order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0090",
+      "file": "0090_stream_transform_one_to_zero_filter.js",
+      "api": "stream.Transform",
+      "requirement": "A Transform that drops non-matching chunks without pushing emits only matching chunks and ends cleanly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0091",
+      "file": "0091_stream_transform_line_splitter_flush.js",
+      "api": "stream.Transform",
+      "requirement": "A line-splitting Transform carries partial lines across chunks and flushes the final unterminated line in _flush.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0092",
+      "file": "0092_stream_transform_error_callback.js",
+      "api": "stream.Transform",
+      "requirement": "Passing an Error to the _transform callback emits 'error' then 'close' without emitting 'end'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0093",
+      "file": "0093_stream_passthrough_objectmode_forward.js",
+      "api": "stream.PassThrough",
+      "requirement": "PassThrough in objectMode forwards JavaScript object references unchanged and in order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0094",
+      "file": "0094_stream_passthrough_buffer_concat.js",
+      "api": "stream.PassThrough",
+      "requirement": "PassThrough forwards arbitrary binary Buffer chunks untouched in byte-exact order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::stream::0095",
+      "file": "0095_stream_pipeline_four_stage.js",
+      "api": "stream.pipeline",
+      "requirement": "Four-stage stream.pipeline (Readable -> Transform -> Transform -> Writable) transforms and delivers chunks in order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0096",
+      "file": "0096_stream_pipeline_error_destroys_stages.js",
+      "api": "stream.pipeline",
+      "requirement": "stream.pipeline propagates a middle Transform error to its callback and destroys all pipeline stages.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0097",
+      "file": "0097_stream_promises_pipeline_reject_destroys.js",
+      "api": "stream.promises.pipeline",
+      "requirement": "stream/promises.pipeline rejects with the stage error and destroys all participating streams.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0098",
+      "file": "0098_stream_finished_errored_readable.js",
+      "api": "stream.finished",
+      "requirement": "stream.finished invokes its callback with the error when a monitored Readable is destroyed with an error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0099",
+      "file": "0099_stream_promises_finished_readable_writable.js",
+      "api": "stream.promises.finished",
+      "requirement": "stream/promises.finished resolves cleanly after normal completion of a Readable and a Writable.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0100",
+      "file": "0100_stream_promises_finished_rejects_on_error.js",
+      "api": "stream.promises.finished",
+      "requirement": "stream/promises.finished rejects with the error when a monitored Writable is destroyed with an error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
     }
   ]
 }

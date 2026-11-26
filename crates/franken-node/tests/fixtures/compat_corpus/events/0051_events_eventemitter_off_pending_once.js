@@ -1,0 +1,10 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+let called = 0;
+const fn = () => { called++; };
+e.once('init', fn);
+console.log(e.listenerCount('init'));
+e.off('init', fn);
+console.log(e.listenerCount('init'));
+console.log(e.emit('init'));
+console.log(called);

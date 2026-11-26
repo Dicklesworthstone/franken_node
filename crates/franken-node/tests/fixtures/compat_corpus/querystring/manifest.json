@@ -256,6 +256,366 @@
       ],
       "band": "core",
       "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0021",
+      "file": "0021_querystring_decode_encode_aliases.js",
+      "api": "querystring.decode",
+      "requirement": "querystring.decode and querystring.encode are direct aliases for querystring.parse and querystring.stringify.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0022",
+      "file": "0022_querystring_parse_repeated_seps.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse ignores empty segments produced by leading, trailing, and repeated '&' separators.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0023",
+      "file": "0023_querystring_parse_eq_in_value.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse splits each pair on only the first '=' so subsequent '=' characters remain part of the value.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0024",
+      "file": "0024_querystring_parse_many_duplicates.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse accumulates three or more repeated keys into an array preserving exact order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0025",
+      "file": "0025_querystring_parse_multichar_sep_eq.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse supports multi-character separator and assignment delimiters.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0026",
+      "file": "0026_querystring_parse_encoded_keys.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse percent-decodes escape sequences and decodes '+' as spaces in key names as well as values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0027",
+      "file": "0027_querystring_parse_emoji_utf8.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse decodes 4-byte UTF-8 emoji and CJK percent sequences alongside '+' spaces in keys and values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0028",
+      "file": "0028_querystring_parse_maxkeys_zero.js",
+      "api": "querystring.parse",
+      "requirement": "Passing { maxKeys: 0 } disables the key limit and parses all key/value pairs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0029",
+      "file": "0029_querystring_parse_maxkeys_duplicates.js",
+      "api": "querystring.parse",
+      "requirement": "maxKeys counts every parsed pair including repeated occurrences of the same key.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0030",
+      "file": "0030_querystring_stringify_empty_object.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify({}) returns an empty string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0031",
+      "file": "0031_querystring_stringify_empty_array.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify omits keys whose value is an empty array.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0032",
+      "file": "0032_querystring_stringify_mixed_array.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify encodes arrays containing mixed primitive and nullish elements as repeated key pairs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0033",
+      "file": "0033_querystring_stringify_multichar_sep_eq.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify joins keys and values with multi-character custom sep and eq strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0034",
+      "file": "0034_querystring_stringify_undefined.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify preserves keys with undefined values serialized as empty values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0035",
+      "file": "0035_querystring_stringify_special_chars.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify percent-encodes '&', '=', '/', '?', '#', and '%' in both keys and values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0036",
+      "file": "0036_querystring_stringify_numbers_signed.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify serializes 0, -0, negative decimals, and scientific-notation numbers accurately.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0037",
+      "file": "0037_querystring_escape_unreserved.js",
+      "api": "querystring.escape",
+      "requirement": "querystring.escape leaves unreserved ASCII alphanumerics and -_.!~*'() unchanged and maps '' to ''.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0038",
+      "file": "0038_querystring_escape_utf8_emoji.js",
+      "api": "querystring.escape",
+      "requirement": "querystring.escape encodes multi-byte UTF-8 CJK, Latin, currency, and 4-byte emoji characters as percent triplets.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0039",
+      "file": "0039_querystring_unescape_double_encoded.js",
+      "api": "querystring.unescape",
+      "requirement": "querystring.unescape performs a single decoding pass so double-encoded sequences like %2520 decode to %20.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0040",
+      "file": "0040_querystring_roundtrip_custom_delim.js",
+      "api": "querystring.stringify",
+      "requirement": "stringify and parse round-trip custom delimiters, special characters, and repeated arrays without loss.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0041",
+      "file": "0041_querystring_parse_object_proto_keys.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse stores Object.prototype property names (hasOwnProperty, valueOf, toString, constructor) safely as string values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0042",
+      "file": "0042_querystring_stringify_nonfinite_numbers.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify serializes NaN, Infinity, and -Infinity as empty strings rather than literal names.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0043",
+      "file": "0043_querystring_stringify_bigint.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify serializes BigInt values (including signed and >2^53 values) as decimal strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0044",
+      "file": "0044_querystring_stringify_empty_string_key_val.js",
+      "api": "querystring.stringify",
+      "requirement": "querystring.stringify serializes empty string keys and empty string values cleanly with '='.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0045",
+      "file": "0045_querystring_parse_empty_key.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse maps pairs starting with '=' (empty key) to the '' property, collecting multiple occurrences into an array.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0046",
+      "file": "0046_querystring_escape_coercion.js",
+      "api": "querystring.escape",
+      "requirement": "querystring.escape string-coerces booleans, numbers, null, and undefined before encoding.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0047",
+      "file": "0047_querystring_parse_semicolon_cookie_style.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse handles semicolon-delimited pairs with percent-encoded values and duplicate keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::querystring::0048",
+      "file": "0048_querystring_parse_invalid_percent.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse preserves malformed and truncated percent sequences without throwing URIError.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0049",
+      "file": "0049_querystring_unescape_invalid_percent.js",
+      "api": "querystring.unescape",
+      "requirement": "querystring.unescape falls back gracefully on invalid hex escapes, incomplete UTF-8 sequences, and trailing '%' without throwing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::querystring::0050",
+      "file": "0050_querystring_nonobject_nonstring_inputs.js",
+      "api": "querystring.parse",
+      "requirement": "querystring.parse returns {} for null/undefined and querystring.stringify returns '' for null, undefined, and primitive inputs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }

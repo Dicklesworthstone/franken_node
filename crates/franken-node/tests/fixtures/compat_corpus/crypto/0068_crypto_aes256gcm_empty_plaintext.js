@@ -1,0 +1,11 @@
+const crypto = require('crypto');
+const key = Buffer.alloc(32, 0x3c);
+const iv = Buffer.alloc(12, 0x4d);
+const enc = crypto.createCipheriv('aes-256-gcm', key, iv);
+const ct = Buffer.concat([enc.update(Buffer.alloc(0)), enc.final()]);
+const tag = enc.getAuthTag();
+const dec = crypto.createDecipheriv('aes-256-gcm', key, iv);
+dec.setAuthTag(tag);
+const pt = Buffer.concat([dec.update(ct), dec.final()]);
+console.log(ct.length, tag.length, pt.length);
+console.log(tag.toString('hex'));

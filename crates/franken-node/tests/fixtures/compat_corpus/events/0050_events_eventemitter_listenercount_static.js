@@ -1,0 +1,10 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+const f = () => {};
+console.log(EventEmitter.listenerCount(e, 'ev'));
+e.on('ev', f);
+e.once('ev', () => {});
+console.log(EventEmitter.listenerCount(e, 'ev') === e.listenerCount('ev'));
+console.log(EventEmitter.listenerCount(e, 'ev'));
+e.off('ev', f);
+console.log(EventEmitter.listenerCount(e, 'ev'));

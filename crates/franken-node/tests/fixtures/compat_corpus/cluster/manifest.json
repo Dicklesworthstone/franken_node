@@ -256,6 +256,126 @@
       ],
       "band": "high-value",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0021",
+      "file": "0021_cluster_primary_invariants.js",
+      "api": "cluster primary invariants",
+      "requirement": "In a primary process, isPrimary/isMaster are true, isWorker is false, worker is undefined, and workers is a non-null empty non-array object.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0022",
+      "file": "0022_cluster_scheduling_policy_constants.js",
+      "api": "cluster.schedulingPolicy",
+      "requirement": "schedulingPolicy defaults to SCHED_RR on Linux, and SCHED_RR and SCHED_NONE are distinct integer constants.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::cluster::0023",
+      "file": "0023_cluster_setupprimary_silent_cwd.js",
+      "api": "cluster.setupPrimary",
+      "requirement": "setupPrimary records silent and cwd options onto cluster.settings and returns undefined.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0024",
+      "file": "0024_cluster_setupmaster_alias_merge.js",
+      "api": "cluster.setupMaster",
+      "requirement": "setupMaster is strictly identical to setupPrimary and merges execArgv and overwritten silent while preserving prior exec.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::cluster::0025",
+      "file": "0025_cluster_once_vs_on.js",
+      "api": "cluster.once",
+      "requirement": "A once listener fires only on the first emit while an on listener fires on every subsequent emit.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0026",
+      "file": "0026_cluster_emit_return_and_args.js",
+      "api": "cluster.emit",
+      "requirement": "emit returns true when listeners exist, false otherwise, and forwards multiple payload arguments in registration order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::cluster::0027",
+      "file": "0027_cluster_settings_snapshot_immutability.js",
+      "api": "cluster.settings",
+      "requirement": "Successive setupPrimary calls replace cluster.settings with a fresh object without mutating earlier snapshots.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0028",
+      "file": "0028_cluster_node_prefix_singleton.js",
+      "api": "node:cluster",
+      "requirement": "require('cluster') and require('node:cluster') share the same singleton settings state.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::cluster::0029",
+      "file": "0029_cluster_disconnect_zero_args_and_optional_cb.js",
+      "api": "cluster.disconnect",
+      "requirement": "cluster.disconnect invokes its callback asynchronously with zero arguments and allows omitting the callback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::cluster::0030",
+      "file": "0030_cluster_setupprimary_no_args_noop.js",
+      "api": "cluster.setupPrimary",
+      "requirement": "Calling setupPrimary with no argument or undefined preserves existing cluster.settings without throwing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
     }
   ]
 }

@@ -556,6 +556,366 @@
       ],
       "band": "edge",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0046",
+      "file": "0046_crypto_hash_empty_md5_sha512.js",
+      "api": "crypto.createHash",
+      "requirement": "Empty-input MD5 and SHA-512 hashes match their standard empty-message hex constants.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0047",
+      "file": "0047_crypto_hash_nist_abc_all_algs.js",
+      "api": "crypto.createHash",
+      "requirement": "The standard NIST/RFC 'abc' vector produces exact hex digests across md5, sha1, sha256, and sha512.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0048",
+      "file": "0048_crypto_hash_update_base64_input.js",
+      "api": "crypto.Hash#update",
+      "requirement": "Hash#update(str, 'base64') decodes base64 input bytes before hashing and matches the raw UTF-8 digest.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0049",
+      "file": "0049_crypto_hash_update_uint8array_multibyte.js",
+      "api": "crypto.Hash#update",
+      "requirement": "Hash#update accepts a Uint8Array and produces the same digest as the equivalent multibyte UTF-8 string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0050",
+      "file": "0050_crypto_hash_digest_buffer_lengths.js",
+      "api": "crypto.Hash#digest",
+      "requirement": "Hash#digest() with no encoding returns Buffers of exact byte lengths 16 (MD5), 20 (SHA-1), and 64 (SHA-512).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0051",
+      "file": "0051_crypto_hash_digest_latin1.js",
+      "api": "crypto.Hash#digest",
+      "requirement": "Hash#digest('latin1') returns a 32-char binary string whose char codes match the raw SHA-256 Buffer bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0052",
+      "file": "0052_crypto_hash_case_insensitive_alg.js",
+      "api": "crypto.createHash",
+      "requirement": "createHash accepts uppercase algorithm names (MD5, SHA1, SHA256, SHA512) equivalently to lowercase names.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::crypto::0053",
+      "file": "0053_crypto_hash_copy_multi_branch.js",
+      "api": "crypto.Hash#copy",
+      "requirement": "Multiple Hash#copy() clones from a SHA-512 prefix produce independent branch digests matching full hashes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0054",
+      "file": "0054_crypto_hash_double_digest_throws.js",
+      "api": "crypto.Hash#digest",
+      "requirement": "Calling digest() twice or update() after digest() on a finalized Hash throws an Error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0055",
+      "file": "0055_crypto_hmac_md5_rfc2202.js",
+      "api": "crypto.createHmac",
+      "requirement": "createHmac('md5', ...) matches RFC 2202 test vectors 1 and 2.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0056",
+      "file": "0056_crypto_hmac_sha256_rfc4231_long_key.js",
+      "api": "crypto.createHmac",
+      "requirement": "createHmac('sha256', key) with a key exceeding the 64-byte block size hashes the key first per RFC 4231 Case 6.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0057",
+      "file": "0057_crypto_hmac_sha512_rfc4231_vectors.js",
+      "api": "crypto.createHmac",
+      "requirement": "createHmac('sha512', ...) matches RFC 4231 Test Cases 1 and 2 with 128-hex-char MAC outputs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0058",
+      "file": "0058_crypto_hmac_empty_key_and_message.js",
+      "api": "crypto.createHmac",
+      "requirement": "createHmac handles empty key and empty message inputs deterministically across SHA-256 and SHA-1.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0059",
+      "file": "0059_crypto_hmac_digest_buffer_and_base64url.js",
+      "api": "crypto.Hmac#digest",
+      "requirement": "Hmac#digest() returns a 32-byte Buffer and Hmac#digest('base64url') emits unpadded URL-safe base64.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0060",
+      "file": "0060_crypto_hmac_update_hex_and_base64.js",
+      "api": "crypto.Hmac#update",
+      "requirement": "Hmac#update with 'hex' or 'base64' encoding decodes message bytes before MACing, matching Buffer input.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0061",
+      "file": "0061_crypto_hmac_unknown_algorithm_throws.js",
+      "api": "crypto.createHmac",
+      "requirement": "createHmac with an unsupported digest algorithm throws an Error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0062",
+      "file": "0062_crypto_aes256cbc_exact_block_padding.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-256-CBC adds a full 16-byte PKCS#7 padding block to exact 16-byte plaintext (32-byte ciphertext) and round-trips.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0063",
+      "file": "0063_crypto_aes256cbc_empty_plaintext.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-256-CBC encrypts empty plaintext into a single 16-byte PKCS#7 padding block and decrypts back to empty.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0064",
+      "file": "0064_crypto_aes256cbc_hex_string_io.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-256-CBC update/final string encodings ('utf8'->'hex' and 'hex'->'utf8') round-trip plaintext verbatim.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0065",
+      "file": "0065_crypto_aes128ctr_multiblock_and_base64.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-128-CTR encrypts multi-block data in base64 string mode, varies with IV, and decrypts verbatim.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0066",
+      "file": "0066_crypto_aes128ctr_empty_and_streaming.js",
+      "api": "crypto.createDecipheriv",
+      "requirement": "AES-128-CTR produces 0-byte ciphertext for empty plaintext and decrypts chunked updates identically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0067",
+      "file": "0067_crypto_aes256gcm_roundtrip_decipher.js",
+      "api": "crypto.createDecipheriv",
+      "requirement": "AES-256-GCM encrypt, getAuthTag, createDecipheriv, and setAuthTag round-trip multi-chunk plaintext verbatim.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0068",
+      "file": "0068_crypto_aes256gcm_empty_plaintext.js",
+      "api": "crypto.Cipheriv#getAuthTag",
+      "requirement": "AES-256-GCM on empty plaintext emits 0-byte ciphertext with a valid 16-byte tag that verifies on decryption.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0069",
+      "file": "0069_crypto_aes256gcm_tampered_ciphertext_and_tag.js",
+      "api": "crypto.Decipheriv#setAuthTag",
+      "requirement": "AES-256-GCM authentication rejects both 1-bit flipped ciphertext and 1-bit flipped authTag by throwing at final().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0070",
+      "file": "0070_crypto_cipheriv_invalid_key_iv_and_alg.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "createCipheriv throws an Error on invalid key length, invalid IV length, and unknown cipher algorithm.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0071",
+      "file": "0071_crypto_pbkdf2sync_sha1_rfc6070.js",
+      "api": "crypto.pbkdf2Sync",
+      "requirement": "pbkdf2Sync with sha1 matches RFC 6070 vectors (c=1, c=2) and accepts Buffer password and salt inputs.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0072",
+      "file": "0072_crypto_pbkdf2sync_sha512_keylens.js",
+      "api": "crypto.pbkdf2Sync",
+      "requirement": "pbkdf2Sync with sha512 derives 16-, 32-, and 64-byte keys where shorter outputs equal the prefix of the 64-byte block.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0073",
+      "file": "0073_crypto_pbkdf2_async_sha512_buffer.js",
+      "api": "crypto.pbkdf2",
+      "requirement": "Async pbkdf2 with Buffer inputs and sha512 invokes callback with (null, Buffer) matching pbkdf2Sync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0074",
+      "file": "0074_crypto_scryptsync_buffer_and_keylens.js",
+      "api": "crypto.scryptSync",
+      "requirement": "scryptSync accepts Buffer password and salt with explicit {N, r, p} and produces deterministic 16- and 64-byte keys.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0075",
+      "file": "0075_crypto_timingsafeequal_views_and_capabilities.js",
+      "api": "crypto.timingSafeEqual",
+      "requirement": "timingSafeEqual compares non-zero-offset Uint8Array subarrays and empty Buffers; getHashes/getCiphers/constants expose core entries.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
     }
   ]
 }

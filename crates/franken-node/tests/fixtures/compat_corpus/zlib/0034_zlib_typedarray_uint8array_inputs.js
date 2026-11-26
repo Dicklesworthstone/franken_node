@@ -1,0 +1,11 @@
+const zlib = require('zlib');
+const u8 = new Uint8Array([0, 1, 2, 127, 128, 254, 255]);
+const g = zlib.gunzipSync(zlib.gzipSync(u8));
+const d = zlib.inflateSync(zlib.deflateSync(u8));
+const r = zlib.inflateRawSync(zlib.deflateRawSync(u8));
+const b = zlib.brotliDecompressSync(zlib.brotliCompressSync(u8));
+const expected = Buffer.from(u8);
+console.log(Buffer.isBuffer(g) && g.equals(expected));
+console.log(Buffer.isBuffer(d) && d.equals(expected));
+console.log(Buffer.isBuffer(r) && r.equals(expected));
+console.log(Buffer.isBuffer(b) && b.equals(expected));

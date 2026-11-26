@@ -1,0 +1,15 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+const s1 = Symbol('one');
+const s2 = Symbol('two');
+let fired = 0;
+const f1 = () => { fired++; };
+const f2 = () => { fired += 10; };
+e.once(s1, f1);
+e.on(s2, f2);
+console.log(e.listeners(s1)[0] === f1);
+e.emit(s1);
+e.emit(s1);
+e.off(s2, f2);
+console.log(fired);
+console.log(e.eventNames().length);

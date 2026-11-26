@@ -1,0 +1,10 @@
+const os = require('os');
+const s = os.constants.signals;
+console.log(s.SIGQUIT === 3);
+console.log(s.SIGABRT === 6);
+console.log(s.SIGUSR1 === 10);
+console.log(s.SIGSEGV === 11);
+console.log(s.SIGUSR2 === 12);
+console.log(s.SIGPIPE === 13);
+console.log(s.SIGALRM === 14);
+console.log(s.SIGCHLD === 17);

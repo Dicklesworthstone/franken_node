@@ -1,0 +1,12 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+const s1 = Symbol('drop');
+const s2 = Symbol('keep');
+e.on(s1, () => console.log('s1'));
+e.on(s2, () => console.log('s2'));
+e.on('str', () => console.log('str'));
+e.removeAllListeners(s1);
+console.log(e.listenerCount(s1) + ',' + e.listenerCount(s2) + ',' + e.listenerCount('str'));
+e.emit(s1);
+e.emit(s2);
+e.emit('str');

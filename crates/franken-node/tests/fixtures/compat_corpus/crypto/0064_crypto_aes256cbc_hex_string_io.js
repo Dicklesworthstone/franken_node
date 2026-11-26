@@ -1,0 +1,13 @@
+const crypto = require('crypto');
+const key = Buffer.alloc(32, 0x55);
+const iv = Buffer.alloc(16, 0x66);
+const msg = 'hex string cipher round-trip!';
+const c = crypto.createCipheriv('aes-256-cbc', key, iv);
+let enc = c.update(msg, 'utf8', 'hex');
+enc += c.final('hex');
+const d = crypto.createDecipheriv('aes-256-cbc', key, iv);
+let dec = d.update(enc, 'hex', 'utf8');
+dec += d.final('utf8');
+console.log(typeof enc, enc.length);
+console.log(enc);
+console.log(dec === msg, dec);

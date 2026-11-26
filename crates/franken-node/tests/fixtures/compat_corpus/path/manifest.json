@@ -436,6 +436,486 @@
       ],
       "band": "high-value",
       "risk_band": "low"
+    },
+    {
+      "id": "tc::path::0036",
+      "file": "0036_path_delimiter.js",
+      "api": "path.delimiter",
+      "requirement": "path.delimiter and path.sep match POSIX defaults on POSIX and split/join PATH strings alongside win32 constants.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0037",
+      "file": "0037_path_basename_dotfiles.js",
+      "api": "path.basename",
+      "requirement": "path.basename preserves leading-dot filenames (.bashrc, .env.local) and strips matching trailing suffixes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0038",
+      "file": "0038_path_basename_equal_suffix_roots.js",
+      "api": "path.basename",
+      "requirement": "path.basename keeps the full name when suffix equals the entire basename and returns '' for roots and empty strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0039",
+      "file": "0039_path_extname_dir_dot.js",
+      "api": "path.extname",
+      "requirement": "path.extname ignores dots in ancestor directories and ignores trailing separators on the final segment.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0040",
+      "file": "0040_path_extname_dotfile_multi.js",
+      "api": "path.extname",
+      "requirement": "path.extname returns the trailing extension for multi-dot dotfiles (.a.b) and '' for '.', '..', and single-dot dotfiles.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0041",
+      "file": "0041_path_dirname_trailing_slash.js",
+      "api": "path.dirname",
+      "requirement": "path.dirname ignores trailing slashes before computing the parent directory.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0042",
+      "file": "0042_path_dirname_roots_empty.js",
+      "api": "path.dirname",
+      "requirement": "path.dirname handles '/', '///', '///a', '', and '.' with exact POSIX root and current-dir semantics.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0043",
+      "file": "0043_path_join_clamp_root.js",
+      "api": "path.join",
+      "requirement": "path.join clamps excessive '..' segments at filesystem root '/' while keeping them for relative paths.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0044",
+      "file": "0044_path_normalize_empty_root.js",
+      "api": "path.normalize",
+      "requirement": "path.normalize maps '' and 'a/..' to '.', clamps '/..' at '/', and collapses duplicate separators.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0045",
+      "file": "0045_path_relative_siblings_deep.js",
+      "api": "path.relative",
+      "requirement": "path.relative computes sibling, parent, child, and deep multi-level upward/downward relative paths.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0046",
+      "file": "0046_path_relative_root_child.js",
+      "api": "path.relative",
+      "requirement": "path.relative resolves paths between filesystem root '/' and nested paths in both directions.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0047",
+      "file": "0047_path_resolve_trailing_and_root.js",
+      "api": "path.resolve",
+      "requirement": "path.resolve strips trailing separators unless the resolved path is root '/' and clamps '..' at root.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0048",
+      "file": "0048_path_parse_root_empty_dotfile.js",
+      "api": "path.parse",
+      "requirement": "path.parse produces exact root, dir, base, ext, and name objects for '/', '', and dotfiles.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0049",
+      "file": "0049_path_format_variants.js",
+      "api": "path.format",
+      "requirement": "path.format handles empty objects, root+base, dir+name+ext, and automatically prepends '.' when ext omits a leading dot.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0050",
+      "file": "0050_path_parse_format_roundtrip.js",
+      "api": "path.parse",
+      "requirement": "path.format(path.parse(p)) round-trips canonical absolute, relative, root, and extensionless paths identically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0051",
+      "file": "0051_path_posix_dirname_extname.js",
+      "api": "path.posix.dirname",
+      "requirement": "path.posix.dirname and path.posix.extname compute directory and extension components with POSIX '/' semantics.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0052",
+      "file": "0052_path_posix_normalize_resolve.js",
+      "api": "path.posix.normalize",
+      "requirement": "path.posix.normalize and path.posix.resolve collapse duplicate slashes and resolve dot and absolute segments.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0053",
+      "file": "0053_path_posix_relative.js",
+      "api": "path.posix.relative",
+      "requirement": "path.posix.relative computes POSIX relative paths across sibling, descendant, and identical paths.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0054",
+      "file": "0054_path_posix_parse_format.js",
+      "api": "path.posix.parse",
+      "requirement": "path.posix.parse and path.posix.format decompose and reconstruct POSIX path objects consistently.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0055",
+      "file": "0055_path_win32_dirname.js",
+      "api": "path.win32.dirname",
+      "requirement": "path.win32.dirname handles Windows drive roots, backslash/forward-slash separators, and bare filenames.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0056",
+      "file": "0056_path_win32_extname.js",
+      "api": "path.win32.extname",
+      "requirement": "path.win32.extname treats both '\\' and '/' as separators, ignores directory dots, and strips trailing backslashes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0057",
+      "file": "0057_path_win32_normalize.js",
+      "api": "path.win32.normalize",
+      "requirement": "path.win32.normalize converts forward slashes to backslashes, resolves '..', and normalizes empty input to '.'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0058",
+      "file": "0058_path_win32_parse.js",
+      "api": "path.win32.parse",
+      "requirement": "path.win32.parse extracts drive roots, directories, base names, and extensions for absolute and relative Windows paths.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0059",
+      "file": "0059_path_win32_format.js",
+      "api": "path.win32.format",
+      "requirement": "path.win32.format formats Windows path objects using '\\' and avoids doubling separators at drive roots.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0060",
+      "file": "0060_path_win32_relative.js",
+      "api": "path.win32.relative",
+      "requirement": "path.win32.relative computes backslash-delimited relative paths on the same drive and returns the target across differing drives.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0061",
+      "file": "0061_path_win32_resolve.js",
+      "api": "path.win32.resolve",
+      "requirement": "path.win32.resolve resolves Windows drive paths right-to-left including drive changes and root-relative '\\' segments.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0062",
+      "file": "0062_path_tonamespacedpath_posix.js",
+      "api": "path.posix.toNamespacedPath",
+      "requirement": "path.posix.toNamespacedPath is a no-op that returns the input string unchanged.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0063",
+      "file": "0063_path_win32_basename_suffix.js",
+      "api": "path.win32.basename",
+      "requirement": "path.win32.basename strips matching suffixes across mixed slashes and returns '' for bare drive roots.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0064",
+      "file": "0064_path_win32_unc_parse_dirname.js",
+      "api": "path.win32.parse",
+      "requirement": "path.win32.parse and path.win32.dirname recognize and preserve Windows UNC \\\\server\\share\\ roots.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0065",
+      "file": "0065_path_win32_unc_normalize_join.js",
+      "api": "path.win32.normalize",
+      "requirement": "path.win32.normalize and path.win32.join preserve UNC share prefixes while collapsing separators and resolving '..'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::path::0066",
+      "file": "0066_path_win32_tonamespacedpath.js",
+      "api": "path.win32.toNamespacedPath",
+      "requirement": "path.win32.toNamespacedPath converts Windows drive paths to \\\\?\\ and UNC paths to \\\\?\\UNC\\ extended-length forms.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0067",
+      "file": "0067_path_isabsolute_variants.js",
+      "api": "path.isAbsolute",
+      "requirement": "path.isAbsolute distinguishes '/', '//server/share', '.', '..', '', and relative segments on POSIX.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0068",
+      "file": "0068_path_posix_backslash_literal.js",
+      "api": "path.posix.basename",
+      "requirement": "path.posix treats backslashes as literal filename characters rather than directory separators.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0069",
+      "file": "0069_path_parse_trailing_slash.js",
+      "api": "path.parse",
+      "requirement": "path.parse ignores trailing separators when extracting dir and base components.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0070",
+      "file": "0070_path_relative_unnormalized.js",
+      "api": "path.relative",
+      "requirement": "path.relative resolves '.', '..', and duplicate slashes in inputs before computing the relative path.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0071",
+      "file": "0071_path_win32_case_insensitive_relative.js",
+      "api": "path.win32.relative",
+      "requirement": "path.win32.relative matches drive letters and directory prefixes case-insensitively.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0072",
+      "file": "0072_path_format_root_without_trailing_sep.js",
+      "api": "path.format",
+      "requirement": "path.format concatenates root directly with base/name+ext without adding an extra separator when dir is omitted.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0073",
+      "file": "0073_path_typeerror_string_args.js",
+      "api": "path.basename",
+      "requirement": "Single-path functions (basename, dirname, extname, normalize, isAbsolute) throw TypeError with ERR_INVALID_ARG_TYPE for non-strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0074",
+      "file": "0074_path_typeerror_multi_and_obj.js",
+      "api": "path.relative",
+      "requirement": "path.relative, path.resolve, path.parse, and path.format throw TypeError with ERR_INVALID_ARG_TYPE on invalid argument types.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::path::0075",
+      "file": "0075_path_normalize_dotdot_cancellation.js",
+      "api": "path.normalize",
+      "requirement": "path.normalize preserves a trailing slash on cancelled relative paths ('a/b/../../' -> './') while stripping it when absent ('a/b/../..' -> '.').",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
     }
   ]
 }

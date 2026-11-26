@@ -376,6 +376,486 @@
       ],
       "band": "edge",
       "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0031",
+      "file": "0031_buffer_alloc_hex_fill.js",
+      "api": "buffer.Buffer.alloc",
+      "requirement": "Buffer.alloc(size, hexString, 'hex') repeats the decoded hex byte pattern to fill the exact requested length.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0032",
+      "file": "0032_buffer_alloc_base64_fill.js",
+      "api": "buffer.Buffer.alloc",
+      "requirement": "Buffer.alloc(size, base64String, 'base64') decodes the base64 fill pattern and repeats it across the buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0033",
+      "file": "0033_buffer_alloc_buffer_fill.js",
+      "api": "buffer.Buffer.alloc",
+      "requirement": "Buffer.alloc(size, fillBuffer) copies and repeats the fill buffer bytes independently of subsequent source mutation.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0034",
+      "file": "0034_buffer_alloc_zero_empty.js",
+      "api": "buffer.Buffer.alloc",
+      "requirement": "Buffer.alloc(0) creates an empty Buffer, and Buffer.alloc(n, '') produces n zero bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0035",
+      "file": "0035_buffer_from_utf16le.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from(string, 'utf16le') and toString('utf16le') round-trip little-endian UTF-16 code units accurately.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0036",
+      "file": "0036_buffer_from_ascii.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from(string, 'ascii') and toString('ascii') truncate high bits according to Node ASCII encoding semantics.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0037",
+      "file": "0037_buffer_from_uint8array.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from(uint8Array) copies bytes into an independent Buffer unaffected by later mutations to the source Uint8Array.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::buffer::0038",
+      "file": "0038_buffer_from_buffer_copy.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from(buffer) allocates an independent copy rather than aliasing the original Buffer's memory.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::buffer::0039",
+      "file": "0039_buffer_from_utf8_emoji.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from and toString('utf8') preserve 2-byte, 3-byte CJK, and 4-byte emoji UTF-8 sequences with exact byte length.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0040",
+      "file": "0040_buffer_bytelength_encodings.js",
+      "api": "buffer.Buffer.byteLength",
+      "requirement": "Buffer.byteLength computes exact encoded byte counts across utf8, utf16le, hex, base64, base64url, and ascii.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0041",
+      "file": "0041_buffer_bytelength_typed.js",
+      "api": "buffer.Buffer.byteLength",
+      "requirement": "Buffer.byteLength returns byte lengths for Buffer, Uint8Array, ArrayBuffer, and multi-byte TypedArray instances.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0042",
+      "file": "0042_buffer_concat_padding.js",
+      "api": "buffer.Buffer.concat",
+      "requirement": "Buffer.concat zero-pads when totalLength exceeds combined input length and returns an empty Buffer for [] or totalLength 0.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0043",
+      "file": "0043_buffer_compare_subrange.js",
+      "api": "buffer.Buffer#compare",
+      "requirement": "buf.compare(target, targetStart, targetEnd, sourceStart, sourceEnd) compares only the selected source and target sub-ranges.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0044",
+      "file": "0044_buffer_compare_sort.js",
+      "api": "buffer.Buffer.compare",
+      "requirement": "Buffer.compare works as an Array.prototype.sort comparator for lexicographic byte ordering.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0045",
+      "file": "0045_buffer_equals_edge.js",
+      "api": "buffer.Buffer#equals",
+      "requirement": "buf.equals handles zero-length buffers, differing lengths, and byte-wise comparison with Uint8Array.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0046",
+      "file": "0046_buffer_includes_variants.js",
+      "api": "buffer.Buffer#includes",
+      "requirement": "buf.includes matches numeric bytes, Buffer needles, negative start offsets, and hex-encoded patterns.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0047",
+      "file": "0047_buffer_indexof_variants.js",
+      "api": "buffer.Buffer#indexOf",
+      "requirement": "buf.indexOf handles negative offsets, clamped empty needles, Buffer needles, and hex-encoded search patterns.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0048",
+      "file": "0048_buffer_lastindexof_byte.js",
+      "api": "buffer.Buffer#lastIndexOf",
+      "requirement": "buf.lastIndexOf finds the rightmost occurrence of a byte value with positive, negative, and missing cases.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0049",
+      "file": "0049_buffer_fill_numeric.js",
+      "api": "buffer.Buffer#fill",
+      "requirement": "buf.fill(value, offset, end) fills whole buffers or half-open ranges with a numeric byte truncated modulo 256.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0050",
+      "file": "0050_buffer_write_offset_len.js",
+      "api": "buffer.Buffer#write",
+      "requirement": "buf.write(string, offset, length, encoding) writes bounded UTF-8 and hex slices and returns the exact byte count written.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::buffer::0051",
+      "file": "0051_buffer_copy_overlap.js",
+      "api": "buffer.Buffer#copy",
+      "requirement": "buf.copy handles overlapping source and target ranges within the same Buffer in both shift directions.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0052",
+      "file": "0052_buffer_writeint8_readint8.js",
+      "api": "buffer.Buffer#writeInt8",
+      "requirement": "writeInt8 and readInt8 round-trip signed 8-bit boundary values (-128, -1, 0, 127) and return the next offset.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0053",
+      "file": "0053_buffer_writeuint16be.js",
+      "api": "buffer.Buffer#writeUInt16BE",
+      "requirement": "writeUInt16BE and readUInt16BE serialize unsigned 16-bit big-endian integers and return offset + 2.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0054",
+      "file": "0054_buffer_writeint16_endian.js",
+      "api": "buffer.Buffer#writeInt16LE",
+      "requirement": "writeInt16LE/readInt16LE and writeInt16BE/readInt16BE handle negative and extreme signed 16-bit two's-complement values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0055",
+      "file": "0055_buffer_writeuint32be_le.js",
+      "api": "buffer.Buffer#writeUInt32BE",
+      "requirement": "writeUInt32BE/readUInt32BE and writeUInt32LE/readUInt32LE encode and decode full unsigned 32-bit integers above 2^31.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::buffer::0056",
+      "file": "0056_buffer_writeint32le.js",
+      "api": "buffer.Buffer#writeInt32LE",
+      "requirement": "writeInt32LE and readInt32LE round-trip signed 32-bit little-endian extremes (-2147483648, -1, 2147483647).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0057",
+      "file": "0057_buffer_isencoding.js",
+      "api": "buffer.Buffer.isEncoding",
+      "requirement": "Buffer.isEncoding identifies all supported encodings and aliases while rejecting unknown or empty encoding names.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0058",
+      "file": "0058_buffer_write_partial_utf8.js",
+      "api": "buffer.Buffer#write",
+      "requirement": "buf.write avoids writing partial multibyte UTF-8 characters when remaining capacity is insufficient.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0059",
+      "file": "0059_buffer_float_le_be.js",
+      "api": "buffer.Buffer#writeFloatBE",
+      "requirement": "writeFloatBE/readFloatBE and writeFloatLE/readFloatLE round-trip IEEE 754 single-precision floats in both byte orders.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0060",
+      "file": "0060_buffer_double_le_be.js",
+      "api": "buffer.Buffer#writeDoubleBE",
+      "requirement": "writeDoubleBE/readDoubleBE and writeDoubleLE/readDoubleLE round-trip IEEE 754 double-precision floats in both byte orders.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0061",
+      "file": "0061_buffer_bigint64_be_le.js",
+      "api": "buffer.Buffer#writeBigInt64BE",
+      "requirement": "writeBigInt64BE/readBigInt64BE and writeBigInt64LE/readBigInt64LE preserve signed 64-bit BigInt values beyond safe integer precision.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0062",
+      "file": "0062_buffer_biguint64_be_le.js",
+      "api": "buffer.Buffer#writeBigUInt64BE",
+      "requirement": "writeBigUInt64BE/readBigUInt64BE and writeBigUInt64LE/readBigUInt64LE preserve full unsigned 64-bit BigInts up to 2^64-1.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0063",
+      "file": "0063_buffer_varwidth_uint.js",
+      "api": "buffer.Buffer#writeUIntBE",
+      "requirement": "writeUIntBE/readUIntBE and writeUIntLE/readUIntLE support variable-width unsigned integers from 1 to 6 bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0064",
+      "file": "0064_buffer_varwidth_int.js",
+      "api": "buffer.Buffer#writeIntBE",
+      "requirement": "writeIntBE/readIntBE and writeIntLE/readIntLE sign-extend variable-width signed integers accurately.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0065",
+      "file": "0065_buffer_swap64.js",
+      "api": "buffer.Buffer#swap64",
+      "requirement": "buf.swap64() byte-swaps 64-bit lanes in-place and returns the receiver Buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0066",
+      "file": "0066_buffer_subarray_negative.js",
+      "api": "buffer.Buffer#subarray",
+      "requirement": "subarray and slice interpret negative indices relative to buffer length and return shared-memory views.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0067",
+      "file": "0067_buffer_isascii_isutf8.js",
+      "api": "buffer.isUtf8",
+      "requirement": "buffer.isAscii and buffer.isUtf8 validate ASCII-only and well-formed UTF-8 byte buffers while rejecting invalid bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0068",
+      "file": "0068_buffer_swap_odd_length_error.js",
+      "api": "buffer.Buffer#swap16",
+      "requirement": "swap16, swap32, and swap64 throw a RangeError when the buffer length is not a multiple of the swap width.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::buffer::0069",
+      "file": "0069_buffer_write_oob_error.js",
+      "api": "buffer.Buffer#writeUInt8",
+      "requirement": "Integer read/write accessors throw RangeError for out-of-bounds offsets and out-of-range numeric values.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::buffer::0070",
+      "file": "0070_buffer_from_hex_partial_tostring_clamp.js",
+      "api": "buffer.Buffer.from",
+      "requirement": "Buffer.from(str, 'hex') stops at odd or invalid hex characters, and toString clamps out-of-range or inverted start/end bounds.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
     }
   ]
 }
