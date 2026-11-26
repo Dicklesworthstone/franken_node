@@ -1,9 +1,8 @@
 //! Bounded selection of npm workspace manifests from the private capture.
 //!
-//! Selectors support literal components, `*` within a component, standalone
-//! `**`, bounded nested brace alternatives, and lock-authority-specific
-//! exclusions. Unsupported glob dialects fail
-//! explicitly. No installed-package or
+//! Selectors support literal components, `*`, `?`, ASCII character classes,
+//! standalone `**`, bounded nested brace alternatives, and lock-authority-specific
+//! exclusions. Unsupported glob dialects fail explicitly. No installed-package or
 //! state-directory traversal, symlink following, package-manager execution or
 //! fallback to trusting the lockfile's workspace projection.
 
@@ -750,93 +749,102 @@ mod tests {
     }
 
     #[test]
-    fn brace_selected_npm_and_bun_workspaces_bind_the_actual_installation() {
+    fn glob_selected_npm_and_bun_workspaces_bind_the_actual_installation() {
         use super::super::inspect_for_execution;
         use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
         use std::os::unix::fs::symlink;
 
         let core = json!({"name":"core","version":"1.0.0"});
         let ui = json!({"name":"ui","version":"1.0.0","dependencies":{"core":"^1"}});
-        for bun in [false, true] {
-            let root_manifest = json!({"name":"root", "workspaces":[
-                "{apps,packages}/{core,ui,missing}", "packages/{core,core}"
-            ], "dependencies":{"core":"^1","ui":"^1"}});
-            let root = fixture(root_manifest.clone(), None);
-            write(root.path(), "packages/core", core.clone());
-            write(root.path(), "apps/ui", ui.clone());
-            fs::create_dir_all(root.path().join("packages/unselected")).unwrap();
-            fs::write(
-                root.path().join("packages/unselected/package.json"),
-                "must not parse",
-            )
-            .unwrap();
-            let (filename, lock) = if bun {
-                (
-                    "bun.lock",
-                    json!({"lockfileVersion":1,"workspaces":{
-                        "":{"name":"root","dependencies":{"core":"^1","ui":"^1"}},
-                        "packages/core":core,"apps/ui":ui
-                    },"packages":{
-                        "core":["core@workspace:packages/core"],
-                        "ui":["ui@workspace:apps/ui"]
-                    }}),
+        for selectors in [
+            json!(["{apps,packages}/{core,ui,missing}", "packages/{core,core}"]),
+            json!(["packages/cor?", "apps/[uv]i", "!packages/[!c]*"]),
+            json!([
+                "{apps,packages}/[cu]*",
+                "!{apps,packages}/*[!ei]",
+                "packages/co??"
+            ]),
+        ] {
+            for bun in [false, true] {
+                let root_manifest = json!({"name":"root", "workspaces":selectors,
+                "dependencies":{"core":"^1","ui":"^1"}});
+                let root = fixture(root_manifest.clone(), None);
+                write(root.path(), "packages/core", core.clone());
+                write(root.path(), "apps/ui", ui.clone());
+                fs::create_dir_all(root.path().join("packages/unselected")).unwrap();
+                fs::write(
+                    root.path().join("packages/unselected/package.json"),
+                    "must not parse",
                 )
-            } else {
-                (
-                    "package-lock.json",
-                    modern_fixture(json!({
-                        "":root_manifest,"packages/core":core,"apps/ui":ui,
-                        "node_modules/core":{"link":true,"resolved":"packages/core"},
-                        "node_modules/ui":{"link":true,"resolved":"apps/ui"}
-                    })),
+                .unwrap();
+                let (filename, lock) = if bun {
+                    (
+                        "bun.lock",
+                        json!({"lockfileVersion":1,"workspaces":{
+                            "":{"name":"root","dependencies":{"core":"^1","ui":"^1"}},
+                            "packages/core":core,"apps/ui":ui
+                        },"packages":{
+                            "core":["core@workspace:packages/core"],
+                            "ui":["ui@workspace:apps/ui"]
+                        }}),
+                    )
+                } else {
+                    (
+                        "package-lock.json",
+                        modern_fixture(json!({
+                            "":root_manifest,"packages/core":core,"apps/ui":ui,
+                            "node_modules/core":{"link":true,"resolved":"packages/core"},
+                            "node_modules/ui":{"link":true,"resolved":"apps/ui"}
+                        })),
+                    )
+                };
+                fs::write(
+                    root.path().join(filename),
+                    serde_json::to_vec(&lock).unwrap(),
                 )
-            };
-            fs::write(
-                root.path().join(filename),
-                serde_json::to_vec(&lock).unwrap(),
-            )
-            .unwrap();
-            fs::create_dir(root.path().join("node_modules")).unwrap();
-            symlink("../packages/core", root.path().join("node_modules/core")).unwrap();
-            symlink("../apps/ui", root.path().join("node_modules/ui")).unwrap();
+                .unwrap();
+                fs::create_dir(root.path().join("node_modules")).unwrap();
+                symlink("../packages/core", root.path().join("node_modules/core")).unwrap();
+                symlink("../apps/ui", root.path().join("node_modules/ui")).unwrap();
 
-            let report = inspect_for_execution(root.path(), deadline()).unwrap();
-            assert!(
-                report.installation_checked && !report.requires_review(),
-                "{filename}: {report:#?}"
-            );
-            for path in [
-                "package.json",
-                "packages/core/package.json",
-                "apps/ui/package.json",
-            ] {
-                assert_eq!(
-                    report
+                let report = inspect_for_execution(root.path(), deadline()).unwrap();
+                assert!(
+                    report.installation_checked && !report.requires_review(),
+                    "{filename}: {report:#?}"
+                );
+                for path in [
+                    "package.json",
+                    "packages/core/package.json",
+                    "apps/ui/package.json",
+                ] {
+                    assert_eq!(
+                        report
+                            .inputs
+                            .iter()
+                            .filter(|input| input.path == path)
+                            .count(),
+                        1
+                    );
+                }
+                assert!(
+                    !report
                         .inputs
                         .iter()
-                        .filter(|input| input.path == path)
-                        .count(),
-                    1
+                        .any(|input| input.path.contains("unselected"))
+                );
+                let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
+                assert_eq!(graph.packages.len(), 3);
+                assert!(
+                    graph
+                        .dependency_edges
+                        .iter()
+                        .all(|edge| edge.target_package_id.is_some())
+                );
+                assert_eq!(
+                    report,
+                    inspect_for_execution(root.path(), deadline()).unwrap()
                 );
             }
-            assert!(
-                !report
-                    .inputs
-                    .iter()
-                    .any(|input| input.path.contains("unselected"))
-            );
-            let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
-            assert_eq!(graph.packages.len(), 3);
-            assert!(
-                graph
-                    .dependency_edges
-                    .iter()
-                    .all(|edge| edge.target_package_id.is_some())
-            );
-            assert_eq!(
-                report,
-                inspect_for_execution(root.path(), deadline()).unwrap()
-            );
         }
     }
 
@@ -949,10 +957,10 @@ mod tests {
             "../outside",
             "/outside",
             "packages/{1..3}",
-            "packages/[ab]",
+            "packages/[z-a]",
             "!../outside",
             "!!packages/a",
-            "packages/a?",
+            "packages/a[",
             "node_modules/*",
             ".git/*",
             "packages/a**b",

@@ -122,6 +122,15 @@ fn vef_prove_and_verify_ed25519_roundtrip_and_tamper_refusals() {
         proved["service_output"]["verification_metadata"]["merkle_leaf_count"],
         "6"
     );
+    assert_eq!(
+        proved["service_input"]["metadata"]["control_context_schema"],
+        "franken-node/vef-control-context/v1"
+    );
+    assert_eq!(proved["service_input"]["metadata"]["validity_ms"], "60000");
+    assert_eq!(
+        proved["service_input"]["metadata"]["expires_at_millis"],
+        "1700000060000"
+    );
 
     // 1. Valid verification with explicit trusted public key succeeds.
     let verified = json_ok(
@@ -203,6 +212,71 @@ fn vef_prove_and_verify_ed25519_roundtrip_and_tamper_refusals() {
         ],
     );
     assert_eq!(expired["ok"], false);
+
+    // Previously these edits left both signatures intact while renewing an
+    // expired proof or authorizing a different actor/artifact. Verify the
+    // identity cases while the authentic proof is fresh so expiry cannot mask
+    // a missing signature-to-control-context binding.
+    for (name, patch, now) in [
+        (
+            "unsigned-time-renewal",
+            json!({
+                "generated_at_millis": 1700000090000_u64,
+                "expires_at_millis": 1700000150000_u64,
+            }),
+            "1700000090000",
+        ),
+        (
+            "unsigned-lifetime-extension",
+            json!({
+                "validity_ms": 600000_u64,
+                "expires_at_millis": 1700000600000_u64,
+            }),
+            "1700000090000",
+        ),
+        (
+            "actor-substitution",
+            json!({"actor_identity": "operator:mallory"}),
+            "1700000010000",
+        ),
+        (
+            "artifact-substitution",
+            json!({"artifact_identity": "sha256:substituted"}),
+            "1700000010000",
+        ),
+    ] {
+        let mut edited = proved.clone();
+        for (field, value) in patch.as_object().unwrap() {
+            edited[field] = value.clone();
+        }
+        assert_eq!(edited["service_output"], proved["service_output"]);
+        assert_eq!(
+            edited["signed_compliance_proof"],
+            proved["signed_compliance_proof"]
+        );
+        let edited_path = dir.path().join(format!("{name}.json"));
+        std::fs::write(&edited_path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+        let err = json_err(
+            dir.path(),
+            &[
+                "verify",
+                "vef-proof",
+                edited_path.to_str().unwrap(),
+                "--trusted-public-key",
+                pk_str,
+                "--now-ms",
+                now,
+                "--json",
+            ],
+        );
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("VEF signed control context"),
+            "{name}: {err}"
+        );
+    }
 
     // 5. Downgrade attack to unkeyed reference backend ("test-hash") fails closed.
     let downgraded_path = dir.path().join("downgraded.json");

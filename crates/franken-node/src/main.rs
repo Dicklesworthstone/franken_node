@@ -43798,6 +43798,7 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
 }
 
 const VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION: &str = "franken-node/vef-signed-proof-bundle/v1";
+const VEF_CONTROL_CONTEXT_SCHEMA_VERSION: &str = "franken-node/vef-control-context/v1";
 const VEF_ED25519_BACKEND_NAME: &str = "ed25519-receipt-window-v1";
 const VEF_ED25519_DOMAIN: &[u8] = b"franken_node:vef:ed25519_receipt_window:v1:";
 
@@ -43988,6 +43989,96 @@ struct VefSignedProofBundle {
     trace_id: String,
 }
 
+// ProofInputEnvelope commits to metadata, and the Ed25519 service signature
+// authenticates that commitment. Keep every gate-facing control claim inside it.
+fn vef_control_context_metadata(
+    actor_identity: &str,
+    artifact_identity: &str,
+    generated_at_millis: u64,
+    validity_ms: u64,
+    expires_at_millis: u64,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "control_context_schema".to_string(),
+            VEF_CONTROL_CONTEXT_SCHEMA_VERSION.to_string(),
+        ),
+        ("actor_identity".to_string(), actor_identity.to_string()),
+        (
+            "artifact_identity".to_string(),
+            artifact_identity.to_string(),
+        ),
+        (
+            "generated_at_millis".to_string(),
+            generated_at_millis.to_string(),
+        ),
+        ("validity_ms".to_string(), validity_ms.to_string()),
+        (
+            "expires_at_millis".to_string(),
+            expires_at_millis.to_string(),
+        ),
+    ])
+}
+
+// Call only after verifying service_output with the independently trusted key.
+// A valid service proof and a valid receipt signature must describe the same
+// receipts and authorization context; validating them independently is not enough.
+fn validate_vef_signed_control_context(
+    bundle: &VefSignedProofBundle,
+    policy_predicates: &[String],
+) -> Result<()> {
+    anyhow::ensure!(
+        bundle.validity_ms > 0
+            && bundle.generated_at_millis.checked_add(bundle.validity_ms)
+                == Some(bundle.expires_at_millis),
+        "VEF signed control context has an invalid validity interval"
+    );
+    anyhow::ensure!(
+        bundle.generated_at_millis == bundle.service_output.generated_at_millis
+            && bundle.generated_at_millis == bundle.signed_compliance_proof.generated_at_millis,
+        "VEF signed control context generation time mismatch"
+    );
+    anyhow::ensure!(
+        !bundle.actor_identity.trim().is_empty()
+            && !bundle.artifact_identity.trim().is_empty()
+            && bundle.trace_id == bundle.service_input.trace_id
+            && bundle.trace_id == bundle.signed_compliance_proof.trace_id,
+        "VEF signed control context identity or trace mismatch"
+    );
+    for entry in &bundle.receipt_entries {
+        anyhow::ensure!(
+            entry.receipt.actor_identity == bundle.actor_identity
+                && entry.receipt.artifact_identity == bundle.artifact_identity
+                && entry.receipt.policy_snapshot_hash == bundle.policy_snapshot_hash
+                && entry.receipt.trace_id == bundle.trace_id,
+            "VEF signed control context does not match receipt {} actor/artifact/policy/trace",
+            entry.index
+        );
+    }
+
+    let expected_input = vef::proof_service::ProofInputEnvelope::from_scheduler_job(
+        &bundle.scheduler_job,
+        &bundle.window,
+        &bundle.receipt_entries,
+        &bundle.checkpoints,
+        &bundle.policy_snapshot_hash,
+        policy_predicates.to_vec(),
+        vef_control_context_metadata(
+            &bundle.actor_identity,
+            &bundle.artifact_identity,
+            bundle.generated_at_millis,
+            bundle.validity_ms,
+            bundle.expires_at_millis,
+        ),
+    )
+    .map_err(|err| anyhow::anyhow!("VEF signed control context reconstruction failed: {err}"))?;
+    anyhow::ensure!(
+        bundle.service_input == expected_input,
+        "VEF signed control context or receipt window mismatch; reissue legacy bundles without authenticated freshness"
+    );
+    Ok(())
+}
+
 fn load_vef_signing_key(explicit_path: Option<&Path>) -> Result<ed25519_dalek::SigningKey> {
     if let Some(path) = explicit_path {
         let meta = std::fs::metadata(path)
@@ -44078,7 +44169,9 @@ fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
     let now_millis = args
         .now_ms
         .unwrap_or_else(|| now_unix_secs().saturating_mul(1_000));
-    let expires_at_millis = now_millis.saturating_add(args.validity_ms);
+    let expires_at_millis = now_millis.checked_add(args.validity_ms).ok_or_else(|| {
+        anyhow::anyhow!("VEF proof validity interval overflows epoch milliseconds")
+    })?;
     let trace_id = format!("trace-vef-prove-{}", args.policy_id.trim());
 
     let policy_def = if let Some(policy_path) = &args.policy_file {
@@ -44174,11 +44267,12 @@ fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
         .values()
         .map(|pred| pred.predicate_id.clone())
         .collect::<Vec<_>>();
-    let mut input_meta = BTreeMap::new();
-    input_meta.insert("actor_identity".to_string(), args.actor_identity.clone());
-    input_meta.insert(
-        "artifact_identity".to_string(),
-        args.artifact_identity.clone(),
+    let input_meta = vef_control_context_metadata(
+        &args.actor_identity,
+        &args.artifact_identity,
+        now_millis,
+        args.validity_ms,
+        expires_at_millis,
     );
     let service_input = vef::proof_service::ProofInputEnvelope::from_scheduler_job(
         &job,
@@ -44561,6 +44655,7 @@ fn handle_verify_vef_proof(args: &VerifyVefProofArgs) -> Result<()> {
     service
         .verify_proof(&bundle.service_input, &bundle.service_output)
         .map_err(|err| anyhow::anyhow!("VEF proof service envelope verification failed: {err}"))?;
+    validate_vef_signed_control_context(&bundle, &recompiled_predicates)?;
 
     let ed_backend =
         Ed25519ReceiptWindowBackend::from_verifying_key(trusted_vk, &bundle.policy_snapshot_hash);
@@ -52194,6 +52289,152 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// These tests exercise the real issuance and verification handlers so the
+// main-bin inline CI lane covers the same authorization boundary as the CLI.
+#[cfg(test)]
+mod vef_control_context_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const ISSUED_AT: u64 = 1_700_000_000_000;
+
+    fn issued_bundle(
+        directory: &Path,
+        actor_identity: &str,
+    ) -> (VefSignedProofBundle, VerifyVefProofArgs) {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let signing_key_path = directory.join("vef.key");
+        let verifying_key_path = directory.join("vef.pub");
+        let bundle_path = directory.join("vef-bundle.json");
+        std::fs::write(&signing_key_path, hex::encode(signing_key.to_bytes())).unwrap();
+        std::fs::write(
+            &verifying_key_path,
+            hex::encode(signing_key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+        handle_trust_vef_prove(&TrustVefProveArgs {
+            policy_id: "signed-control-context".to_string(),
+            actor_identity: actor_identity.to_string(),
+            artifact_identity: "sha256:original-artifact".to_string(),
+            policy_file: None,
+            signing_key: Some(signing_key_path),
+            validity_ms: 60_000,
+            now_ms: Some(ISSUED_AT),
+            output: Some(bundle_path.clone()),
+            json: false,
+        })
+        .expect("issue authentic Ed25519 bundle");
+        let bundle =
+            serde_json::from_slice(&std::fs::read(&bundle_path).unwrap()).expect("issued bundle");
+        let args = VerifyVefProofArgs {
+            bundle_path,
+            trusted_public_key: Some(verifying_key_path),
+            now_ms: Some(ISSUED_AT + 10_000),
+            json: false,
+        };
+        (bundle, args)
+    }
+
+    fn verify_bundle(bundle: &VefSignedProofBundle, args: &VerifyVefProofArgs) -> Result<()> {
+        std::fs::write(&args.bundle_path, serde_json::to_vec(bundle)?)?;
+        handle_verify_vef_proof(args)
+    }
+
+    #[test]
+    fn signed_vef_context_refuses_expiry_renewal_and_identity_substitution() {
+        let directory = TempDir::new().unwrap();
+        let (bundle, mut args) = issued_bundle(directory.path(), "operator:alice");
+        verify_bundle(&bundle, &args).expect("unmodified fresh bundle verifies");
+        args.now_ms = Some(ISSUED_AT + 90_000);
+        assert!(
+            verify_bundle(&bundle, &args).is_err(),
+            "authentic bundle expires"
+        );
+
+        let mut renewed = bundle.clone();
+        renewed.generated_at_millis += 90_000;
+        renewed.expires_at_millis += 90_000;
+        let mut extended = bundle.clone();
+        extended.validity_ms = 600_000;
+        extended.expires_at_millis = ISSUED_AT + 600_000;
+        let mut wrong_actor = bundle.clone();
+        wrong_actor.actor_identity = "operator:mallory".to_string();
+        let mut wrong_artifact = bundle.clone();
+        wrong_artifact.artifact_identity = "sha256:substituted-artifact".to_string();
+
+        for (name, tampered, now) in [
+            ("unsigned time renewal", renewed, ISSUED_AT + 90_000),
+            ("unsigned lifetime extension", extended, ISSUED_AT + 90_000),
+            ("actor substitution", wrong_actor, ISSUED_AT + 10_000),
+            ("artifact substitution", wrong_artifact, ISSUED_AT + 10_000),
+        ] {
+            args.now_ms = Some(now);
+            let err = verify_bundle(&tampered, &args).expect_err(name);
+            assert!(
+                err.to_string().contains("VEF signed control context"),
+                "{name}: {err:#}"
+            );
+        }
+
+        let mut rewritten_metadata = bundle.clone();
+        rewritten_metadata.validity_ms = 600_000;
+        rewritten_metadata.expires_at_millis = ISSUED_AT + 600_000;
+        rewritten_metadata.service_input.metadata = vef_control_context_metadata(
+            &rewritten_metadata.actor_identity,
+            &rewritten_metadata.artifact_identity,
+            rewritten_metadata.generated_at_millis,
+            rewritten_metadata.validity_ms,
+            rewritten_metadata.expires_at_millis,
+        );
+        args.now_ms = Some(ISSUED_AT + 90_000);
+        let err = verify_bundle(&rewritten_metadata, &args)
+            .expect_err("rewriting authenticated metadata cannot renew a proof");
+        assert!(
+            err.to_string()
+                .contains("VEF proof service envelope verification failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn signed_vef_context_refuses_individually_authentic_spliced_proofs_and_legacy_metadata() {
+        let first_directory = TempDir::new().unwrap();
+        let second_directory = TempDir::new().unwrap();
+        let (bundle, args) = issued_bundle(first_directory.path(), "operator:alice");
+        let (other, _) = issued_bundle(second_directory.path(), "operator:bob");
+        let mut spliced = bundle.clone();
+        spliced.service_input = other.service_input;
+        spliced.service_output = other.service_output;
+        let err = verify_bundle(&spliced, &args)
+            .expect_err("valid signatures for unrelated receipt windows cannot be combined");
+        assert!(
+            err.to_string().contains("VEF signed control context"),
+            "{err:#}"
+        );
+
+        // Reproduce the legacy signed shape, rather than merely corrupting a
+        // signature, to ensure an attacker cannot omit the new freshness claims.
+        let mut legacy = bundle;
+        legacy
+            .service_input
+            .metadata
+            .retain(|key, _| matches!(key.as_str(), "actor_identity" | "artifact_identity"));
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut service = vef::proof_service::VefProofService::new(
+            vef::proof_service::ProofServiceConfig::ed25519_merkle_signing(&signing_key),
+        );
+        legacy.service_output = service
+            .generate_proof(&legacy.service_input, None, ISSUED_AT)
+            .unwrap();
+        let err = verify_bundle(&legacy, &args)
+            .expect_err("valid legacy signature has no authenticated validity interval");
+        assert!(
+            err.to_string().contains("reissue legacy bundles"),
+            "{err:#}"
+        );
+    }
 }
 
 // ── State directory bootstrap tests ───────────────────────────────────

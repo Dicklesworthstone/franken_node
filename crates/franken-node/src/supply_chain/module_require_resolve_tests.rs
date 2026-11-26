@@ -933,6 +933,103 @@ fn dirname_request_paths_cannot_leave_project_or_traverse_operator_state() {
     assert!(loads[0].specifier.is_none());
 }
 
+#[test]
+fn immutable_path_bindings_capture_commonjs_esm_and_typed_spellings() {
+    for (language, source) in [
+        (SourceLanguage::JavaScript,
+            "const path=require('path'); require(path.join(__dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "const {join:target}=require('node:path/posix'); require(target(__dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "require(require('node:path').resolve(__dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "import path from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); load(path.join(import.meta.dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "import * as path from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); load(path.resolve(import.meta.dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "import {join as target} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); load(target(import.meta.dirname,'dep.cjs'));"),
+        (SourceLanguage::JavaScript,
+            "import {default as path} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); load(path.join(import.meta.dirname,'dep.cjs'));"),
+        (SourceLanguage::TypeScript,
+            "const path=require('path') as PathModule; require((path.join as JoinFn)((__dirname as string), ('dep.cjs' satisfies string)));"),
+    ] {
+        let (loads, notices, analyzed) = scan_source(source, language);
+        assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+        let paths = loads.iter().filter(|load| load.normalized_dirname_request).collect::<Vec<_>>();
+        assert_eq!(paths.len(), 1, "{source}");
+        assert_eq!(paths[0].specifier.as_deref(), Some("./dep.cjs"), "{source}");
+        assert!(!paths[0].dirname_request);
+    }
+}
+
+#[test]
+fn path_request_inference_has_bounded_choices_and_no_options_or_alias_escape() {
+    let mut sources = vec![
+        "let path=require('path'); require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const path=require('path'); const f=path.join; require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const {join}=require('path'); join=other; require(join(__dirname,'dep.cjs'));".to_owned(),
+        "const path=require('path'); require.resolve(path.join(__dirname,'dep.cjs'),unknown);".to_owned(),
+        "const path=require('path'); require.resolve(path.join(__dirname,'dep.cjs'),{paths:[]});".to_owned(),
+        "const path=require('path'); require.resolve.paths(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const path=require('path'); import(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const load=require; const hidden=load('node:path'); const path=require('path'); hidden.join=other; require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const key='node:path'; const hidden=require(key); const path=require('path'); hidden.join=other; require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const path=require('path'); import('node:path').then(hidden=>hidden.default.join=other); require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "const path=require('path', unknown); require(path.join(__dirname,'dep.cjs'));".to_owned(),
+        "import {default as hidden} from 'node:path'; import path from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); hidden.join=other; load(path.join(import.meta.dirname,'dep.cjs'));".to_owned(),
+        "import path, {posix as hidden} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); hidden.join=other; load(path.join(import.meta.dirname,'dep.cjs'));".to_owned(),
+        "import path, {win32 as hidden} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); hidden.resolve=other; load(path.resolve(import.meta.dirname,'dep.cjs'));".to_owned(),
+        "import path, {'posix' as hidden} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); hidden.join=other; load(path.join(import.meta.dirname,'dep.cjs'));".to_owned(),
+        "import path, {'default' as hidden} from 'node:path'; import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); hidden.join=other; load(path.join(import.meta.dirname,'dep.cjs'));".to_owned(),
+    ];
+    let choices = (0..6).map(|n| format!("flag ? 'a{n}' : 'b{n}'")).collect::<Vec<_>>().join(",");
+    sources.push(format!("const path=require('path'); require(path.join(__dirname,{choices}));"));
+    sources.push(format!("const path=require('path'); require(path.join(__dirname,{}));",
+        vec!["'a'"; MAX_STRING_ALTERNATIVES + 1].join(",")));
+    sources.push(format!("const path=require('path'); require(path.join(__dirname,'{}'));",
+        "x".repeat(super::super::MAX_PATH)));
+    for source in sources {
+        let (loads, _, analyzed) = scan_source(&source, SourceLanguage::JavaScript);
+        assert!(analyzed, "{source}");
+        assert!(loads.iter().any(|load| load.specifier.is_none()), "{source}");
+        assert!(loads.iter().all(|load| !load.normalized_dirname_request), "{source}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn path_join_normalizes_before_symlinks_and_retains_directory_intent() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "nested/app.cjs", r#"
+const path=require('node:path');
+console.log(require(path.join(__dirname,'link','..','dep.cjs')));
+try { require.resolve(path.join(__dirname,'dep.cjs','/')); }
+catch (error) { console.log(error.code); }
+console.log(require.resolve(path.resolve(__dirname,'dep.cjs','./')).endsWith('/nested/dep.cjs'));
+"#);
+    put(root.path(), "nested/dep.cjs", "module.exports=17;");
+    put(root.path(), "elsewhere/value.cjs", "module.exports=99;");
+    put(root.path(), "dep.cjs", "throw new Error('filesystem traversed a normalized-away link');");
+    std::os::unix::fs::symlink("../elsewhere", root.path().join("nested/link")).unwrap();
+    let reference = std::process::Command::new("node").arg("nested/app.cjs")
+        .current_dir(root.path()).env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+        .output().expect("Node reference for lexical path normalization");
+    assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+    assert_eq!(reference.stdout, b"17\nMODULE_NOT_FOUND\ntrue\n");
+    let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().diagnostics.is_empty());
+    let paths = graph.report().edges.iter().filter(|edge| edge.normalized_dirname_request)
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths[0].specifier.as_deref(), Some("./nested/dep.cjs"));
+    assert_eq!(paths[0].target.as_ref().unwrap().path, "nested/dep.cjs");
+    assert_eq!(paths[1].specifier.as_deref(), Some("./nested/dep.cjs/"));
+    assert_eq!(paths[1].error.as_ref().unwrap().code, "MODULE_NOT_FOUND");
+    assert_eq!(paths[2].specifier.as_deref(), Some("./nested/dep.cjs"));
+    assert_eq!(paths[2].target.as_ref().unwrap().path, "nested/dep.cjs");
+    assert!(!graph.report().modules.iter().any(|module| module.id.path == "dep.cjs"));
+}
+
 #[cfg(feature = "engine")]
 mod native {
     use super::super::engine_resolver::CapturedEngineResolver;
@@ -1039,6 +1136,131 @@ try { require(__dirname+'/optional.cjs'); } catch(error) { console.log('absent',
     struct DirnamePolicy {
         seen: std::sync::Mutex<Vec<String>>,
         deny: std::sync::atomic::AtomicBool,
+    }
+
+    #[test]
+    fn native_path_requests_match_node_and_replay_typed_sources_after_retirement() {
+        let source = r#"
+const path = require('node:path');
+const {join, resolve} = require('path');
+const first = require(path.join(__dirname, '..', 'pkg', '.', 'index.cjs'));
+const second = require(resolve(__dirname, '..', 'pkg'));
+console.log('same', first === second);
+console.log('value', first.value);
+console.log('choice', require(join(__dirname, flag ? 'one.cjs' : 'two.cjs')));
+console.log('asset', require.resolve(path.resolve(__dirname, '..', 'pkg', 'data.txt')));
+try { require(join(__dirname, 'optional.cjs')); }
+catch (error) { console.log('absent', error.code); }
+"#;
+        for entry in ["nested/app.cjs", "nested/app.cts"] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("original path project");
+            put(&root, "nested/app.cjs", &format!("const flag=true;\n{source}"));
+            if entry.ends_with(".cts") {
+                put(&root, entry, &format!("const flag: boolean=true;\n{source}"));
+            }
+            put(&root, "pkg/package.json", r#"{"main":"index.cjs"}"#);
+            put(&root, "pkg/index.cjs",
+                "module.exports={value:require(require('node:path').resolve(__dirname,'..','leaf.cjs'))};");
+            put(&root, "leaf.cjs", "module.exports=42;");
+            put(&root, "nested/one.cjs", "module.exports=31;");
+            put(&root, "nested/two.cjs", "module.exports=47;");
+            put(&root, "pkg/data.txt", "this must never be executed");
+            let reference = std::process::Command::new("node").arg("nested/app.cjs")
+                .current_dir(&root).env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+                .output().expect("Node reference for path-derived requests");
+            assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+            let expected = format!("same true\nvalue 42\nchoice 31\nasset {}\nabsent MODULE_NOT_FOUND\n",
+                root.join("pkg/data.txt").display());
+            assert_eq!(String::from_utf8(reference.stdout).unwrap(), expected);
+            let graph = capture(&root, entry, GraphOptions::default()).unwrap();
+            assert!(graph.report().diagnostics.is_empty(), "{:?}", graph.report().diagnostics);
+            assert_eq!(graph.report().edges.iter()
+                .filter(|edge| edge.normalized_dirname_request).count(), 7);
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            std::fs::rename(&root, parent.path().join("retired source")).unwrap();
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(graph.report(), replayed.report());
+            let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+            for destination in ["relocated first", "relocated second"] {
+                let destination = parent.path().join(destination);
+                assert!(!destination.exists());
+                let expected = expected.replace(root.to_str().unwrap(), destination.to_str().unwrap());
+                for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                    let policy = Arc::new(policy());
+                    let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+                    let installed = resolver.execution_resolver(&destination, policy).unwrap();
+                    let output = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                        .expect("captured native path requests execute with no source tree");
+                    let actual = output.console_output.iter().map(|line| line.message.as_str())
+                        .collect::<Vec<_>>().join("\n") + "\n";
+                    assert_eq!(actual, expected, "{lane:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_path_routes_keep_exact_spelling_purpose_importer_and_cached_policy() {
+        use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
+        use frankenengine_engine::module_resolver::{ImportStyle, ResolutionErrorCode};
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "nested/app.cjs", r#"
+const path=require('node:path');
+require(path.join(__dirname,'..','dep.cjs'));
+require.resolve(path.resolve(__dirname,'..','asset.txt'));
+"#);
+        put(root.path(), "dep.cjs", "module.exports=42;");
+        put(root.path(), "asset.txt", "metadata only");
+        let graph = capture(root.path(), "nested/app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let policy = Arc::new(DirnamePolicy::default());
+        let installed = resolver.execution_resolver(root.path(), policy.clone()).unwrap();
+        let request = |path: String| ModuleRequest::new(path, ImportStyle::Require)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let load = request(root.path().join("dep.cjs").display().to_string());
+        let metadata = request(root.path().join("asset.txt").display().to_string());
+        let first = installed.resolve_shared(&load, &context()).unwrap();
+        let cached = installed.resolve_shared(&load, &context()).unwrap();
+        assert!(Arc::ptr_eq(&first.module.record, &cached.module.record));
+        assert_eq!(first.module.request_specifier, load.specifier);
+        assert_eq!(installed.resolve_metadata(&metadata, &context()).unwrap()
+            .module.request_specifier, metadata.specifier);
+        assert_eq!(*policy.seen.lock().unwrap(),
+            vec![load.specifier.clone(), load.specifier.clone(), metadata.specifier.clone()]);
+        for other in [
+            "../dep.cjs".into(), "./dep.cjs".into(),
+            format!("{}/./dep.cjs", root.path().display()),
+            format!("{}/nested/../dep.cjs", root.path().display()),
+            format!("{}/dep.cjs/", root.path().display()),
+            format!("{}-foreign/dep.cjs", root.path().display()),
+        ] {
+            assert!(installed.resolve_shared(&request(other), &context()).is_err());
+        }
+        assert!(installed.resolve_shared(&metadata, &context()).is_err());
+        assert!(installed.resolve_metadata(&load, &context()).is_err());
+        assert!(installed.resolve_require_metadata_from_paths(&metadata, &["nested".into()], &context()).is_err());
+        let mut foreign = load.clone();
+        foreign.referrer = Some(first.module.record.id.clone());
+        assert!(installed.resolve_shared(&foreign, &context()).is_err());
+        foreign = load.clone();
+        foreign.style = ImportStyle::Import;
+        assert!(installed.resolve_shared(&foreign, &context()).is_err());
+        assert!(resolver.resolve(&load, &context(), &self::policy()).is_err());
+        policy.deny.store(true, Ordering::SeqCst);
+        assert_eq!(installed.resolve_shared(&load, &context()).unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        assert_eq!(installed.resolve_metadata(&metadata, &context()).unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        let relocated = root.path().join("other-root");
+        let second = resolver.execution_resolver(&relocated, Arc::new(DirnamePolicy::default())).unwrap();
+        assert!(second.resolve_shared(&load, &context()).is_err());
+        let relocated_load = request(relocated.join("dep.cjs").display().to_string());
+        assert_eq!(second.resolve_shared(&relocated_load, &context()).unwrap()
+            .module.record.id, first.module.record.id);
+        assert!(!relocated.exists());
     }
 
     impl ModulePolicyHook for DirnamePolicy {

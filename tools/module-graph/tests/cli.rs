@@ -224,3 +224,94 @@ fn pin_lookup_agrees_with_real_node_for_nested_hoisted_scoped_and_alias_packages
         assert_eq!(value["edges"][0]["lockfile_package_path"], String::from_utf8(output.stdout).unwrap());
     }
 }
+
+#[test]
+fn workspace_character_globs_agree_with_npm_manifest_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    for (index, directory) in [
+        "packages/pkg-a0",
+        "packages/pkg-a4",
+        "packages/pkg-b2",
+        "packages/pkg-z3",
+        "packages/pkg-é",
+        "packages/pkg-😀",
+        "packages/.hidden",
+        "apps/app-x",
+        "apps/app-7",
+    ]
+    .iter()
+    .enumerate()
+    {
+        put(
+            root.path(),
+            &format!("{directory}/package.json"),
+            json!({"name":format!("fixture-{index}"),"version":"1.0.0"}),
+        );
+    }
+    for selectors in [
+        json!([
+            "packages/pkg-[ab]?",
+            "!packages/pkg-?[34]",
+            "apps/app-[!0-9]"
+        ]),
+        json!(["{packages,apps}/*-[a-z][0-9]", "packages/pkg-?"]),
+        json!(["packages/pkg-??", "apps/app-[^0-9]"]),
+        json!(["packages/pkg-*", "!packages/pkg-[az]*", "packages/pkg-a?"]),
+    ] {
+        put(
+            root.path(),
+            "package.json",
+            json!({"name":"root","version":"1.0.0","workspaces":selectors}),
+        );
+        let (output, value) = invoke(root.path(), &[]);
+        assert!(output.status.success(), "{selectors}: {value}");
+        let mut actual = value["graph"]["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|package| package["workspace"] == true)
+            .map(|package| {
+                package["relative_manifest_path"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        // Load the workspace mapper shipped with the actual npm executable.
+        // This reads package manifests only; it never installs or runs packages.
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+                const fs = require('node:fs');
+                const path = require('node:path');
+                const {createRequire} = require('node:module');
+                const npm = process.env.PATH.split(path.delimiter)
+                    .map(directory => path.join(directory, 'npm'))
+                    .find(candidate => fs.existsSync(candidate));
+                if (!npm) throw new Error('npm oracle must be available');
+                const npmRequire = createRequire(fs.realpathSync(npm));
+                const mapWorkspaces = npmRequire('@npmcli/map-workspaces');
+                const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+                mapWorkspaces({cwd: process.cwd(), pkg}).then(workspaces => {
+                    const manifests = [...workspaces.values()].map(directory =>
+                        path.relative(process.cwd(), path.join(directory, 'package.json'))
+                            .split(path.sep).join('/'));
+                    process.stdout.write(JSON.stringify(manifests.sort()));
+                }).catch(error => { console.error(error); process.exitCode = 1; });
+            "#,
+            )
+            .current_dir(root.path())
+            .output()
+            .expect("Node/npm workspace oracle must be available");
+        assert!(
+            output.status.success(),
+            "{selectors}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual, expected, "{selectors}");
+        assert_eq!(value["graph"]["workspace_selection_mode"], "npm");
+    }
+}
