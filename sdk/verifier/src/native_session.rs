@@ -19,6 +19,15 @@ use crate::incident_bundle::decode_evidence_json;
 use crate::incident_bundle::native_capture::module_capsule;
 pub use module_capsule::SourceCapsuleSummary;
 
+#[path = "native_session_archive.rs"]
+mod archive;
+pub use archive::{
+    MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_SESSIONS,
+    NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, NativeSessionColdArchiveError,
+    VerifiedNativeSessionColdArchive, verify_native_session_cold_archive,
+    verify_native_session_cold_archive_with_expected_root,
+};
+
 pub const NATIVE_SESSION_FORENSICS_SCHEMA: &str = "franken-node/native-session-forensics/v1";
 pub const NATIVE_SESSION_FORENSICS_V2_SCHEMA: &str = "franken-node/native-session-forensics/v2";
 pub const NATIVE_SESSION_FORENSICS_V3_SCHEMA: &str = "franken-node/native-session-forensics/v3";
