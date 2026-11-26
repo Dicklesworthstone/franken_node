@@ -322,6 +322,10 @@ path = "tests/run_console_exit_e2e.rs"
 name = "run_language_semantics_e2e"
 path = "tests/run_language_semantics_e2e.rs"
 
+[[test]]
+name = "run_module_loading_e2e"
+path = "tests/run_module_loading_e2e.rs"
+
 # bd-reality-20260923-26n9r.14 (IBD-8): proves security::copilot_engine is wired
 # into the `doctor expected-loss-actions` CLI command (was a library island).
 [[test]]

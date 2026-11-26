@@ -4274,12 +4274,31 @@ impl RunProjectPaths {
         publisher_approval: Option<&PublisherSourceGraphApproval>,
         package_bin: Option<&str>,
     ) -> Result<Self> {
+        Self::resolve_for_run_inner(
+            app_path,
+            working_dir,
+            operator_project,
+            publisher_approval,
+            package_bin,
+            true,
+        )
+    }
+
+    fn resolve_for_run_inner(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
+        package_bin: Option<&str>,
+        validate_fleet_policy_root: bool,
+    ) -> Result<Self> {
         let Some(name) = package_bin else {
-            return Self::resolve_with_registry_artifact(
+            return Self::resolve_with_registry_artifact_inner(
                 app_path,
                 working_dir,
                 operator_project,
                 publisher_approval,
+                validate_fleet_policy_root,
             );
         };
         anyhow::ensure!(
@@ -4293,7 +4312,13 @@ impl RunProjectPaths {
                 && !name.chars().any(char::is_control),
             "--package-bin requires a command name"
         );
-        Self::resolve_live(app_path, working_dir, operator_project, Some(name))
+        Self::resolve_live_inner(
+            app_path,
+            working_dir,
+            operator_project,
+            Some(name),
+            validate_fleet_policy_root,
+        )
     }
 
     fn resolve_live(
@@ -4301,6 +4326,16 @@ impl RunProjectPaths {
         working_dir: &Path,
         operator_project: Option<&Path>,
         package_bin: Option<&str>,
+    ) -> Result<Self> {
+        Self::resolve_live_inner(app_path, working_dir, operator_project, package_bin, true)
+    }
+
+    fn resolve_live_inner(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        package_bin: Option<&str>,
+        validate_fleet_policy_root: bool,
     ) -> Result<Self> {
         validate_guest_source_spelling(working_dir)?;
         let invocation_root = working_dir.canonicalize().with_context(|| {
@@ -4411,7 +4446,9 @@ impl RunProjectPaths {
                 project_root.display()
             );
         }
-        validate_fleet_policy_project_root_with_operator(&project_root, operator_project)?;
+        if validate_fleet_policy_root {
+            validate_fleet_policy_project_root_with_operator(&project_root, operator_project)?;
+        }
         let entrypoint_format =
             resolve_run_entrypoint_format(&entrypoint, &project_root, &mut package_manifests)
                 .map_err(anyhow::Error::msg)?;
@@ -4437,13 +4474,35 @@ impl RunProjectPaths {
         operator_project: Option<&Path>,
         publisher_approval: Option<&PublisherSourceGraphApproval>,
     ) -> Result<Self> {
+        Self::resolve_with_registry_artifact_inner(
+            app_path,
+            working_dir,
+            operator_project,
+            publisher_approval,
+            true,
+        )
+    }
+
+    fn resolve_with_registry_artifact_inner(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
+        validate_fleet_policy_root: bool,
+    ) -> Result<Self> {
         validate_guest_source_spelling(working_dir)?;
         let Some(approval) = publisher_approval else {
-            return Self::resolve_with_operator_project(app_path, working_dir, operator_project);
+            return Self::resolve_live_inner(
+                app_path,
+                working_dir,
+                operator_project,
+                None,
+                validate_fleet_policy_root,
+            );
         };
         #[cfg(not(unix))]
         {
-            let _ = approval;
+            let _ = (approval, validate_fleet_policy_root);
             anyhow::bail!("registry source admission requires Unix");
         }
         #[cfg(unix)]
@@ -4473,7 +4532,9 @@ impl RunProjectPaths {
                     anchored == requested,
                     "inferred run target is not a regular file"
                 );
-                validate_fleet_policy_project_root_with_operator(&target, operator_project)?;
+                if validate_fleet_policy_root {
+                    validate_fleet_policy_project_root_with_operator(&target, operator_project)?;
+                }
                 // Capsule replay already validates relative module paths.
                 // Keep this boundary explicit before creating logical origins;
                 // never canonicalize or read a guest source path here.
@@ -4500,7 +4561,13 @@ impl RunProjectPaths {
                     publisher_source: None,
                 }
             } else {
-                Self::resolve_with_operator_project(app_path, working_dir, operator_project)?
+                Self::resolve_live_inner(
+                    app_path,
+                    working_dir,
+                    operator_project,
+                    None,
+                    validate_fleet_policy_root,
+                )?
             };
             anyhow::ensure!(
                 paths.entrypoint.strip_prefix(&paths.project_root)?
@@ -4558,6 +4625,7 @@ impl RunProjectPaths {
         &self.project_root
     }
 
+    #[cfg(test)]
     fn verify_target_with_operator_project(
         &self,
         app_path: &Path,
@@ -4565,12 +4633,30 @@ impl RunProjectPaths {
         operator_project: Option<&Path>,
         publisher_approval: Option<&PublisherSourceGraphApproval>,
     ) -> Result<()> {
-        let observed = Self::resolve_for_run(
+        self.verify_target_with_operator_project_inner(
+            app_path,
+            working_dir,
+            operator_project,
+            publisher_approval,
+            true,
+        )
+    }
+
+    fn verify_target_with_operator_project_inner(
+        &self,
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
+        validate_fleet_policy_root: bool,
+    ) -> Result<()> {
+        let observed = Self::resolve_for_run_inner(
             app_path,
             working_dir,
             operator_project,
             publisher_approval,
             self.package_bin.as_deref(),
+            validate_fleet_policy_root,
         )?;
         if observed != *self {
             anyhow::bail!(
@@ -10615,21 +10701,27 @@ impl EngineDispatcher {
         }
         let pre_admission = || -> Result<PreAdmissionOutcome> {
             let mut execution_config = execution_config;
+            // `enforce_execution_fleet_policy_with_operator` immediately below
+            // performs the full Unix O_NOFOLLOW|O_DIRECTORY ancestor walk and
+            // active policy load for `project_paths.project_root()`, so skip
+            // the duplicate walk inside path resolution here.
             let project_paths = match self.project_paths.as_ref() {
                 Some(paths) => {
-                    paths.verify_target_with_operator_project(
+                    paths.verify_target_with_operator_project_inner(
                         app_path,
                         &working_dir,
                         self.operator_fleet_project_root.as_deref(),
                         self.registry_artifact_approval.as_ref(),
+                        false,
                     )?;
                     paths.clone()
                 }
-                None => RunProjectPaths::resolve_with_registry_artifact(
+                None => RunProjectPaths::resolve_with_registry_artifact_inner(
                     app_path,
                     &working_dir,
                     self.operator_fleet_project_root.as_deref(),
                     self.registry_artifact_approval.as_ref(),
+                    false,
                 )?,
             };
             project_paths.enforce_safe_mode()?;
@@ -11492,9 +11584,12 @@ impl EngineDispatcher {
                 actual_working_dir.display()
             );
         }
+        // `run_engine_native_guarded` immediately enforces the full fleet
+        // policy ancestor walk and active policy load before any guest code
+        // can execute; skip the duplicate walk during this target check.
         request
             .project_paths
-            .verify_target_with_operator_project(
+            .verify_target_with_operator_project_inner(
                 &request.app_path,
                 &actual_working_dir,
                 request
@@ -11505,6 +11600,7 @@ impl EngineDispatcher {
                     .trust_requirements
                     .registry_artifact_approval
                     .as_ref(),
+                false,
             )
             .context("native-session project authority no longer matches preflight")?;
 
@@ -12361,12 +12457,16 @@ impl EngineDispatcher {
             .admitted_native_session_nonce
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        // `recheck_native_run_controls_with_options` immediately below enforces
+        // the full fleet policy ancestor walk and active policy load on the
+        // same canonical project root; skip the duplicate walk here.
         project_paths
-            .verify_target_with_operator_project(
+            .verify_target_with_operator_project_inner(
                 &app_path_buf,
                 &working_dir,
                 trust_requirements.operator_fleet_project_root.as_deref(),
                 trust_requirements.registry_artifact_approval.as_ref(),
+                false,
             )
             .context("project authority changed before native-session launch")?;
         trust_requirements
@@ -14641,12 +14741,16 @@ impl EngineDispatcher {
                 &mut telemetry_guard,
             )
         })?;
+        // `enforce_execution_fleet_policy_with_operator` already ran at the
+        // entry of `run_engine_native_guarded` for `project_paths.project_root()`,
+        // so skip the duplicate ancestor walk here.
         project_paths
-            .verify_target_with_operator_project(
+            .verify_target_with_operator_project_inner(
                 app_path,
                 &current_dir,
                 trust_requirements.operator_fleet_project_root.as_deref(),
                 trust_requirements.registry_artifact_approval.as_ref(),
+                false,
             )
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(

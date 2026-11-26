@@ -371,14 +371,40 @@ impl PinnedModuleRegistry {
             BTreeMap::<(ModuleId, String), ResolutionError>::new();
         let mut has_missing_routes = false;
         let mut has_lookup_path_routes = false;
-        let incomplete = || {
-            error(
-                "ERR_MODULE_REGISTRY_INCOMPLETE",
-                "source delivery requires a closed, analyzed graph with engine-approved terminal requirements",
-            )
+        let incomplete_with = |detail: String| {
+            let base = "source delivery requires a closed, analyzed graph with engine-approved terminal requirements";
+            if detail.is_empty() {
+                error("ERR_MODULE_REGISTRY_INCOMPLETE", base)
+            } else {
+                error(
+                    "ERR_MODULE_REGISTRY_INCOMPLETE",
+                    format!("{base} ({detail})"),
+                )
+            }
         };
-        if !report.diagnostics.is_empty() || report.modules.iter().any(|m| !m.analyzed) {
-            return Err(incomplete());
+        if !report.diagnostics.is_empty() {
+            let mut parts = Vec::new();
+            for diag in report.diagnostics.iter().take(3) {
+                let path = bounded_diagnostic_token(&diag.module.path, 160);
+                if let Some(site) = &diag.site {
+                    parts.push(format!("{} at {}:{}", diag.code, path, site.line));
+                } else {
+                    parts.push(format!("{} in {}", diag.code, path));
+                }
+            }
+            let extra = report.diagnostics.len().saturating_sub(parts.len());
+            let detail = if extra > 0 {
+                format!("diagnostics: {} (+{extra} more)", parts.join(", "))
+            } else {
+                format!("diagnostics: {}", parts.join(", "))
+            };
+            return Err(incomplete_with(detail));
+        }
+        if let Some(unanalyzed) = report.modules.iter().find(|m| !m.analyzed) {
+            return Err(incomplete_with(format!(
+                "unanalyzed module: {}",
+                bounded_diagnostic_token(&unanalyzed.id.path, 160)
+            )));
         }
         for edge in &report.edges {
             if edge.dirname_request
@@ -441,7 +467,13 @@ impl PinnedModuleRegistry {
                             failure.code == "ERR_RUNTIME_MODULE_REQUIRED"
                         }) =>
                 {
-                    let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
+                    let request = edge.specifier.as_deref().ok_or_else(|| {
+                        incomplete_with(format!(
+                            "missing runtime specifier at {}:{}",
+                            bounded_diagnostic_token(&edge.importer.path, 160),
+                            edge.site.line
+                        ))
+                    })?;
                     let style = RequestStyle::for_load(edge.kind);
                     if matches!(edge.commonjs_search.as_ref(), Some(CommonJsSearch::LookupPaths)) {
                         match native_builtin(request, style) {
@@ -454,7 +486,14 @@ impl PinnedModuleRegistry {
                             // A source-only registry cannot classify builtin names.
                             // Only an engine-confirmed unknown reserved name has
                             // ordinary directories instead of builtin null.
-                            Ok(None) => return Err(incomplete()),
+                            Ok(None) => {
+                                return Err(incomplete_with(format!(
+                                    "unsupported native builtin '{}' requested by {}:{}",
+                                    bounded_diagnostic_token(request, 120),
+                                    bounded_diagnostic_token(&edge.importer.path, 160),
+                                    edge.site.line
+                                )));
+                            }
                             Err(failure)
                                 if request.starts_with("node:")
                                     && failure.code == "MODULE_NOT_FOUND" => {}
@@ -478,14 +517,36 @@ impl PinnedModuleRegistry {
                                         == super::super::TargetKind::ExternalPackage
                                     && super::super::bare_builtin(&mapping.selection.target)
                             })
-                            .ok_or_else(incomplete)?;
+                            .ok_or_else(|| {
+                                incomplete_with(format!(
+                                    "unresolved private builtin mapping '{}' in {}:{}",
+                                    bounded_diagnostic_token(request, 120),
+                                    bounded_diagnostic_token(&edge.importer.path, 160),
+                                    edge.site.line
+                                ))
+                            })?;
                         mapping.selection.target.as_str()
                     } else {
                         request
                     };
                     let name = match native_builtin(provider, style) {
                         Ok(Some(name)) => name,
-                        Ok(None) => return Err(incomplete()),
+                        Ok(None) => {
+                            let target_desc = if provider == request {
+                                format!("'{}'", bounded_diagnostic_token(request, 120))
+                            } else {
+                                format!(
+                                    "'{}' (via '{}')",
+                                    bounded_diagnostic_token(provider, 120),
+                                    bounded_diagnostic_token(request, 120)
+                                )
+                            };
+                            return Err(incomplete_with(format!(
+                                "unsupported native builtin {target_desc} requested by {}:{}",
+                                bounded_diagnostic_token(&edge.importer.path, 160),
+                                edge.site.line
+                            )));
+                        }
                         Err(failure)
                             if style == RequestStyle::RequireResolve
                                 && failure.code == "MODULE_NOT_FOUND" =>
@@ -536,7 +597,37 @@ impl PinnedModuleRegistry {
                     // Static imports and reexports still require a real target.
                     has_missing_routes = true;
                 }
-                _ => return Err(incomplete()),
+                _ => {
+                    let state_name = match edge.state {
+                        EdgeState::Resolved => "resolved",
+                        EdgeState::Unresolved => "unresolved",
+                        EdgeState::RuntimeRequired => "runtime_required",
+                        EdgeState::NonLiteral => "non_literal",
+                        EdgeState::TypeOnly => "type_only",
+                    };
+                    let kind_name = match edge.kind {
+                        LoadKind::StaticImport => "static_import",
+                        LoadKind::Reexport => "reexport",
+                        LoadKind::Require => "require",
+                        LoadKind::RequireResolve => "require_resolve",
+                        LoadKind::ImportMetaResolve => "import_meta_resolve",
+                        LoadKind::DynamicImport => "dynamic_import",
+                    };
+                    let mut detail = format!("{state_name} {kind_name}");
+                    if let Some(specifier) = edge.specifier.as_deref() {
+                        detail
+                            .push_str(&format!(" '{}'", bounded_diagnostic_token(specifier, 120)));
+                    }
+                    if let Some(failure) = edge.error.as_ref() {
+                        detail.push_str(&format!(" ({})", failure.code));
+                    }
+                    detail.push_str(&format!(
+                        " in {}:{}",
+                        bounded_diagnostic_token(&edge.importer.path, 160),
+                        edge.site.line
+                    ));
+                    return Err(incomplete_with(detail));
+                }
             }
         }
         // The captured report remains truthful: runtime requirements are not
@@ -546,7 +637,9 @@ impl PinnedModuleRegistry {
             && !has_missing_routes
             && !has_lookup_path_routes
         {
-            return Err(incomplete());
+            return Err(incomplete_with(
+                "source graph is not fully resolved".to_owned(),
+            ));
         }
         Ok(ValidatedSourceClosure {
             builtin_targets,
@@ -1307,6 +1400,26 @@ fn validate_specifier(specifier: &str) -> Result<()> {
     Ok(())
 }
 
+fn bounded_diagnostic_token(raw: &str, max_chars: usize) -> String {
+    let mut sanitized = String::with_capacity(raw.len().min(max_chars));
+    let mut truncated = false;
+    for (count, ch) in raw.chars().enumerate() {
+        if count >= max_chars {
+            truncated = true;
+            break;
+        }
+        if ch.is_control() {
+            sanitized.push(' ');
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    if truncated {
+        sanitized.push_str("...");
+    }
+    sanitized
+}
+
 fn invalid_graph() -> ResolutionError {
     error(
         "ERR_MODULE_REGISTRY_GRAPH",
@@ -1499,6 +1612,58 @@ mod tests {
                 .unwrap()
                 .code,
                 "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_registry_errors_surface_actionable_diagnostics_and_unsupported_builtins() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "app.mjs",
+                "import 'node:unimplemented';",
+                "unsupported native builtin 'node:unimplemented' requested by app.mjs:1",
+            ),
+            (
+                "app.mjs",
+                "import './missing.mjs';",
+                "unresolved static_import './missing.mjs' (ERR_MODULE_NOT_FOUND) in app.mjs:1",
+            ),
+            (
+                "app.mjs",
+                "import(request);",
+                "non_literal dynamic_import in app.mjs:1",
+            ),
+            (
+                "app.cjs",
+                "const f = Function('return 1');\nconst g = eval;\nconst h = Function('return 2');\nconst k = eval;",
+                "diagnostics: DYNAMIC_CODE_OR_LOADER at app.cjs:1, DYNAMIC_CODE_OR_LOADER at app.cjs:2, DYNAMIC_CODE_OR_LOADER at app.cjs:3 (+1 more)",
+            ),
+        ];
+        for (file, source, expected_fragment) in cases {
+            put(root.path(), file, source);
+            let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let failure =
+                PinnedModuleRegistry::validate_source_closure(&graph, &pin, |specifier, _| {
+                    Ok((specifier == "node:path").then_some("node:path"))
+                })
+                .err()
+                .expect("incomplete graph must fail closed");
+            assert_eq!(failure.code, "ERR_MODULE_REGISTRY_INCOMPLETE", "{source}");
+            assert!(
+                failure.detail.starts_with(
+                    "source delivery requires a closed, analyzed graph with engine-approved terminal requirements"
+                ),
+                "base message changed: {}",
+                failure.detail
+            );
+            assert!(
+                failure.detail.contains(expected_fragment),
+                "expected {:?} in {:?}",
+                expected_fragment,
+                failure.detail
             );
         }
     }
