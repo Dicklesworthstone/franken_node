@@ -55,7 +55,7 @@ pub(crate) fn commonjs_directory_steps(
     .flatten()
 }
 
-/// Workspace negation has different documented semantics in npm and Bun.
+/// Workspace negation and wildcard character units differ between npm and Bun.
 /// The selected lock authority chooses the dialect; selectors never do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,15 +135,192 @@ pub(crate) mod workspace_selection {
             && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
     }
 
+    /// Compile component syntax once, before opening any workspace directory.
+    /// Classes deliberately accept ASCII literals/ranges only. Malformed,
+    /// nested and POSIX classes remain explicit errors, never literal fallbacks
+    /// that could silently omit a workspace from dependency admission.
+    enum ComponentToken {
+        Literal(u32),
+        One,
+        Star,
+        Class {
+            negated: bool,
+            ranges: Vec<(u8, u8)>,
+        },
+    }
+
+    struct ComponentPattern {
+        tokens: Vec<ComponentToken>,
+        mode: WorkspaceSelectionMode,
+        explicit_dot: bool,
+        literal: bool,
+    }
+
+    impl ComponentPattern {
+        fn parse(source: &str, mode: WorkspaceSelectionMode) -> Option<Self> {
+            let mut characters = source.chars().peekable();
+            let mut tokens = Vec::new();
+            let mut literal = true;
+            while let Some(character) = characters.next() {
+                match character {
+                    '*' => {
+                        literal = false;
+                        tokens.push(ComponentToken::Star);
+                    }
+                    '?' => {
+                        literal = false;
+                        tokens.push(ComponentToken::One);
+                    }
+                    '[' => {
+                        literal = false;
+                        let negated = matches!(characters.peek(), Some('!' | '^'));
+                        if negated {
+                            characters.next();
+                        }
+                        let mut members = Vec::new();
+                        loop {
+                            match characters.next()? {
+                                ']' => break,
+                                member
+                                    if member.is_ascii_graphic()
+                                        && !matches!(
+                                            member,
+                                            '[' | '/' | '\\' | ':' | '{' | '}' | '(' | ')' | '|'
+                                        ) =>
+                                {
+                                    members.push(member as u8);
+                                }
+                                _ => return None,
+                            }
+                        }
+                        if members.is_empty() {
+                            return None;
+                        }
+                        let mut ranges = Vec::new();
+                        let mut index = 0;
+                        while index < members.len() {
+                            let first = members[index];
+                            if index + 2 < members.len() && members[index + 1] == b'-' {
+                                let last = members[index + 2];
+                                if first > last || first == b'-' || last == b'-' {
+                                    return None;
+                                }
+                                ranges.push((first, last));
+                                index += 3;
+                            } else {
+                                // A dash is literal only at a class boundary;
+                                // chained or incomplete ranges are ambiguous.
+                                if first == b'-' && index != 0 && index + 1 != members.len() {
+                                    return None;
+                                }
+                                ranges.push((first, first));
+                                index += 1;
+                            }
+                        }
+                        tokens.push(ComponentToken::Class { negated, ranges });
+                    }
+                    '!' | ']' | '{' | '}' | '(' | ')' | '|' => return None,
+                    _ => match mode {
+                        WorkspaceSelectionMode::Npm => {
+                            let mut encoded = [0_u16; 2];
+                            for unit in character.encode_utf16(&mut encoded) {
+                                tokens.push(ComponentToken::Literal(u32::from(*unit)));
+                            }
+                        }
+                        WorkspaceSelectionMode::Bun => {
+                            tokens.push(ComponentToken::Literal(u32::from(character)));
+                        }
+                    },
+                }
+            }
+            Some(Self {
+                tokens,
+                mode,
+                explicit_dot: source.starts_with('.'),
+                literal,
+            })
+        }
+
+        fn matches(&self, text: &str, dot: bool) -> bool {
+            if (!dot && text.starts_with('.') && !self.explicit_dot) || text.contains('/') {
+                return false;
+            }
+            let mut input = match self.mode {
+                WorkspaceSelectionMode::Npm => ComponentUnits::Npm(text.encode_utf16()),
+                WorkspaceSelectionMode::Bun => ComponentUnits::Bun(text.chars()),
+            }
+            .peekable();
+            // npm's shipped minimatch consumes UTF-16 units, while Bun uses
+            // Unicode scalars. Keep both the literals and wildcard cursor in
+            // the selected dialect, including when retrying after a star.
+            // Iterators are cheap to clone; matching allocates no text buffer
+            // and never constructs a recursive backtracking tree.
+            let mut token_index = 0;
+            let mut star = None;
+            let mut retry = input.clone();
+            while let Some(&character) = input.peek() {
+                let matches = match self.tokens.get(token_index) {
+                    Some(ComponentToken::Literal(value)) => *value == character,
+                    Some(ComponentToken::One) => true,
+                    Some(ComponentToken::Class { negated, ranges }) => {
+                        let contained = ranges.iter().any(|(first, last)| {
+                            (u32::from(*first)..=u32::from(*last)).contains(&character)
+                        });
+                        contained != *negated
+                    }
+                    _ => false,
+                };
+                if matches {
+                    token_index += 1;
+                    input.next();
+                } else if matches!(self.tokens.get(token_index), Some(ComponentToken::Star)) {
+                    star = Some(token_index);
+                    token_index += 1;
+                    retry = input.clone();
+                } else if let Some(index) = star {
+                    if retry.next().is_none() {
+                        return false;
+                    }
+                    input = retry.clone();
+                    token_index = index + 1;
+                } else {
+                    return false;
+                }
+            }
+            while matches!(self.tokens.get(token_index), Some(ComponentToken::Star)) {
+                token_index += 1;
+            }
+            token_index == self.tokens.len()
+        }
+    }
+
+    #[derive(Clone)]
+    enum ComponentUnits<'a> {
+        Npm(std::str::EncodeUtf16<'a>),
+        Bun(std::str::Chars<'a>),
+    }
+
+    impl Iterator for ComponentUnits<'_> {
+        type Item = u32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            match self {
+                Self::Npm(units) => units.next().map(u32::from),
+                Self::Bun(characters) => characters.next().map(u32::from),
+            }
+        }
+    }
+
     struct Pattern {
         parts: Vec<String>,
+        components: Vec<ComponentPattern>,
         negative: bool,
         literal: bool,
         trailing_slash: bool,
     }
 
     impl Pattern {
-        fn parse(raw: &str) -> ModuleResolutionGraphResult<Self> {
+        fn parse(raw: &str, mode: WorkspaceSelectionMode) -> ModuleResolutionGraphResult<Self> {
             let body = raw.strip_prefix('!').unwrap_or(raw);
             let normalized = body.strip_prefix("./").unwrap_or(body);
             let normalized = normalized.strip_suffix('/').unwrap_or(normalized);
@@ -151,7 +328,6 @@ pub(crate) mod workspace_selection {
                 || body.trim() != body
                 || raw.len() > MAX_PATH_BYTES
                 || !relative(normalized)
-                || normalized.contains(['!', '?', '[', ']', '{', '}', '(', ')', '|'])
                 || normalized
                     .split('/')
                     .any(|part| EXCLUDED.contains(&part) || (part.contains("**") && part != "**"))
@@ -160,10 +336,19 @@ pub(crate) mod workspace_selection {
                     pattern: raw.to_owned(),
                 });
             }
+            let components = normalized
+                .split('/')
+                .map(|component| ComponentPattern::parse(component, mode))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| ModuleResolutionGraphError::InvalidWorkspacePattern {
+                    pattern: raw.to_owned(),
+                })?;
+            let literal = components.iter().all(|component| component.literal);
             Ok(Self {
                 parts: normalized.split('/').map(str::to_owned).collect(),
+                components,
                 negative: raw.starts_with('!'),
-                literal: !body.contains('*'),
+                literal,
                 trailing_slash: body.ends_with('/'),
             })
         }
@@ -227,7 +412,7 @@ pub(crate) mod workspace_selection {
                     if dot || !component.starts_with('.') {
                         next[index] = true;
                     }
-                } else if component_matches_with_dot(part, component, dot) {
+                } else if self.components[index].matches(component, dot) {
                     next[index + 1] = true;
                 }
             }
@@ -244,6 +429,7 @@ pub(crate) mod workspace_selection {
         selectors: &[String],
         limit: usize,
         deadline: Option<Instant>,
+        mode: WorkspaceSelectionMode,
     ) -> ModuleResolutionGraphResult<Vec<(usize, Pattern)>> {
         enforce_len("workspace patterns", selectors.len(), limit)?;
         let mut compiled = Vec::new();
@@ -254,12 +440,24 @@ pub(crate) mod workspace_selection {
             if raw.trim() != raw || raw.len() > MAX_PATH_BYTES {
                 return Err(invalid_pattern());
             }
+            // Brace expansion precedes component parsing. Do not let it
+            // reinterpret a forbidden class as several valid alternatives.
+            let mut in_class = false;
+            for character in raw.chars() {
+                match character {
+                    '[' if in_class => return Err(invalid_pattern()),
+                    '[' => in_class = true,
+                    ']' => in_class = false,
+                    '{' | '}' if in_class => return Err(invalid_pattern()),
+                    _ => {}
+                }
+            }
             let mut pending = vec![raw.clone()];
             while let Some(pattern) = pending.pop() {
                 check_deadline(deadline)?;
                 let Some(start) = pattern.find('{') else {
                     enforce_len("expanded workspace patterns", compiled.len() + 1, limit)?;
-                    let mut parsed = Pattern::parse(&pattern)?;
+                    let mut parsed = Pattern::parse(&pattern, mode)?;
                     if parsed.negative != raw.starts_with('!') {
                         return Err(invalid_pattern());
                     }
@@ -435,40 +633,10 @@ pub(crate) mod workspace_selection {
         }
     }
 
-    // Wildcards match bytes only between UTF-8 literals. No recursive glob
-    // backtracking tree is allocated; components, patterns and visits are bounded.
     #[cfg(test)]
     fn component_matches(pattern: &str, text: &str) -> bool {
-        component_matches_with_dot(pattern, text, false)
-    }
-
-    fn component_matches_with_dot(pattern: &str, text: &str, dot: bool) -> bool {
-        if !dot && text.starts_with('.') && !pattern.starts_with('.') {
-            return false;
-        }
-        let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
-        let (mut p, mut t, mut retry) = (0, 0, 0);
-        let mut star = None;
-        while t < text.len() {
-            if p < pattern.len() && pattern[p] != b'*' && pattern[p] == text[t] {
-                p += 1;
-                t += 1;
-            } else if p < pattern.len() && pattern[p] == b'*' {
-                star = Some(p);
-                p += 1;
-                retry = t;
-            } else if let Some(index) = star {
-                retry += 1;
-                t = retry;
-                p = index + 1;
-            } else {
-                return false;
-            }
-        }
-        while p < pattern.len() && pattern[p] == b'*' {
-            p += 1;
-        }
-        p == pattern.len()
+        ComponentPattern::parse(pattern, WorkspaceSelectionMode::Npm)
+            .is_some_and(|pattern| pattern.matches(text, false))
     }
 
     pub(crate) fn open_root(project: &Path) -> ModuleResolutionGraphResult<File> {
@@ -548,7 +716,7 @@ pub(crate) mod workspace_selection {
         mut visit_manifest: impl FnMut(&str, &File) -> Result<bool, E>,
     ) -> Result<(), E> {
         check_deadline(deadline)?;
-        let mut patterns = compile_patterns(selectors, limits.patterns, deadline)?;
+        let mut patterns = compile_patterns(selectors, limits.patterns, deadline, limits.mode)?;
         apply_mode(&mut patterns, selectors, limits.mode);
         if patterns.is_empty() {
             return Ok(());
@@ -712,11 +880,210 @@ pub(crate) mod workspace_selection {
             assert!(!component_matches("a*b*c", "axbybd"));
             assert!(!component_matches("*", ".hidden"));
             assert!(component_matches(".hidden*", ".hidden-name"));
-            let pattern = Pattern::parse("packages/*").unwrap();
+            let pattern = Pattern::parse("packages/*", WorkspaceSelectionMode::Npm).unwrap();
             let s = pattern.step(&pattern.start(), "packages");
             let s = pattern.step(&s, "a");
             assert_eq!(s.last(), Some(&true));
             assert!(!pattern.step(&s, "b").iter().any(|active| *active));
+        }
+
+        #[test]
+        fn component_globs_match_single_units_lists_ranges_and_negation() {
+            for (pattern, text, expected) in [
+                ("pkg-?", "pkg-a", true),
+                ("pkg-?", "pkg-ab", false),
+                ("pkg-?", "pkg-", false),
+                ("pkg-[ac]", "pkg-a", true),
+                ("pkg-[ac]", "pkg-b", false),
+                ("pkg-[a-c][0-9]", "pkg-b2", true),
+                ("pkg-[a-c][0-9]", "pkg-d2", false),
+                ("pkg-[!a-c]", "pkg-z", true),
+                ("pkg-[^a-c]", "pkg-b", false),
+                ("pkg-[-a]", "pkg--", true),
+                ("pkg-[a-]", "pkg--", true),
+                ("pkg-[*?]", "pkg-?", true),
+                ("pkg-[a,b]", "pkg-,", true),
+                ("*a?[0-9]", "aaabx7", false),
+                ("*a?[0-9]", "aaab7", true),
+                ("*", "one/two", false),
+                ("[.]hidden", ".hidden", false),
+                (".[a-z]*", ".hidden", true),
+                ("π*-?", "π工具-x", true),
+            ] {
+                for mode in [WorkspaceSelectionMode::Npm, WorkspaceSelectionMode::Bun] {
+                    let compiled = ComponentPattern::parse(pattern, mode).unwrap();
+                    assert_eq!(
+                        compiled.matches(text, false),
+                        expected,
+                        "{mode:?}: {pattern} {text}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn workspace_glob_unicode_units_follow_the_selected_package_manager() {
+            // npm's shipped minimatch (10.x) uses non-u regular expressions
+            // for this syntax; Bun's native glob consumes Unicode scalars.
+            for (pattern, text, npm, bun) in [
+                ("?", "é", true, true),
+                ("?", "😀", false, true),
+                ("??", "😀", true, false),
+                ("😀", "😀", true, true),
+                ("?[a-z]", "😀a", false, true),
+                ("[!a]", "😀", false, true),
+                ("[!a][!a]", "😀", true, false),
+                ("*?x", "😀x", true, true),
+                ("*😀?", "prefix😀é", true, true),
+            ] {
+                for (mode, expected) in [
+                    (WorkspaceSelectionMode::Npm, npm),
+                    (WorkspaceSelectionMode::Bun, bun),
+                ] {
+                    assert_eq!(
+                        ComponentPattern::parse(pattern, mode)
+                            .unwrap()
+                            .matches(text, false),
+                        expected,
+                        "{mode:?}: {pattern} {text}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn workspace_component_globs_capture_exact_manifests_in_both_dialects() {
+            let root = tempfile::tempdir().unwrap();
+            for path in [
+                "packages/pkg-a0",
+                "packages/pkg-a4",
+                "packages/pkg-b2",
+                "packages/pkg-z3",
+                "packages/.hidden",
+                "apps/app-x",
+                "apps/app-7",
+            ] {
+                std::fs::create_dir_all(root.path().join(path)).unwrap();
+                std::fs::write(root.path().join(path).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            let selectors = [
+                "packages/pkg-[ab]?".into(),
+                "!packages/pkg-?[34]".into(),
+                "apps/app-[!0-9]".into(),
+            ];
+            for mode in [WorkspaceSelectionMode::Npm, WorkspaceSelectionMode::Bun] {
+                let mut found = Vec::new();
+                walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &selectors,
+                    Limits { mode, ..limits() },
+                    None,
+                    |path, _| {
+                        found.push(path.to_owned());
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+                assert_eq!(found, ["apps/app-x", "packages/pkg-a0", "packages/pkg-b2"]);
+            }
+
+            // A wildcard spelling must not acquire Bun's special authority
+            // for an explicitly named directory and undo an exclusion.
+            for selector in ["packages/pkg-a?", "packages/pkg-[a]0"] {
+                let mut found = Vec::new();
+                walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &[selector.into(), "!packages/pkg-a*".into()],
+                    Limits {
+                        mode: WorkspaceSelectionMode::Bun,
+                        ..limits()
+                    },
+                    None,
+                    |path, _| {
+                        found.push(path.to_owned());
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+                assert!(found.is_empty(), "{selector}");
+            }
+        }
+
+        #[test]
+        fn malformed_component_globs_fail_before_any_workspace_is_captured() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("packages/a")).unwrap();
+            let held = open_root(root.path()).unwrap();
+            for bad in [
+                "packages/[",
+                "packages/[]",
+                "packages/[!]",
+                "packages/[^]",
+                "packages/[z-a]",
+                "packages/[a-b-c]",
+                "packages/[[:digit:]]",
+                "packages/[a/b]",
+                "packages/[é]",
+                "packages/[a{b,c}]",
+                "packages/[{a,b}]",
+                "packages/{pkg-[a,b],other}",
+                "packages/a]",
+                "packages/!(a)",
+                "packages/{a,[z-a]}",
+                "!packages/[z-a]",
+            ] {
+                for mode in [WorkspaceSelectionMode::Npm, WorkspaceSelectionMode::Bun] {
+                    assert!(
+                        walk::<ModuleResolutionGraphError>(
+                            &held,
+                            &["packages/a".into(), bad.into()],
+                            Limits { mode, ..limits() },
+                            None,
+                            |_, _| panic!("malformed selector admitted its supported prefix"),
+                        )
+                        .is_err(),
+                        "{mode:?}: {bad}",
+                    );
+                }
+            }
+            let oversized = format!("packages/[{}]", "a".repeat(MAX_PATH_BYTES));
+            assert!(compile_patterns(&[oversized], 8, None, WorkspaceSelectionMode::Npm).is_err());
+        }
+
+        #[test]
+        fn component_globs_keep_symlink_containment_and_negated_subtree_pruning() {
+            use std::os::unix::fs::symlink;
+            let root = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("packages/pkg-a1")).unwrap();
+            symlink(outside.path(), root.path().join("packages/pkg-b1")).unwrap();
+            let held = open_root(root.path()).unwrap();
+            for mode in [WorkspaceSelectionMode::Npm, WorkspaceSelectionMode::Bun] {
+                assert!(
+                    walk::<ModuleResolutionGraphError>(
+                        &held,
+                        &["packages/pkg-??".into()],
+                        Limits { mode, ..limits() },
+                        None,
+                        |_, _| Ok(true),
+                    )
+                    .is_err()
+                );
+                let mut found = Vec::new();
+                walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &["packages/pkg-??".into(), "!packages/pkg-b[0-9]/**".into()],
+                    Limits { mode, ..limits() },
+                    None,
+                    |path, _| {
+                        found.push(path.to_owned());
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+                assert_eq!(found, ["packages/pkg-a1"]);
+            }
         }
 
         #[test]
@@ -956,7 +1323,9 @@ pub(crate) mod workspace_selection {
                     vec!["apps/a", "apps/b", "packages/a", "packages/b"],
                 ),
             ] {
-                let patterns = compile_patterns(&[source.into()], 8, None).unwrap();
+                let patterns =
+                    compile_patterns(&[source.into()], 8, None, WorkspaceSelectionMode::Npm)
+                        .unwrap();
                 let mut actual = patterns
                     .iter()
                     .map(|(selector, pattern)| {
@@ -1024,7 +1393,7 @@ pub(crate) mod workspace_selection {
                 "packages/{a,node_modules/private}",
                 "packages/{a,.git/private}",
                 "packages/{a,part-{1..3}}",
-                "packages/{a,b?}",
+                "packages/{a,b[}",
                 "packages/{a,{b}}",
                 "packages/{a,{b,c}",
                 "packages/{a,b}}",
@@ -1074,13 +1443,21 @@ pub(crate) mod workspace_selection {
                 "}".repeat(MAX_DEPTH + 1)
             );
             assert!(matches!(
-                compile_patterns(&[pattern], 128, None),
+                compile_patterns(&[pattern], 128, None, WorkspaceSelectionMode::Npm),
                 Err(ModuleResolutionGraphError::BoundExceeded {
                     bound: "workspace brace depth",
                     ..
                 })
             ));
-            assert!(compile_patterns(&["packages/{a,b}".into()], 8, Some(Instant::now())).is_err());
+            assert!(
+                compile_patterns(
+                    &["packages/{a,b}".into()],
+                    8,
+                    Some(Instant::now()),
+                    WorkspaceSelectionMode::Npm,
+                )
+                .is_err()
+            );
         }
 
         #[test]
@@ -1335,8 +1712,8 @@ pub struct ModuleResolutionGraph {
     pub schema_version: String,
     pub project_root: String,
     pub root_package_id: String,
-    /// Present when exclusion semantics affect workspace authority. Keeping
-    /// the mode in the canonical payload prevents cross-manager hash reuse.
+    /// Present when exclusions or character globs depend on the workspace
+    /// dialect. The canonical payload prevents cross-manager hash reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_selection_mode: Option<WorkspaceSelectionMode>,
     pub packages: Vec<PackageNode>,
@@ -1620,7 +1997,7 @@ fn build_graph_parts(
         .package
         .workspace_patterns
         .iter()
-        .any(|pattern| pattern.starts_with('!'))
+        .any(|pattern| pattern.starts_with('!') || pattern.contains(['?', '[']))
         .then_some(selection_mode);
     let workspace_manifest_paths = collect_workspace_manifest_paths(
         project_root,
