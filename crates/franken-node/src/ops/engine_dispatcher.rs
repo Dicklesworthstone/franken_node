@@ -287,6 +287,7 @@ impl Drop for RuntimeEvidenceSessionGrant {
 struct ProvisionedRuntimeEvidenceSession {
     grant: RuntimeEvidenceSessionGrant,
     capture_path: PathBuf,
+    capture_bytes: Vec<u8>,
     protected_state_root: PathBuf,
     product_root: ed25519_dalek::SigningKey,
     product_root_verifying_key: ed25519_dalek::VerifyingKey,
@@ -1339,10 +1340,10 @@ pub(super) fn load_or_create_runtime_evidence_product_root(
 }
 
 #[cfg(feature = "engine")]
-fn persist_runtime_evidence_capture(
+fn prepare_runtime_evidence_capture(
     capture_directory: &Path,
     capture: &RuntimeEvidenceIdentityCapture,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Vec<u8>)> {
     let file_name = format!(
         "{}.json",
         capture
@@ -1354,16 +1355,7 @@ fn persist_runtime_evidence_capture(
     let mut serialized = serde_json::to_vec_pretty(capture)
         .context("serialize runtime evidence identity capture")?;
     serialized.push(b'\n');
-    if !create_new_runtime_evidence_private_file(&capture_path, &serialized)? {
-        let existing = read_runtime_evidence_private_file(&capture_path, 64 * 1024)?;
-        if !crate::security::constant_time::ct_eq_bytes(&existing, &serialized) {
-            anyhow::bail!(
-                "runtime evidence identity capture {} already exists with different contents",
-                capture_path.display()
-            );
-        }
-    }
-    Ok(capture_path)
+    Ok((capture_path, serialized))
 }
 
 #[cfg(feature = "engine")]
@@ -1403,7 +1395,8 @@ fn provision_runtime_evidence_session(
         &product_root,
         &product_root_verifying_key,
     )?;
-    let capture_path = persist_runtime_evidence_capture(&capture_directory, &capture)?;
+    let (capture_path, capture_bytes) =
+        prepare_runtime_evidence_capture(&capture_directory, &capture)?;
     let grant = RuntimeEvidenceSessionGrant {
         signing_seed: *signing_seed,
         capture,
@@ -1411,6 +1404,7 @@ fn provision_runtime_evidence_session(
     Ok(ProvisionedRuntimeEvidenceSession {
         grant,
         capture_path,
+        capture_bytes,
         protected_state_root,
         product_root,
         product_root_verifying_key,
@@ -4685,33 +4679,77 @@ impl RunTrustRequirements {
         let mut protected = Vec::new();
         for path in paths {
             let configured = Self::normalize_operator_path(&path)?;
-            let mut resolved = PathBuf::new();
-            for component in path.components() {
-                match component {
-                    std::path::Component::CurDir => {}
-                    std::path::Component::ParentDir => {
-                        anyhow::ensure!(
-                            resolved.pop(),
-                            "operator protected path escapes its filesystem root"
-                        );
-                    }
-                    component => {
-                        resolved.push(component.as_os_str());
-                        match std::fs::symlink_metadata(&resolved) {
-                            Ok(_) => {
-                                resolved = resolved
-                                    .canonicalize()
-                                    .context("failed resolving operator protected path")?;
+            let has_dot_segments = path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            });
+            let resolved = if !has_dot_segments {
+                // Fast path: resolve the deepest existing prefix in one
+                // `canonicalize()` call instead of O(depth^2) prefix walks.
+                // Any existing dangling symlink still fails closed on
+                // `canonicalize()` identically to the component loop.
+                let mut existing = path.clone();
+                let mut missing_tail = Vec::new();
+                loop {
+                    match std::fs::symlink_metadata(&existing) {
+                        Ok(_) => {
+                            let mut canon = existing
+                                .canonicalize()
+                                .context("failed resolving operator protected path")?;
+                            for segment in missing_tail.into_iter().rev() {
+                                canon.push(segment);
                             }
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                            Err(error) => {
-                                return Err(error)
-                                    .context("failed inspecting operator protected path");
+                            break canon;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            if let Some(name) = existing.file_name() {
+                                missing_tail.push(name.to_os_string());
+                                existing.pop();
+                            } else {
+                                let mut reconstructed = existing;
+                                for segment in missing_tail.into_iter().rev() {
+                                    reconstructed.push(segment);
+                                }
+                                break reconstructed;
+                            }
+                        }
+                        Err(error) => {
+                            return Err(error).context("failed inspecting operator protected path");
+                        }
+                    }
+                }
+            } else {
+                let mut resolved = PathBuf::new();
+                for component in path.components() {
+                    match component {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            anyhow::ensure!(
+                                resolved.pop(),
+                                "operator protected path escapes its filesystem root"
+                            );
+                        }
+                        component => {
+                            resolved.push(component.as_os_str());
+                            match std::fs::symlink_metadata(&resolved) {
+                                Ok(_) => {
+                                    resolved = resolved
+                                        .canonicalize()
+                                        .context("failed resolving operator protected path")?;
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                                Err(error) => {
+                                    return Err(error)
+                                        .context("failed inspecting operator protected path");
+                                }
                             }
                         }
                     }
                 }
-            }
+                resolved
+            };
             protected.push(configured);
             protected.push(Self::normalize_operator_path(&resolved)?);
         }
@@ -12317,6 +12355,7 @@ impl EngineDispatcher {
         let ProvisionedRuntimeEvidenceSession {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
+            capture_bytes: evidence_capture_bytes,
             protected_state_root: runtime_evidence_state_root,
             product_root,
             product_root_verifying_key,
@@ -12348,34 +12387,35 @@ impl EngineDispatcher {
         // instead of leaving a historical capture with unknown supervision.
         // Admission failure still refuses launch; an abrupt process loss or a
         // store that cannot record admission remains conservatively unknown.
-        let mut session_inventory = NativeSessionInventoryGuard::admit_with_context(
-            &runtime_evidence_state_root,
-            NativeSessionAdmission {
-                session_nonce: nonce.clone(),
-                product_root_key_id: expected_evidence_capture.product_root_key_id.clone(),
-                identity_capture_path: evidence_capture_path.clone(),
-                security_epoch: expected_evidence_capture
-                    .evidence_verification_identity
-                    .key_provenance
-                    .activation_epoch
-                    .as_u64(),
-                admitted_at: Utc::now(),
-                project_root: project_paths.project_root().to_path_buf(),
-                control_scopes: Some(control_scopes),
-                entrypoint: project_paths.entrypoint().to_path_buf(),
-                dependency_ids: trust_requirements.dependency_ids.clone(),
-                configured_node_id: config.fleet.node_id.clone(),
-                fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
-                fleet_policy_sha256,
-                process_spawn_authority_granted: Some(process_spawn_admission.is_some()),
-                source_capsule,
-            },
-            admission_ticket,
-            Some((product_root, product_root_verifying_key)),
-        )
-        .context("native-session inventory admission failed; worker was not started")?;
-        let effect_journal = session_inventory.prepare_effect_journal()
-            .context("native-session durable effect journal could not be established; worker was not started")?;
+        let (mut session_inventory, effect_journal) =
+            NativeSessionInventoryGuard::admit_and_prepare_journal_with_capture(
+                &runtime_evidence_state_root,
+                NativeSessionAdmission {
+                    session_nonce: nonce.clone(),
+                    product_root_key_id: expected_evidence_capture.product_root_key_id.clone(),
+                    identity_capture_path: evidence_capture_path.clone(),
+                    security_epoch: expected_evidence_capture
+                        .evidence_verification_identity
+                        .key_provenance
+                        .activation_epoch
+                        .as_u64(),
+                    admitted_at: Utc::now(),
+                    project_root: project_paths.project_root().to_path_buf(),
+                    control_scopes: Some(control_scopes),
+                    entrypoint: project_paths.entrypoint().to_path_buf(),
+                    dependency_ids: trust_requirements.dependency_ids.clone(),
+                    configured_node_id: config.fleet.node_id.clone(),
+                    fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
+                    fleet_policy_sha256,
+                    process_spawn_authority_granted: Some(process_spawn_admission.is_some()),
+                    source_capsule,
+                },
+                admission_ticket,
+                (product_root, product_root_verifying_key),
+                &expected_evidence_capture,
+                &evidence_capture_bytes,
+            )
+            .context("native-session inventory admission failed; worker was not started")?;
         let ifc_trust_key_hex = verify_configured_ifc_declassifications(
             project_paths.project_root(),
             config,

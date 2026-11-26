@@ -151,24 +151,7 @@ fn create_private_journal_directory(root: &Path) -> Result<(PathBuf, bool)> {
     Ok((directory, created))
 }
 
-fn create_private_journal_file(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.append(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options
-            .mode(0o600)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        options.custom_flags(0x0020_0000).share_mode(0x0000_0001);
-    }
-    let file = options
-        .open(path)
-        .context("create new native-session journal; existing journals cannot be resumed")?;
+fn validate_journal_file_metadata(file: &File) -> Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         bail!("native-session journal is not a regular file");
@@ -190,6 +173,49 @@ fn create_private_journal_file(path: &Path) -> Result<File> {
             bail!("native-session journal file must not be a reparse point");
         }
     }
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn create_private_journal_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.append(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000).share_mode(0x0000_0001);
+    }
+    let file = options
+        .open(path)
+        .context("create new native-session journal; existing journals cannot be resumed")?;
+    validate_journal_file_metadata(&file)?;
+    Ok(file)
+}
+
+fn open_published_private_journal_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000).share_mode(0x0000_0001);
+    }
+    let file = options
+        .open(path)
+        .context("reopen published native-session journal for append")?;
+    validate_journal_file_metadata(&file)?;
     Ok(file)
 }
 
@@ -200,9 +226,179 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn validate_journal_authority(
+    session_nonce: &str,
+    product_root_key_id: &str,
+    admission_sha256: &str,
+    signing_key: &SigningKey,
+) -> Result<()> {
+    let nonce = uuid::Uuid::parse_str(session_nonce).context("invalid journal session nonce")?;
+    if nonce.is_nil() || nonce.to_string() != session_nonce {
+        bail!("journal session nonce must be a canonical non-nil UUID");
+    }
+    if product_root_key_id
+        != format!(
+            "ed25519:{}",
+            hex::encode(signing_key.verifying_key().as_bytes())
+        )
+        || !valid_digest(admission_sha256)
+    {
+        bail!("native-session journal authority does not match its admission");
+    }
+    Ok(())
+}
+
+fn encode_journal_record(
+    session_nonce: &str,
+    product_root_key_id: &str,
+    admission_sha256: &str,
+    signing_key: &SigningKey,
+    event_index: u64,
+    previous_record_sha256: &str,
+    event: JournalEvent<'_>,
+) -> Result<EncodedRecord> {
+    if serde_json::to_vec(&event)?.len() > EVENT_METADATA_CAP {
+        bail!("native-session journal event metadata exceeds its byte cap");
+    }
+    let payload_json = serde_json::to_string(&JournalPayload {
+        schema_version: NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA,
+        session_nonce,
+        product_root_key_id,
+        admission_sha256,
+        event_index,
+        previous_record_sha256,
+        event,
+    })?;
+    let mut preimage = SIGNATURE_DOMAIN.to_vec();
+    preimage.extend_from_slice(&u64::try_from(payload_json.len())?.to_be_bytes());
+    preimage.extend_from_slice(payload_json.as_bytes());
+    let signature_hex = hex::encode(signing_key.sign(&preimage).to_bytes());
+    let mut line = serde_json::to_vec(&JournalEnvelope {
+        payload_json,
+        signature_hex,
+    })?;
+    if line.len() > NATIVE_SESSION_EFFECT_JOURNAL_RECORD_CAP {
+        bail!("native-session journal record exceeds its byte cap");
+    }
+    let mut hash = Sha256::new();
+    hash.update(RECORD_HASH_DOMAIN);
+    hash.update(u64::try_from(line.len())?.to_be_bytes());
+    hash.update(&line);
+    let hash = hex::encode(hash.finalize());
+    line.push(b'\n');
+    Ok(EncodedRecord { line, hash })
+}
+
+/// A header-written, `fsync`-durable journal temp file staged concurrently with
+/// pre-spawn admission artifacts. Dropping without [`Self::publish`] removes the
+/// temporary file so refused admissions leave no journal artifact behind.
+pub(crate) struct StagedNativeSessionEffectJournal {
+    staged: tempfile::NamedTempFile,
+    directory: PathBuf,
+    created_directory: bool,
+    path: PathBuf,
+    signing_key: SigningKey,
+    session_nonce: String,
+    product_root_key_id: String,
+    admission_sha256: String,
+    header_hash: String,
+    header_bytes: usize,
+}
+
+impl StagedNativeSessionEffectJournal {
+    pub(crate) fn stage(
+        protected_root: &Path,
+        session_nonce: &str,
+        product_root_key_id: &str,
+        admission_sha256: &str,
+        signing_key: SigningKey,
+    ) -> Result<Self> {
+        validate_journal_authority(
+            session_nonce,
+            product_root_key_id,
+            admission_sha256,
+            &signing_key,
+        )?;
+        let (directory, created_directory) = create_private_journal_directory(protected_root)?;
+        let path = native_session_effect_journal_path(protected_root, session_nonce);
+        let genesis = "0".repeat(64);
+        let header = encode_journal_record(
+            session_nonce,
+            product_root_key_id,
+            admission_sha256,
+            &signing_key,
+            0,
+            &genesis,
+            JournalEvent::Header {
+                scope: "host_io_provider_calls",
+                event_cap: NATIVE_SESSION_EFFECT_JOURNAL_EVENT_CAP,
+                byte_cap: NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP,
+            },
+        )?;
+        let mut staged = tempfile::Builder::new()
+            .prefix(".tmp-journal-")
+            .tempfile_in(&directory)
+            .context("stage private native-session effect journal")?;
+        validate_journal_file_metadata(staged.as_file())?;
+        staged
+            .write_all(&header.line)
+            .and_then(|()| staged.as_file().sync_all())
+            .context("flush staged native-session effect journal header")?;
+        Ok(Self {
+            staged,
+            directory,
+            created_directory,
+            path,
+            signing_key,
+            session_nonce: session_nonce.to_owned(),
+            product_root_key_id: product_root_key_id.to_owned(),
+            admission_sha256: admission_sha256.to_owned(),
+            header_hash: header.hash,
+            header_bytes: header.line.len(),
+        })
+    }
+
+    pub(crate) fn publish(self, protected_root: &Path) -> Result<NativeSessionEffectJournalWriter> {
+        let published = self
+            .staged
+            .persist_noclobber(&self.path)
+            .map_err(|error| error.error)
+            .context("publish native-session journal; existing journals cannot be resumed")?;
+        drop(published);
+        let file = open_published_private_journal_file(&self.path)?;
+        // The published directory entry and any newly created directory must
+        // survive before this writer can authorize any provider call.
+        #[cfg(unix)]
+        {
+            File::open(&self.directory)?.sync_all()?;
+            if self.created_directory {
+                File::open(protected_root)?.sync_all()?;
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (&self.directory, self.created_directory, protected_root);
+        Ok(NativeSessionEffectJournalWriter {
+            file,
+            path: self.path,
+            signing_key: self.signing_key,
+            session_nonce: self.session_nonce,
+            product_root_key_id: self.product_root_key_id,
+            admission_sha256: self.admission_sha256,
+            previous_record_sha256: self.header_hash,
+            next_record_index: 1,
+            next_sequence: 0,
+            pending_sequence: None,
+            event_count: 0,
+            byte_count: self.header_bytes,
+            failed: None,
+        })
+    }
+}
+
 impl NativeSessionEffectJournalWriter {
     /// The inventory guard supplies an already authenticated admission and its
     /// existing product root. This constructor never loads or creates keys.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn create(
         protected_root: &Path,
         session_nonce: &str,
@@ -210,20 +406,12 @@ impl NativeSessionEffectJournalWriter {
         admission_sha256: &str,
         signing_key: SigningKey,
     ) -> Result<Self> {
-        let nonce =
-            uuid::Uuid::parse_str(session_nonce).context("invalid journal session nonce")?;
-        if nonce.is_nil() || nonce.to_string() != session_nonce {
-            bail!("journal session nonce must be a canonical non-nil UUID");
-        }
-        if product_root_key_id
-            != format!(
-                "ed25519:{}",
-                hex::encode(signing_key.verifying_key().as_bytes())
-            )
-            || !valid_digest(admission_sha256)
-        {
-            bail!("native-session journal authority does not match its admission");
-        }
+        validate_journal_authority(
+            session_nonce,
+            product_root_key_id,
+            admission_sha256,
+            &signing_key,
+        )?;
         let (directory, created_directory) = create_private_journal_directory(protected_root)?;
         let path = native_session_effect_journal_path(protected_root, session_nonce);
         let file = create_private_journal_file(&path)?;
@@ -293,36 +481,15 @@ impl NativeSessionEffectJournalWriter {
         previous_record_sha256: &str,
         event: JournalEvent<'_>,
     ) -> Result<EncodedRecord> {
-        if serde_json::to_vec(&event)?.len() > EVENT_METADATA_CAP {
-            bail!("native-session journal event metadata exceeds its byte cap");
-        }
-        let payload_json = serde_json::to_string(&JournalPayload {
-            schema_version: NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA,
-            session_nonce: &self.session_nonce,
-            product_root_key_id: &self.product_root_key_id,
-            admission_sha256: &self.admission_sha256,
+        encode_journal_record(
+            &self.session_nonce,
+            &self.product_root_key_id,
+            &self.admission_sha256,
+            &self.signing_key,
             event_index,
             previous_record_sha256,
             event,
-        })?;
-        let mut preimage = SIGNATURE_DOMAIN.to_vec();
-        preimage.extend_from_slice(&u64::try_from(payload_json.len())?.to_be_bytes());
-        preimage.extend_from_slice(payload_json.as_bytes());
-        let signature_hex = hex::encode(self.signing_key.sign(&preimage).to_bytes());
-        let mut line = serde_json::to_vec(&JournalEnvelope {
-            payload_json,
-            signature_hex,
-        })?;
-        if line.len() > NATIVE_SESSION_EFFECT_JOURNAL_RECORD_CAP {
-            bail!("native-session journal record exceeds its byte cap");
-        }
-        let mut hash = Sha256::new();
-        hash.update(RECORD_HASH_DOMAIN);
-        hash.update(u64::try_from(line.len())?.to_be_bytes());
-        hash.update(&line);
-        let hash = hex::encode(hash.finalize());
-        line.push(b'\n');
-        Ok(EncodedRecord { line, hash })
+        )
     }
 
     fn append_record(&mut self, record: EncodedRecord) -> Result<()> {

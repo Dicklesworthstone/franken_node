@@ -1858,44 +1858,85 @@ fn retain_admission_record_with_root(
     Ok(())
 }
 
-/// Stage and durably flush both the signed admission receipt and the canonical
-/// admission record in parallel before publishing them in strict receipt-first
-/// order and coalescing their directory `fsync`s. Preserves every crash-recovery
-/// and capacity invariant while collapsing 4 serial `fsync`s + directory scan
-/// into 2 ext4 journal commits.
-fn retain_admission_receipt_and_record_with_root(
+/// Stage and durably flush pre-spawn admission artifacts (optionally including
+/// the freshly minted identity capture and pre-staged effect-journal header) in
+/// parallel before publishing them in strict causal order
+/// (`identity-capture` -> `session-admission` -> `session-admission-record`) and
+/// coalescing their directory `fsync`s. The staged effect journal remains
+/// unpublished until `native-sessions.db` commits with `admitted == true`, so
+/// refused admissions leave no journal artifact behind.
+#[allow(clippy::too_many_arguments)]
+fn retain_pre_spawn_artifacts_with_root(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
     root: &ed25519_dalek::SigningKey,
     verifying_key: &ed25519_dalek::VerifyingKey,
     admission_json: &str,
-) -> Result<()> {
+    deferred_capture_bytes: Option<&[u8]>,
+    stage_journal: bool,
+) -> Result<Option<super::native_session_journal::StagedNativeSessionEffectJournal>> {
     use std::io::Write as _;
 
+    let capture_dir = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
     let receipt_dir = protected_root.join(ADMISSION_RECEIPT_DIRECTORY);
     let record_dir = protected_root.join(ADMISSION_RECORD_DIRECTORY);
     let receipt_path = admission_receipt_path(protected_root, &admission.session_nonce);
     let record_path = admission_record_path(protected_root, &admission.session_nonce);
 
-    // Phase 1: Sign, validate capacity, write temp files, and flush both staged
-    // files concurrently so ext4 jbd2 coalesces both temp-file `fsync`s and
-    // overlaps `check_admission_record_capacity` with signing + disk flush.
-    // Neither final path is published yet.
-    let (receipt_stage, record_stage) = std::thread::scope(|scope| {
+    // Sign the admission receipt first so the staged effect journal can bind to
+    // the exact `admission_sha256` inside the same parallel flush barrier.
+    let receipt =
+        NativeSessionAdmissionReceipt::issue_with_verifying_key(admission, root, verifying_key)?;
+    let receipt_bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
+
+    // Phase 1: Stage and `fsync` all pre-spawn temp files concurrently so ext4
+    // jbd2 coalesces up to 4 file `fsync`s into one journal commit and overlaps
+    // `check_admission_record_capacity` with disk flush. No final path is
+    // published yet.
+    let (capture_stage, receipt_stage, journal_stage, record_stage) = std::thread::scope(|scope| {
+        let capture_handle = deferred_capture_bytes.map(|capture_bytes| {
+            scope.spawn(|| -> Result<tempfile::NamedTempFile> {
+                let mut staged = tempfile::NamedTempFile::new_in(&capture_dir)
+                    .context("stage private runtime evidence identity capture")?;
+                validate_runtime_evidence_private_file_metadata(
+                    &admission.identity_capture_path,
+                    &staged.as_file().metadata().with_context(|| {
+                        format!(
+                            "inspect staged runtime evidence capture {}",
+                            admission.identity_capture_path.display()
+                        )
+                    })?,
+                )?;
+                staged.write_all(capture_bytes)?;
+                staged.as_file().sync_all()?;
+                Ok(staged)
+            })
+        });
+
         let receipt_handle = scope.spawn(|| -> Result<(tempfile::NamedTempFile, bool)> {
-            let receipt = NativeSessionAdmissionReceipt::issue_with_verifying_key(
-                admission,
-                root,
-                verifying_key,
-            )?;
-            let bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
             let created_dir = ensure_runtime_evidence_directory_with_status(&receipt_dir, true)?;
             let mut staged = tempfile::NamedTempFile::new_in(&receipt_dir)
                 .context("stage private native-session admission receipt")?;
-            staged.write_all(bytes.as_bytes())?;
+            staged.write_all(receipt_bytes.as_bytes())?;
             staged.as_file().sync_all()?;
             Ok((staged, created_dir))
         });
+
+        let journal_handle = if stage_journal {
+            let root_clone = root.clone();
+            let admission_sha256 = receipt.admission_sha256.as_str();
+            Some(scope.spawn(move || {
+                super::native_session_journal::StagedNativeSessionEffectJournal::stage(
+                    protected_root,
+                    &admission.session_nonce,
+                    &admission.product_root_key_id,
+                    admission_sha256,
+                    root_clone,
+                )
+            }))
+        } else {
+            None
+        };
 
         let record_result = (|| -> Result<(Option<tempfile::NamedTempFile>, bool)> {
             let created_dir = ensure_runtime_evidence_directory_with_status(&record_dir, true)?;
@@ -1919,17 +1960,60 @@ fn retain_admission_receipt_and_record_with_root(
             Ok((staged, created_dir))
         })();
 
+        let capture_result = capture_handle.map(|handle| {
+            handle.join().unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("identity capture staging thread panicked"))
+            })
+        });
         let receipt_result = receipt_handle
             .join()
             .unwrap_or_else(|_| Err(anyhow::anyhow!("admission receipt staging thread panicked")));
-        (receipt_result, record_result)
+        let journal_result = journal_handle.map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("effect journal staging thread panicked")))
+        });
+        (
+            capture_result,
+            receipt_result,
+            journal_result,
+            record_result,
+        )
     });
 
+    let capture_staged = capture_stage.transpose()?;
     let (receipt_staged, created_receipt_dir) = receipt_stage?;
+    let journal_staged = journal_stage.transpose()?;
     let (record_staged, created_record_dir) = record_stage?;
 
-    // Phase 2: Publish strictly receipt-first, then record, preserving the
-    // invariant that an admission record never exists without its signed receipt.
+    // Phase 2: Publish in strict causal order:
+    //   1. identity capture (when deferred)
+    //   2. signed admission receipt
+    //   3. canonical admission record
+    // Preserves the invariant that neither receipt nor record ever exists
+    // without its upstream identity/authority artifact.
+    let mut published_capture = false;
+    if let (Some(staged), Some(capture_bytes)) = (capture_staged, deferred_capture_bytes) {
+        match staged.persist_noclobber(&admission.identity_capture_path) {
+            Ok(_) => published_capture = true,
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = read_runtime_evidence_private_file(
+                    &admission.identity_capture_path,
+                    64 * 1024,
+                )?;
+                if !crate::security::constant_time::ct_eq_bytes(&existing, capture_bytes) {
+                    bail!(
+                        "runtime evidence identity capture {} already exists with different contents",
+                        admission.identity_capture_path.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error.error).context("publish runtime evidence identity capture");
+            }
+        }
+    }
+
     let mut published_receipt = false;
     match receipt_staged.persist_noclobber(&receipt_path) {
         Ok(_) => published_receipt = true,
@@ -1962,26 +2046,49 @@ fn retain_admission_receipt_and_record_with_root(
         }
     }
 
-    // Phase 3: Coalesce directory `fsync`s concurrently before DB insertion.
+    // Phase 3: Coalesce all published directory `fsync`s concurrently before DB
+    // insertion.
     #[cfg(unix)]
     {
         let sync_protected_root =
             (published_receipt && created_receipt_dir) || (published_record && created_record_dir);
-        if published_receipt && published_record {
-            let (receipt_sync, record_sync) = std::thread::scope(|scope| {
-                let receipt_handle = scope.spawn(|| std::fs::File::open(&receipt_dir)?.sync_all());
-                let record_res = std::fs::File::open(&record_dir).and_then(|dir| dir.sync_all());
-                let receipt_res = receipt_handle
-                    .join()
-                    .unwrap_or_else(|_| Err(std::io::Error::other("receipt dir sync panicked")));
-                (receipt_res, record_res)
-            });
-            receipt_sync?;
-            record_sync?;
-        } else if published_receipt {
-            std::fs::File::open(&receipt_dir)?.sync_all()?;
-        } else if published_record {
-            std::fs::File::open(&record_dir)?.sync_all()?;
+        let mut dirs_to_sync: Vec<&Path> = Vec::with_capacity(3);
+        if published_capture {
+            dirs_to_sync.push(capture_dir.as_path());
+        }
+        if published_receipt {
+            dirs_to_sync.push(receipt_dir.as_path());
+        }
+        if published_record {
+            dirs_to_sync.push(record_dir.as_path());
+        }
+        match dirs_to_sync.as_slice() {
+            [] => {}
+            [only] => {
+                std::fs::File::open(only)?.sync_all()?;
+            }
+            [first, rest @ ..] => {
+                let results =
+                    std::thread::scope(|scope| {
+                        let handles: Vec<_> = rest
+                            .iter()
+                            .copied()
+                            .map(|dir| scope.spawn(move || std::fs::File::open(dir)?.sync_all()))
+                            .collect();
+                        let first_res = std::fs::File::open(first).and_then(|dir| dir.sync_all());
+                        let mut all = Vec::with_capacity(handles.len() + 1);
+                        all.push(first_res);
+                        for handle in handles {
+                            all.push(handle.join().unwrap_or_else(|_| {
+                                Err(std::io::Error::other("dir sync panicked"))
+                            }));
+                        }
+                        all
+                    });
+                for res in results {
+                    res?;
+                }
+            }
         }
         if sync_protected_root {
             std::fs::File::open(protected_root)?.sync_all()?;
@@ -1989,12 +2096,14 @@ fn retain_admission_receipt_and_record_with_root(
     }
     #[cfg(not(unix))]
     let _ = (
+        capture_dir,
         created_receipt_dir,
         created_record_dir,
+        published_capture,
         published_receipt,
         published_record,
     );
-    Ok(())
+    Ok(journal_staged)
 }
 
 fn read_admission_receipt(
@@ -2469,12 +2578,62 @@ impl NativeSessionInventoryGuard {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn admit_with_context(
+        protected_root: &Path,
+        admission: NativeSessionAdmission,
+        ticket: NativeSessionAdmissionTicket,
+        preloaded_root: Option<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey)>,
+    ) -> Result<Self> {
+        let (guard, _) = Self::admit_with_context_inner(
+            protected_root,
+            admission,
+            ticket,
+            preloaded_root,
+            None,
+        )?;
+        Ok(guard)
+    }
+
+    /// Admit a native session and publish its durable effect journal in one
+    /// coalesced pre-spawn barrier: stages and `fsync`s `identity-captures`,
+    /// `session-admissions`, `session-admission-records`, and the unpublished
+    /// `session-effect-journals` header in parallel, promotes in strict causal
+    /// order, commits `native-sessions.db`, and publishes the journal only once
+    /// admission commits.
+    pub(crate) fn admit_and_prepare_journal_with_capture(
+        protected_root: &Path,
+        admission: NativeSessionAdmission,
+        ticket: NativeSessionAdmissionTicket,
+        preloaded_root: (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey),
+        capture: &RuntimeEvidenceIdentityCapture,
+        capture_bytes: &[u8],
+    ) -> Result<(
+        Self,
+        super::native_session_journal::NativeSessionEffectJournalWriter,
+    )> {
+        let (guard, journal) = Self::admit_with_context_inner(
+            protected_root,
+            admission,
+            ticket,
+            Some(preloaded_root),
+            Some((capture, capture_bytes)),
+        )?;
+        let journal =
+            journal.context("native-session durable effect journal was not established")?;
+        Ok((guard, journal))
+    }
+
+    fn admit_with_context_inner(
         protected_root: &Path,
         admission: NativeSessionAdmission,
         mut ticket: NativeSessionAdmissionTicket,
         preloaded_root: Option<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey)>,
-    ) -> Result<Self> {
+        deferred_capture: Option<(&RuntimeEvidenceIdentityCapture, &[u8])>,
+    ) -> Result<(
+        Self,
+        Option<super::native_session_journal::NativeSessionEffectJournalWriter>,
+    )> {
         let expected_generation = ticket.generation;
         ensure_runtime_evidence_directory(protected_root, true)?;
         validate_admission(&admission)?;
@@ -2506,7 +2665,25 @@ impl NativeSessionInventoryGuard {
                 (root, key)
             }
         };
-        verify_admission_capture_with_root(protected_root, &admission, &verifying_key)?;
+        if let Some((capture, capture_bytes)) = deferred_capture {
+            if capture_bytes.len() > 64 * 1024 {
+                bail!("runtime evidence identity capture exceeds the 65536-byte bound");
+            }
+            capture.verify_with_product_root(&verifying_key)?;
+            if capture.session_nonce != admission.session_nonce
+                || capture.product_root_key_id != admission.product_root_key_id
+                || capture
+                    .evidence_verification_identity
+                    .key_provenance
+                    .activation_epoch
+                    .as_u64()
+                    != admission.security_epoch
+            {
+                bail!("native-session admission does not match its product-signed capture");
+            }
+        } else {
+            verify_admission_capture_with_root(protected_root, &admission, &verifying_key)?;
+        }
         read_retained_native_session_source_capsule(protected_root, &admission)
             .context("native-session sources must be retained before admission")?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
@@ -2524,12 +2701,14 @@ impl NativeSessionInventoryGuard {
                     .context("native-session inventory was not created")?,
             },
         );
-        retain_admission_receipt_and_record_with_root(
+        let staged_journal = retain_pre_spawn_artifacts_with_root(
             protected_root,
             &admission,
             &product_root,
             &verifying_key,
             &admission_json,
+            deferred_capture.map(|(_, bytes)| bytes),
+            deferred_capture.is_some(),
         )?;
         drop(product_root);
         // A refused attempt keeps the same decision and timestamp through
@@ -2620,6 +2799,9 @@ impl NativeSessionInventoryGuard {
             );
         }
         if !admitted {
+            // Drop any staged journal temp file before recording the refused
+            // outcome so a drain-fenced attempt leaves no journal artifact.
+            drop(staged_journal);
             // No worker was started for this committed row. A crash before
             // receipt persistence leaves its unsigned outcome indeterminate;
             // reconciliation never invents a signature from database counts.
@@ -2634,7 +2816,7 @@ impl NativeSessionInventoryGuard {
                 "native-session admission crossed a fleet drain fence; no worker was started; retry under the current applied policy"
             );
         }
-        Ok(Self {
+        let guard = Self {
             connection: connection.context("native-session inventory connection missing")?,
             database_identity,
             protected_root: protected_root.to_path_buf(),
@@ -2643,12 +2825,18 @@ impl NativeSessionInventoryGuard {
             process: NativeSessionProcessObservation::NotSpawned,
             containment_empty_observed: false,
             finished: false,
-        })
+        };
+        let journal = staged_journal
+            .map(|staged| staged.publish(protected_root))
+            .transpose()
+            .context("native-session durable effect journal could not be established; worker was not started")?;
+        Ok((guard, journal))
     }
 
     /// Establish a durable provider journal before the worker can start. This
     /// uses the already retained admission and existing product root; neither
     /// a worker request nor a journal file can provision signing authority.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn prepare_effect_journal(
         &self,
     ) -> Result<super::native_session_journal::NativeSessionEffectJournalWriter> {

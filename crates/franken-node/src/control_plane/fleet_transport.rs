@@ -626,12 +626,10 @@ struct FleetPolicyStore {
 #[cfg(unix)]
 impl FleetPolicyStore {
     fn open(project: &Path, create: bool) -> Result<Option<Self>, FleetTransportError> {
-        use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
-        use rustix::io::Errno;
-        use std::os::unix::fs::MetadataExt;
+        use rustix::fs::{Mode, OFlags, open, openat};
         use std::path::Component;
 
-        let open_store = || -> std::io::Result<Option<Self>> {
+        let open_dir = || -> std::io::Result<File> {
             let root = if project.is_absolute() {
                 project.to_path_buf()
             } else {
@@ -653,21 +651,57 @@ impl FleetPolicyStore {
                     directory = File::from(openat(&directory, name, directories, Mode::empty())?);
                 }
             }
-            for name in [".franken-node", "state"] {
-                directory = match openat(&directory, name, directories, Mode::empty()) {
-                    Ok(fd) => File::from(fd),
-                    Err(Errno::NOENT) if !create => return Ok(None),
-                    Err(Errno::NOENT) => {
-                        match mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
-                            Ok(()) => directory.sync_all()?,
-                            Err(Errno::EXIST) => {}
-                            Err(error) => return Err(error.into()),
-                        }
-                        File::from(openat(&directory, name, directories, Mode::empty())?)
+            Ok(directory)
+        };
+        let project_dir = open_dir().map_err(|error| {
+            FleetTransportError::io(format!("failed opening project fleet policy: {error}"))
+        })?;
+        Self::open_in_directory(&project_dir, create)
+    }
+
+    fn open_in_directory(
+        project_dir: &File,
+        create: bool,
+    ) -> Result<Option<Self>, FleetTransportError> {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+
+        let open_store = || -> std::io::Result<Option<Self>> {
+            let directories =
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let franken_dir = match openat(project_dir, ".franken-node", directories, Mode::empty())
+            {
+                Ok(fd) => File::from(fd),
+                Err(Errno::NOENT) if !create => return Ok(None),
+                Err(Errno::NOENT) => {
+                    match mkdirat(project_dir, ".franken-node", Mode::from_raw_mode(0o700)) {
+                        Ok(()) => project_dir.sync_all()?,
+                        Err(Errno::EXIST) => {}
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
-                };
-            }
+                    File::from(openat(
+                        project_dir,
+                        ".franken-node",
+                        directories,
+                        Mode::empty(),
+                    )?)
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let directory = match openat(&franken_dir, "state", directories, Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(Errno::NOENT) if !create => return Ok(None),
+                Err(Errno::NOENT) => {
+                    match mkdirat(&franken_dir, "state", Mode::from_raw_mode(0o700)) {
+                        Ok(()) => franken_dir.sync_all()?,
+                        Err(Errno::EXIST) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    File::from(openat(&franken_dir, "state", directories, Mode::empty())?)
+                }
+                Err(error) => return Err(error.into()),
+            };
             // A contained worker sees its independent operator through the
             // read-only host mount. Shared observation needs no write access;
             // both readers and writers still lock this same checked inode.
@@ -936,6 +970,78 @@ pub fn validate_fleet_policy_project_root_with_operator(
             project.display()
         ))
     })?;
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags, open, openat};
+        use std::path::Component;
+
+        let directories = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let parts: Vec<&std::ffi::OsStr> = canonical
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            // Walk once downward from `/` with O_NOFOLLOW to collect strict
+            // ancestor FDs in O(depth) syscalls instead of O(depth^2), then
+            // inspect them in identical nearest-ancestor-first order.
+            let mut ancestors = Vec::with_capacity(parts.len());
+            let mut current_path = PathBuf::from("/");
+            let mut current_dir =
+                File::from(open("/", directories, Mode::empty()).map_err(|error| {
+                    FleetTransportError::stale_state(format!(
+                        "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
+                         failed opening project fleet policy: {error}; \
+                         restore that enrollment and select its project directory explicitly",
+                        current_path.display(),
+                        canonical.display()
+                    ))
+                })?);
+            for name in &parts[..parts.len().saturating_sub(1)] {
+                let next_path = current_path.join(name);
+                let next_dir = File::from(
+                    openat(&current_dir, *name, directories, Mode::empty()).map_err(|error| {
+                        FleetTransportError::stale_state(format!(
+                            "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
+                             failed opening project fleet policy: {error}; \
+                             restore that enrollment and select its project directory explicitly",
+                            next_path.display(),
+                            canonical.display()
+                        ))
+                    })?,
+                );
+                ancestors.push((current_path, current_dir));
+                current_path = next_path;
+                current_dir = next_dir;
+            }
+            ancestors.push((current_path, current_dir));
+
+            for (ancestor, dir) in ancestors.into_iter().rev() {
+                let active = FleetPolicyStore::open_in_directory(&dir, false)
+                    .and_then(|store| store.map(|store| store.active()).transpose())
+                    .map(Option::flatten)
+                    .map_err(|error| {
+                        FleetTransportError::stale_state(format!(
+                            "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
+                             restore that enrollment and select its project directory explicitly",
+                            ancestor.display(),
+                            canonical.display()
+                        ))
+                    })?;
+                if active.is_some() && operator != Some(ancestor.as_path()) {
+                    return Err(FleetTransportError::stale_state(format!(
+                        "selected project {} is inside fleet-managed project {}; \
+                         select the enrolled project directory explicitly to preserve its policy",
+                        canonical.display(),
+                        ancestor.display()
+                    )));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
     for ancestor in canonical.ancestors().skip(1) {
         let active = load_active_fleet_policy(ancestor).map_err(|error| {
             FleetTransportError::stale_state(format!(

@@ -14330,6 +14330,117 @@ fn append_decision_evidence_with_signing(
     .context("failed appending to the durable evidence ledger")
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_decision_evidence_with_preopened(
+    ledger_dir: &Path,
+    schema_version: &str,
+    decision_id: &str,
+    decision_kind: observability::evidence_ledger::DecisionKind,
+    trace_id: &str,
+    payload: serde_json::Value,
+    signing_key: &ed25519_dalek::SigningKey,
+    preopened: Option<observability::evidence_ledger_durable::PreopenedEvidenceLedger>,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    let now = chrono::Utc::now();
+    let entry = observability::evidence_ledger::EvidenceEntry {
+        schema_version: schema_version.to_string(),
+        entry_id: Some(decision_id.to_string()),
+        decision_id: decision_id.to_string(),
+        decision_kind,
+        decision_time: now.to_rfc3339(),
+        timestamp_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+        trace_id: trace_id.to_string(),
+        epoch_id: 0,
+        payload,
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    };
+    observability::evidence_ledger_durable::DurableEvidenceLedger::append_signed_chained_in_with_preopened(
+        ledger_dir,
+        entry,
+        signing_key,
+        preopened,
+    )
+    .map(Some)
+    .context("failed appending to the durable evidence ledger")
+}
+
+struct RunEvidenceAppendJob {
+    decision_id: String,
+    decision_kind: observability::evidence_ledger::DecisionKind,
+    trace_id: String,
+    payload: serde_json::Value,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+struct PrewarmedEvidenceWorker {
+    job_tx: Option<std::sync::mpsc::SyncSender<RunEvidenceAppendJob>>,
+    res_rx:
+        std::sync::mpsc::Receiver<Result<Option<observability::evidence_ledger::EvidenceEntry>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PrewarmedEvidenceWorker {
+    fn spawn(ledger_dir: PathBuf) -> Option<Self> {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<RunEvidenceAppendJob>(1);
+        let (res_tx, res_rx) = std::sync::mpsc::sync_channel(1);
+        let handle = std::thread::Builder::new()
+            .name("franken-node-evidence-prewarm".to_string())
+            .spawn(move || {
+                let preopened =
+                    observability::evidence_ledger_durable::PreopenedEvidenceLedger::open_existing_if_present(
+                        &ledger_dir,
+                    );
+                if let Ok(job) = job_rx.recv() {
+                    let result = append_decision_evidence_with_preopened(
+                        &ledger_dir,
+                        RUN_DECISION_EVIDENCE_SCHEMA,
+                        &job.decision_id,
+                        job.decision_kind,
+                        &job.trace_id,
+                        job.payload,
+                        &job.signing_key,
+                        preopened,
+                    );
+                    let _ = res_tx.send(result);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            job_tx: Some(job_tx),
+            res_rx,
+            handle: Some(handle),
+        })
+    }
+
+    fn submit(&mut self, job: RunEvidenceAppendJob) -> bool {
+        self.job_tx.take().is_some_and(|tx| tx.send(job).is_ok())
+    }
+
+    fn finish(mut self) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+        self.job_tx.take();
+        let result = self.res_rx.recv().unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "evidence ledger append worker exited unexpectedly"
+            ))
+        });
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        result
+    }
+}
+
+impl Drop for PrewarmedEvidenceWorker {
+    fn drop(&mut self) {
+        self.job_tx.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Record an operator trust decision in the durable evidence ledger in
 /// `ledger_dir`; a failure is reported on stderr and never changes the
 /// command's outcome (the decision itself is already persisted).
@@ -49293,6 +49404,12 @@ fn main() -> Result<()> {
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
+            // Pre-open an already-existing project `evidence-ledger.db` in the
+            // background while the guest worker executes so its SQLite open,
+            // Tier-1 pragmas, and WAL index load finish off the critical path.
+            // Never creates files or directories on refused runs.
+            let mut evidence_worker =
+                PrewarmedEvidenceWorker::spawn(project_ledger_dir(&project_root));
             let (dispatch, mut session_finalizer, execution_error) = match dispatcher
                 .dispatch_run_with_deferred_finalizer(
                     &app_path,
@@ -49322,6 +49439,9 @@ fn main() -> Result<()> {
                         // recording path before propagating the original error.
                         (dispatch, None, Some(err))
                     } else {
+                        // Always drain the background evidence pre-open thread
+                        // before any `std::process::exit` path below.
+                        drop(evidence_worker.take());
                         if let Some(refusal) = err
                             .downcast_ref::<ops::engine_dispatcher::DeploymentActivationRefused>(
                         ) {
@@ -49502,6 +49622,52 @@ fn main() -> Result<()> {
                 // evidence ledger, and native-session inventory completion)
                 // into one concurrent barrier so ext4 jbd2 commits them
                 // together without weakening any durability guarantee.
+                let mut evidence_submitted = false;
+                let mut evidence_fallback_error: Option<anyhow::Error> = None;
+                let mut evidence_signing_present = false;
+                match &receipt_signing {
+                    Ok(Some(signing)) => {
+                        evidence_signing_present = true;
+                        let decision_kind = match native_containment_action(
+                            &dispatch.runtime,
+                            dispatch.exit_code,
+                        ) {
+                            Some("Quarantine") => {
+                                observability::evidence_ledger::DecisionKind::Quarantine
+                            }
+                            Some(_) => observability::evidence_ledger::DecisionKind::Escalate,
+                            None if receipt.core.execution_failure.is_some() => {
+                                observability::evidence_ledger::DecisionKind::Deny
+                            }
+                            None => observability::evidence_ledger::DecisionKind::Admit,
+                        };
+                        match build_run_decision_evidence_payload(
+                            &receipt,
+                            &planned_receipt_path,
+                            &dispatch,
+                        ) {
+                            Ok(payload) => {
+                                let job = RunEvidenceAppendJob {
+                                    decision_id: receipt.core.receipt_id.clone(),
+                                    decision_kind,
+                                    trace_id: trace_id.clone(),
+                                    payload,
+                                    signing_key: signing.signing_key.clone(),
+                                };
+                                if let Some(worker) = evidence_worker.as_mut() {
+                                    evidence_submitted = worker.submit(job);
+                                }
+                            }
+                            Err(err) => {
+                                evidence_fallback_error = Some(err);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        evidence_fallback_error = Some(anyhow::anyhow!("{err:#}"));
+                    }
+                }
                 let (receipt_result, persisted_ledger, evidence_append_result) =
                     std::thread::scope(|scope| {
                         let receipt_handle = scope.spawn(|| {
@@ -49525,17 +49691,24 @@ fn main() -> Result<()> {
                                 }
                             }
                         });
-                        let evidence_handle = scope.spawn(|| match &receipt_signing {
-                            Ok(signing) => append_run_evidence_entry_with_signing(
-                                &project_root,
-                                &receipt,
-                                &planned_receipt_path,
-                                &dispatch,
-                                &trace_id,
-                                signing.as_ref(),
-                            ),
-                            Err(err) => Err(anyhow::anyhow!("{err:#}")),
-                        });
+                        let fallback_evidence_handle = if evidence_submitted
+                            || !evidence_signing_present
+                            || evidence_fallback_error.is_some()
+                        {
+                            None
+                        } else {
+                            Some(scope.spawn(|| match &receipt_signing {
+                                Ok(signing) => append_run_evidence_entry_with_signing(
+                                    &project_root,
+                                    &receipt,
+                                    &planned_receipt_path,
+                                    &dispatch,
+                                    &trace_id,
+                                    signing.as_ref(),
+                                ),
+                                Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                            }))
+                        };
 
                         #[cfg(feature = "engine")]
                         if let Some(finalizer) = session_finalizer.take() {
@@ -49554,9 +49727,24 @@ fn main() -> Result<()> {
                                 "run host-effect ledger persistence panicked"
                             ))
                         });
-                        let evidence_append_result = evidence_handle.join().unwrap_or_else(|_| {
-                            Err(anyhow::anyhow!("evidence ledger append panicked"))
-                        });
+                        let evidence_append_result = if let Some(err) = evidence_fallback_error {
+                            Err(err)
+                        } else if !evidence_signing_present {
+                            Ok(None)
+                        } else if evidence_submitted {
+                            match evidence_worker.take() {
+                                Some(worker) => worker.finish(),
+                                None => Err(anyhow::anyhow!(
+                                    "prewarmed evidence worker missing after submit"
+                                )),
+                            }
+                        } else if let Some(handle) = fallback_evidence_handle {
+                            handle.join().unwrap_or_else(|_| {
+                                Err(anyhow::anyhow!("evidence ledger append panicked"))
+                            })
+                        } else {
+                            Ok(None)
+                        };
                         (receipt_result, persisted_ledger, evidence_append_result)
                     });
                 let receipt_path = receipt_result?;
@@ -49605,6 +49793,7 @@ fn main() -> Result<()> {
                 }
                 Ok((receipt, receipt_path, captured_incident))
             })();
+            drop(evidence_worker.take());
             #[cfg(feature = "engine")]
             if let Some(finalizer) = session_finalizer.take() {
                 finalizer.finalize();

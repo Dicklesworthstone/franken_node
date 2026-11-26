@@ -125,6 +125,198 @@ fn schema_is_current(connection: &Connection) -> bool {
             .is_ok_and(|rows| !rows.is_empty())
 }
 
+/// Pre-opened Tier-1 connection to an already-existing `evidence-ledger.db`,
+/// validated against `(dev, ino, len, mtime)` of both the database and WAL
+/// files before reuse so concurrent writers can never cause a stale chain-head
+/// read. Allows `franken-node run` to overlap SQLite open + WAL index load with
+/// guest worker execution.
+pub struct PreopenedEvidenceLedger {
+    state_dir: PathBuf,
+    db_path: PathBuf,
+    wal_path: PathBuf,
+    connection: Connection,
+    db_fp: FileFingerprint,
+    wal_fp: FileFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    exists: bool,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    len: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+}
+
+impl FileFingerprint {
+    /// True when both snapshots describe the same regular file inode and byte
+    /// length. `fsqlite`'s `PRAGMA journal_mode=WAL` rewrites page 1 in place
+    /// during open (updating `.db` `mtime` without touching `-wal` or length),
+    /// so open-time validation checks identity+length on `.db` alongside an
+    /// exact full fingerprint match on `-wal`.
+    fn same_identity_and_len(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        let same_inode = self.dev == other.dev && self.ino == other.ino;
+        #[cfg(not(unix))]
+        let same_inode = true;
+        self.exists && other.exists && same_inode && self.len == other.len
+    }
+}
+
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            let mtime = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            Some(FileFingerprint {
+                exists: true,
+                #[cfg(unix)]
+                dev: {
+                    use std::os::unix::fs::MetadataExt as _;
+                    meta.dev()
+                },
+                #[cfg(unix)]
+                ino: {
+                    use std::os::unix::fs::MetadataExt as _;
+                    meta.ino()
+                },
+                len: meta.len(),
+                mtime_secs: mtime.as_secs(),
+                mtime_nanos: mtime.subsec_nanos(),
+            })
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Some(FileFingerprint {
+            exists: false,
+            #[cfg(unix)]
+            dev: 0,
+            #[cfg(unix)]
+            ino: 0,
+            len: 0,
+            mtime_secs: 0,
+            mtime_nanos: 0,
+        }),
+        _ => None,
+    }
+}
+
+impl PreopenedEvidenceLedger {
+    /// Open `evidence-ledger.db` only when it already exists as a regular file
+    /// on disk. Never creates directories or files, so refused runs have zero
+    /// side effects. Snapshots `(dev, ino, len, mtime)` before and after open
+    /// and discards the handle if either `.db` or `-wal` changed during open.
+    #[must_use]
+    pub fn open_existing_if_present(state_dir: &Path) -> Option<Self> {
+        let db_path = durable_store_path(state_dir);
+        let db_fp_before = file_fingerprint(&db_path)?;
+        if !db_fp_before.exists {
+            return None;
+        }
+        let wal_path = state_dir.join(format!("{EVIDENCE_DB_FILE}-wal"));
+        let wal_fp_before = file_fingerprint(&wal_path)?;
+        let connection = open_tier1_connection(&db_path).ok()?;
+        let db_fp_after = file_fingerprint(&db_path)?;
+        let wal_fp_after = file_fingerprint(&wal_path)?;
+        if !db_fp_before.same_identity_and_len(&db_fp_after) || wal_fp_before != wal_fp_after {
+            return None;
+        }
+        Some(Self {
+            state_dir: state_dir.to_path_buf(),
+            db_path,
+            wal_path,
+            connection,
+            db_fp: db_fp_after,
+            wal_fp: wal_fp_after,
+        })
+    }
+
+    fn is_fresh(&self, state_dir: &Path) -> bool {
+        self.state_dir == state_dir
+            && file_fingerprint(&self.db_path).as_ref() == Some(&self.db_fp)
+            && file_fingerprint(&self.wal_path).as_ref() == Some(&self.wal_fp)
+    }
+}
+
+fn try_append_signed_chained_fast(
+    state_dir: &Path,
+    connection: &Connection,
+    entry: &mut EvidenceEntry,
+    signing_key: &SigningKey,
+) -> io::Result<Option<EvidenceEntry>> {
+    let mut tx = connection
+        .transaction()
+        .map_err(|err| io::Error::other(format!("begin entry transaction: {err}")))?;
+    let schema_current = tx
+        .query_with_params(
+            "SELECT value FROM evidence_meta WHERE key = ?1;",
+            &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
+        )
+        .is_ok_and(|rows| {
+            matches!(
+                rows.first().and_then(|row| row.values().first()),
+                Some(SqliteValue::Text(version))
+                    if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
+            )
+        });
+    if !schema_current {
+        return Ok(None);
+    }
+    let Ok(rows) = tx.query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
+    else {
+        return Ok(None);
+    };
+    entry.prev_entry_hash = match rows.first().map(|row| row.values().first()) {
+        Some(Some(SqliteValue::Text(previous_json))) => {
+            let previous: EvidenceEntry =
+                serde_json::from_str(previous_json.as_ref()).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("newest stored row is not an evidence entry: {err}"),
+                    )
+                })?;
+            evidence_entry_hash_hex(&previous)
+        }
+        None => String::new(),
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "newest stored row is not a text evidence entry; refusing to reset the chain",
+            ));
+        }
+    };
+    sign_chained_evidence_entry(entry, signing_key);
+    let entry_json = serde_json::to_string(entry)
+        .map_err(|err| io::Error::other(format!("encode entry: {err}")))?;
+    tx.execute_with_params(
+        "INSERT INTO evidence_entries(recorded_at, entry_json) VALUES (?1, ?2);",
+        &[
+            SqliteValue::Text(chrono::Utc::now().to_rfc3339().into()),
+            SqliteValue::Text(entry_json.into()),
+        ],
+    )
+    .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
+    tx.commit()
+        .map_err(|err| io::Error::other(format!("commit entry: {err}")))?;
+    drop(tx);
+    // Keep the WAL bounded so subsequent opens do not replay hundreds of
+    // frames on every `franken-node run`. `TRUNCATE` resets `-wal` to 0 bytes
+    // when idle and returns `busy=1` non-blockingly under fsqlite if another
+    // transaction is open.
+    const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
+    let wal_path = state_dir.join(format!("{EVIDENCE_DB_FILE}-wal"));
+    if std::fs::symlink_metadata(&wal_path)
+        .is_ok_and(|meta| meta.is_file() && meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES)
+    {
+        let _ = connection.query("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+    Ok(Some(entry.clone()))
+}
+
 /// Durable WAL-backed evidence ledger store.
 pub struct DurableEvidenceLedger {
     db_path: PathBuf,
@@ -166,81 +358,53 @@ impl DurableEvidenceLedger {
     /// the newest stored row is not an evidence entry, or the transaction fails.
     pub fn append_signed_chained_in(
         state_dir: impl Into<PathBuf>,
-        mut entry: EvidenceEntry,
+        entry: EvidenceEntry,
         signing_key: &SigningKey,
     ) -> io::Result<EvidenceEntry> {
+        Self::append_signed_chained_in_with_preopened(state_dir, entry, signing_key, None)
+    }
+
+    /// Append one signed, hash-chained entry using an optional pre-opened
+    /// connection when both `.db` and `-wal` are unchanged since open; falls
+    /// back to a fresh open on any concurrent modification or conflict.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::append_signed_chained_in`].
+    pub fn append_signed_chained_in_with_preopened(
+        state_dir: impl Into<PathBuf>,
+        mut entry: EvidenceEntry,
+        signing_key: &SigningKey,
+        preopened: Option<PreopenedEvidenceLedger>,
+    ) -> io::Result<EvidenceEntry> {
         let state_dir = state_dir.into();
+        if let Some(preopened) = preopened
+            && preopened.is_fresh(&state_dir)
+        {
+            let mut candidate = entry.clone();
+            match try_append_signed_chained_fast(
+                &state_dir,
+                &preopened.connection,
+                &mut candidate,
+                signing_key,
+            ) {
+                Ok(Some(stored)) => return Ok(stored),
+                Ok(None) | Err(_) => {
+                    // Drop the pre-opened connection and reopen cleanly so
+                    // schema init, concurrent writers, or corrupted heads are
+                    // handled through the exact canonical path below.
+                }
+            }
+        }
         if !state_dir.is_dir() {
             std::fs::create_dir_all(&state_dir)?;
         }
         let db_path = durable_store_path(&state_dir);
         let connection = open_tier1_connection(&db_path)?;
+        if let Some(stored) =
+            try_append_signed_chained_fast(&state_dir, &connection, &mut entry, signing_key)?
         {
-            let mut tx = connection
-                .transaction()
-                .map_err(|err| io::Error::other(format!("begin entry transaction: {err}")))?;
-            let schema_current = tx
-                .query_with_params(
-                    "SELECT value FROM evidence_meta WHERE key = ?1;",
-                    &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
-                )
-                .is_ok_and(|rows| {
-                    matches!(
-                        rows.first().and_then(|row| row.values().first()),
-                        Some(SqliteValue::Text(version))
-                            if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
-                    )
-                });
-            if schema_current
-                && let Ok(rows) =
-                    tx.query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
-            {
-                entry.prev_entry_hash = match rows.first().map(|row| row.values().first()) {
-                    Some(Some(SqliteValue::Text(previous_json))) => {
-                        let previous: EvidenceEntry = serde_json::from_str(previous_json.as_ref())
-                            .map_err(|err| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("newest stored row is not an evidence entry: {err}"),
-                                )
-                            })?;
-                        evidence_entry_hash_hex(&previous)
-                    }
-                    None => String::new(),
-                    Some(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "newest stored row is not a text evidence entry; refusing to reset the chain",
-                        ));
-                    }
-                };
-                sign_chained_evidence_entry(&mut entry, signing_key);
-                let entry_json = serde_json::to_string(&entry)
-                    .map_err(|err| io::Error::other(format!("encode entry: {err}")))?;
-                tx.execute_with_params(
-                    "INSERT INTO evidence_entries(recorded_at, entry_json) VALUES (?1, ?2);",
-                    &[
-                        SqliteValue::Text(chrono::Utc::now().to_rfc3339().into()),
-                        SqliteValue::Text(entry_json.into()),
-                    ],
-                )
-                .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
-                tx.commit()
-                    .map_err(|err| io::Error::other(format!("commit entry: {err}")))?;
-                drop(tx);
-                // Keep the WAL bounded so subsequent opens do not replay
-                // hundreds of frames on every `franken-node run`. `TRUNCATE`
-                // resets `-wal` to 0 bytes when idle and returns `busy=1`
-                // non-blockingly under fsqlite if another transaction is open.
-                const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 256 * 1024;
-                let wal_path = state_dir.join(format!("{EVIDENCE_DB_FILE}-wal"));
-                if std::fs::symlink_metadata(&wal_path).is_ok_and(|meta| {
-                    meta.is_file() && meta.len() >= WAL_CHECKPOINT_THRESHOLD_BYTES
-                }) {
-                    let _ = connection.query("PRAGMA wal_checkpoint(TRUNCATE);");
-                }
-                return Ok(entry);
-            }
+            return Ok(stored);
         }
         ensure_schema(&connection)?;
         let ledger = Self {
@@ -851,5 +1015,89 @@ mod tests {
             count_durable_entries(&state_dir).expect("store present"),
             Some(1)
         );
+    }
+
+    #[test]
+    fn preopened_ledger_reuses_when_fresh_and_reopens_after_concurrent_append() {
+        let (_dir, state_dir) = temp_state_dir("preopened-concurrency");
+        let signing_key = SigningKey::from_bytes(&[0xD4; 32]);
+        let verifying_key = signing_key.verifying_key();
+
+        assert!(
+            PreopenedEvidenceLedger::open_existing_if_present(&state_dir).is_none(),
+            "missing database must not be created on preopen"
+        );
+        assert!(
+            !durable_store_path(&state_dir).exists(),
+            "preopen must have zero filesystem side effects when db is absent"
+        );
+
+        let first = DurableEvidenceLedger::append_signed_chained_in(
+            &state_dir,
+            test_entry("PREOPEN-1", 1),
+            &signing_key,
+        )
+        .expect("seed genesis entry");
+
+        // Fresh fast path: no concurrent writer touched db/wal between preopen and append.
+        let preopened_fresh = PreopenedEvidenceLedger::open_existing_if_present(&state_dir)
+            .expect("existing db should preopen");
+        assert!(
+            preopened_fresh.is_fresh(&state_dir),
+            "newly preopened ledger must be fresh when untouched"
+        );
+        let second = DurableEvidenceLedger::append_signed_chained_in_with_preopened(
+            &state_dir,
+            test_entry("PREOPEN-2", 2),
+            &signing_key,
+            Some(preopened_fresh),
+        )
+        .expect("append via fresh preopened connection");
+        assert_eq!(second.prev_entry_hash, evidence_entry_hash_hex(&first));
+        verify_evidence_entry(&second, &verifying_key).expect("second entry valid");
+
+        // Concurrent-writer path: another writer commits between preopen and append.
+        let preopened_stale = PreopenedEvidenceLedger::open_existing_if_present(&state_dir)
+            .expect("existing db should preopen before concurrent writer");
+        let concurrent = DurableEvidenceLedger::append_signed_chained_in(
+            &state_dir,
+            test_entry("PREOPEN-CONCURRENT", 3),
+            &signing_key,
+        )
+        .expect("concurrent writer append");
+        assert_eq!(concurrent.prev_entry_hash, evidence_entry_hash_hex(&second));
+        assert!(
+            !preopened_stale.is_fresh(&state_dir),
+            "concurrent append must invalidate preopened ledger freshness"
+        );
+
+        let fourth = DurableEvidenceLedger::append_signed_chained_in_with_preopened(
+            &state_dir,
+            test_entry("PREOPEN-4", 4),
+            &signing_key,
+            Some(preopened_stale),
+        )
+        .expect("stale preopened handle must reopen and chain onto concurrent head");
+        assert_eq!(
+            fourth.prev_entry_hash,
+            evidence_entry_hash_hex(&concurrent),
+            "must never chain onto a stale predecessor after a concurrent commit"
+        );
+        verify_evidence_entry(&fourth, &verifying_key).expect("fourth entry valid");
+
+        #[cfg(unix)]
+        {
+            let (_link_dir, link_state_dir) = temp_state_dir("preopened-symlink");
+            std::fs::create_dir_all(&link_state_dir).expect("create symlink state dir");
+            std::os::unix::fs::symlink(
+                durable_store_path(&state_dir),
+                durable_store_path(&link_state_dir),
+            )
+            .expect("create symlinked ledger db");
+            assert!(
+                PreopenedEvidenceLedger::open_existing_if_present(&link_state_dir).is_none(),
+                "preopen must refuse symlinked database paths"
+            );
+        }
     }
 }
