@@ -330,6 +330,8 @@ struct GraphEdge {
     specifier: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     dirname_request: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    normalized_dirname_request: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     commonjs_search: Option<GraphSearch>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -407,6 +409,13 @@ fn graph_site_valid(site: &GraphSite, source_bytes: usize) -> bool {
         && site.end_byte <= source_bytes
         && site.line > 0
         && site.column > 0
+}
+
+fn normalized_graph_request_valid(specifier: &str) -> bool {
+    matches!(specifier, "." | "./")
+        || specifier
+            .strip_prefix("./")
+            .is_some_and(|path| valid_path(path.strip_suffix('/').unwrap_or(path)))
 }
 
 /// Rehash a separately supplied v2/v3 graph witness only after source authority
@@ -545,6 +554,30 @@ pub(crate) fn inspect_graph_report(
     }
     let mut manifest_hashes = BTreeMap::new();
     for edge in &report.edges {
+        // This marker distinguishes the exact normalized absolute spelling
+        // consumed by a captured CommonJS loader from raw __dirname text.
+        // Check the wire contract without claiming to reevaluate path calls or
+        // resolve an incomplete graph against the auditor's filesystem.
+        if edge.normalized_dirname_request
+            && (report.schema_version != "franken-node/module-source-graph/v3"
+                || edge.dirname_request
+                || !matches!(
+                    edge.kind,
+                    GraphLoadKind::Require | GraphLoadKind::RequireResolve
+                )
+                || matches!(edge.state, GraphEdgeState::TypeOnly)
+                || edge.commonjs_search.is_some()
+                || !edge.import_attributes.is_empty()
+                || !edge
+                    .specifier
+                    .as_deref()
+                    .is_some_and(normalized_graph_request_valid))
+        {
+            return Err(invalid(
+                FIELD,
+                "source graph normalized dirname request is inconsistent",
+            ));
+        }
         let source_bytes = modules
             .get(&edge.importer)
             .ok_or_else(|| invalid(FIELD, "source graph edge has an unrecorded importer"))?;
@@ -1257,7 +1290,12 @@ pub(super) mod tests {
         let mut report: GraphReport = serde_json::from_value(value.clone()).unwrap();
         report.input_hash.clear();
         let mut hash = Sha256::new();
-        hash.update(b"franken-node/module-source-graph/v2\0");
+        let domain: &[u8] = match report.schema_version.as_str() {
+            "franken-node/module-source-graph/v2" => b"franken-node/module-source-graph/v2\0",
+            "franken-node/module-source-graph/v3" => b"franken-node/module-source-graph/v3\0",
+            _ => panic!("unsupported test witness schema"),
+        };
+        hash.update(domain);
         hash.update(serde_json::to_vec(&report).unwrap());
         report.input_hash = format!("sha256:{}", hex::encode(hash.finalize()));
         let (mut header, payload) = decode(&producer_vectors()[2]["module_sources"]);
@@ -1266,6 +1304,97 @@ pub(super) mod tests {
             frame(&serde_json::to_vec(&header).unwrap(), &payload),
             serde_json::to_vec(&report).unwrap(),
         )
+    }
+
+    // These are graph-wire mutation controls, not assertions that the retained
+    // producer's parser would derive a different request from its old sources.
+    // Native producer-to-reader conformance is a separate integration boundary.
+    fn normalized_dirname_graph_report() -> Value {
+        let mut report: Value = serde_json::from_slice(&producer_graph_report()).unwrap();
+        report["schema_version"] = json!("franken-node/module-source-graph/v3");
+        let edge = &mut report["edges"][0];
+        edge["kind"] = json!("require");
+        edge["specifier"] = json!("./packages/workspace/main.mjs");
+        edge["normalized_dirname_request"] = json!(true);
+        edge["conditions"] = json!(["node", "require"]);
+        edge["mappings"] = json!([]);
+        report
+    }
+
+    #[test]
+    fn graph_commitment_authenticates_normalized_commonjs_request_spelling() {
+        for (kind, specifier) in [
+            ("require", "./packages/workspace/main.mjs"),
+            ("require_resolve", "./packages/workspace/"),
+            ("require", "."),
+            ("require_resolve", "./"),
+        ] {
+            let mut source = normalized_dirname_graph_report();
+            source["edges"][0]["kind"] = json!(kind);
+            source["edges"][0]["specifier"] = json!(specifier);
+            let (capsule, report) = reseal_graph_witness(&source);
+            let facts = inspect_graph_report(&capsule, &report).unwrap();
+            assert!(facts.graph_hash_recomputed);
+            assert!(!facts.graph_semantics_reconstructed);
+
+            // The marker and spelling are both signed-commitment inputs:
+            // neither can be changed while retaining the original capsule pin.
+            let authenticated: Value = serde_json::from_slice(&report).unwrap();
+            let mut changed = authenticated.clone();
+            changed["edges"][0]["specifier"] = json!("./substituted.cjs");
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err()
+            );
+            let mut changed = authenticated;
+            changed["edges"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("normalized_dirname_request");
+            assert!(
+                inspect_graph_report(&capsule, &serde_json::to_vec(&changed).unwrap()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn graph_commitment_rejects_resealed_ambiguous_normalized_requests() {
+        let original = normalized_dirname_graph_report();
+        for (pointer, replacement) in [
+            (
+                "/schema_version",
+                json!("franken-node/module-source-graph/v2"),
+            ),
+            ("/edges/0/dirname_request", json!(true)),
+            ("/edges/0/kind", json!("static_import")),
+            ("/edges/0/kind", json!("reexport")),
+            ("/edges/0/kind", json!("dynamic_import")),
+            ("/edges/0/kind", json!("import_meta_resolve")),
+            ("/edges/0/state", json!("type_only")),
+            ("/edges/0/specifier", Value::Null),
+            ("/edges/0/specifier", json!("workspace")),
+            ("/edges/0/specifier", json!("../outside.cjs")),
+            ("/edges/0/specifier", json!("/absolute.cjs")),
+            ("/edges/0/specifier", json!("./sub/../other.cjs")),
+            ("/edges/0/specifier", json!("./sub//other.cjs")),
+            ("/edges/0/specifier", json!("./.git/config")),
+            ("/edges/0/specifier", json!("./.beads/issues.jsonl")),
+            ("/edges/0/import_attributes", json!({"type": "json"})),
+            ("/edges/0/commonjs_search", json!({"kind": "lookup_paths"})),
+        ] {
+            let mut changed = original.clone();
+            // Optional marker fields are absent in the original wire value.
+            let key = pointer.rsplit('/').next().unwrap();
+            if pointer.starts_with("/edges/0/") {
+                changed["edges"][0][key] = replacement;
+            } else {
+                changed[key] = replacement;
+            }
+            let (capsule, report) = reseal_graph_witness(&changed);
+            assert!(
+                inspect_graph_report(&capsule, &report).is_err(),
+                "{pointer}"
+            );
+        }
     }
 
     #[test]
@@ -1342,6 +1471,7 @@ pub(super) mod tests {
         for (pointer, field, value) in [
             ("", "resolution_targets", json!([])),
             ("/edges/0", "dirname_request", json!(false)),
+            ("/edges/0", "normalized_dirname_request", json!(false)),
             ("/edges/0", "resolved_url", Value::Null),
             ("/edges/0", "commonjs_search", Value::Null),
             ("/edges/0", "import_attributes", json!({})),

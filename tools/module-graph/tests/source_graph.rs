@@ -1631,6 +1631,131 @@ typeof module['require'];
 }
 
 #[test]
+fn immutable_path_requests_match_node_and_replay_without_live_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project with spaces");
+    put(
+        &project,
+        "src/app.cjs",
+        r#"
+const path = require('node:path');
+const {join: joinPath, resolve: resolvePath} = require('path');
+console.log(require(path.join(__dirname, 'lib', '.', 'joined.cjs')));
+console.log(require(resolvePath(__dirname, '..', 'resolved.cjs')));
+console.log(require(joinPath(__dirname, 'lib', flag ? 'one.cjs' : 'two.cjs')));
+console.log(require.resolve(path.resolve(__dirname, '..', 'asset.txt')).endsWith('/asset.txt'));
+"#,
+    );
+    // The branch value is supplied as a separate statement, not inferred by
+    // capture. Both possible requests must be retained.
+    let source = std::fs::read_to_string(project.join("src/app.cjs")).unwrap();
+    put(&project, "src/app.cjs", &format!("const flag=true;\n{source}"));
+    put(&project, "src/lib/joined.cjs", "module.exports=17;");
+    put(&project, "src/lib/one.cjs", "module.exports=31;");
+    put(&project, "src/lib/two.cjs", "module.exports=47;");
+    put(&project, "resolved.cjs", "module.exports=23;");
+    put(&project, "asset.txt", "metadata only; never execute this");
+    let reference = Command::new("node")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .arg(project.join("src/app.cjs"))
+        .output()
+        .unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(reference.stdout, b"17\n23\n31\ntrue\n");
+
+    let capsule = temp.path().join("path-requests.fnsc");
+    let (code, captured) = export_capsule(&project, "src/app.cjs", &capsule, &[]);
+    // Native path builtins are still terminal runtime requirements in the
+    // engine-independent scanner; the new file requests must be resolved.
+    assert_eq!(code, 1, "{captured}");
+    assert_eq!(captured["source_graph"]["diagnostics"], serde_json::json!([]));
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    let requests = edges.iter()
+        .filter(|edge| edge["normalized_dirname_request"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 5, "{captured}");
+    assert!(requests.iter().all(|edge| edge["state"] == "resolved"));
+    assert!(requests.iter().all(|edge| edge["dirname_request"].is_null()));
+    assert_eq!(
+        requests.iter().map(|edge| edge["specifier"].as_str().unwrap()).collect::<Vec<_>>(),
+        [
+            "./src/lib/joined.cjs",
+            "./resolved.cjs",
+            "./src/lib/one.cjs",
+            "./src/lib/two.cjs",
+            "./asset.txt",
+        ]
+    );
+    assert!(!paths(&captured).contains(&"asset.txt"));
+    std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+    let unrelated = temp.path().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    let (code, replayed) = replay_capsule(
+        &capsule,
+        captured["capsule_hash"].as_str().unwrap(),
+        &unrelated,
+    );
+    assert_eq!(code, 1, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(replayed["replay_verified"], true);
+    assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
+}
+
+#[test]
+fn path_request_capture_refuses_mutation_alias_escape_and_unknown_operands() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "dep.cjs", "module.exports=42;");
+    for source in [
+        "const path=require('path'); path.join=other; require(path.join(__dirname,'dep.cjs'));",
+        "const path=require('path'); const alias=path; require(path.join(__dirname,'dep.cjs'));",
+        "const path=require('path'); observe(path); require(path.join(__dirname,'dep.cjs'));",
+        "const path=require('path'); function f(path){} require(path.join(__dirname,'dep.cjs'));",
+        "const path=require('path'); require(path.join(__dirname,unknown));",
+        "const path=require('path'); require(path.resolve(__dirname,'/tmp/dep.cjs'));",
+        "const path=require('path'); __dirname='/tmp'; require(path.join(__dirname,'dep.cjs'));",
+        "const {join}=require('path'); use(join); require(join(__dirname,'dep.cjs'));",
+        "const path=require('path'); require(path.join(__dirname,...parts));",
+        "const path=require('path'); require(path.join(__dirname,flag?'dep.cjs':unknown));",
+        "const path=require('path'); const p\\u0061th=other; require(path.join(__dirname,'dep.cjs'));",
+    ] {
+        put(root.path(), "app.cjs", source);
+        let (code, report) = run(root.path(), "app.cjs", &[]);
+        assert_eq!(code, 1, "{source}: {report}");
+        let edges = report["source_graph"]["edges"].as_array().unwrap();
+        assert!(
+            edges.iter().any(|edge| edge["state"] == "non_literal"),
+            "{source}: {report}"
+        );
+        assert!(
+            edges.iter().all(|edge| edge["normalized_dirname_request"].is_null()),
+            "{source}: {report}"
+        );
+        assert!(!paths(&report).contains(&"dep.cjs"), "{source}: {report}");
+    }
+}
+
+#[test]
+fn normalized_path_requests_cannot_capture_outside_or_operator_state() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "project/dep.cjs", "module.exports=42;");
+    put(root.path(), "outside.cjs", "throw new Error('outside source must stay unread');");
+    for suffix in ["'..','outside.cjs'", "'.franken-node','keys','receipt-signing.key'"] {
+        let project = root.path().join("project");
+        put(
+            &project,
+            "app.cjs",
+            &format!("const path=require('path'); require(path.resolve(__dirname,{suffix}));"),
+        );
+        let capsule = root.path().join(if suffix.starts_with("'..'") { "escape.fnsc" } else { "operator.fnsc" });
+        let (code, report) = export_capsule(&project, "app.cjs", &capsule, &[]);
+        assert_ne!(code, 0, "{report}");
+        assert!(report["source_graph"].is_null(), "{report}");
+        assert!(!capsule.exists(), "{report}");
+    }
+}
+
+#[test]
 fn immutable_commonjs_aliases_match_node_routes_and_replay_without_source_files() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

@@ -185,6 +185,12 @@ pub struct SourceEdge {
     /// supply the absolute string derived from its unchanged __dirname.
     #[serde(skip_serializing_if = "is_false")]
     pub dirname_request: bool,
+    /// Exact normalized absolute request built by a captured native path
+    /// function. The retained spelling is project-relative, unlike the raw
+    /// importer-relative dirname concatenation above. Neither grants an
+    /// ordinary relative request or an arbitrary absolute-path lookup.
+    #[serde(skip_serializing_if = "is_false")]
+    pub normalized_dirname_request: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commonjs_search: Option<CommonJsSearch>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -605,6 +611,12 @@ fn build(
             resolver.conditions = conditions.clone();
             resolver.mappings.clear();
             let commonjs_search = load.commonjs_search(&id)?;
+            let specifier = if load.normalized_dirname_request {
+                let request = load.specifier.as_deref().ok_or_else(limit)?;
+                Some(normalized_dirname_specifier(&id, request)?)
+            } else {
+                load.specifier
+            };
             let mut edge = SourceEdge {
                 importer: id.clone(),
                 site: load.site,
@@ -617,8 +629,9 @@ fn build(
                             | LoadKind::ImportMetaResolve
                             | LoadKind::DynamicImport
                     ),
-                specifier: load.specifier,
+                specifier,
                 dirname_request: load.dirname_request,
+                normalized_dirname_request: load.normalized_dirname_request,
                 commonjs_search,
                 import_attributes: load.import_attributes,
                 conditions,
@@ -693,7 +706,12 @@ fn build(
                     Some(CommonJsSearch::Paths { paths }) => {
                         resolver.request_from_paths(parent(&id.path), request, paths)
                     }
-                    _ => resolver.request(parent(&id.path), request, mode, 0),
+                    _ => resolver.request(
+                        if edge.normalized_dirname_request { "" } else { parent(&id.path) },
+                        request,
+                        mode,
+                        0,
+                    ),
                 };
                 match selected {
                     Ok((path, url_suffix)) => {
@@ -852,6 +870,7 @@ struct Load {
     kind: LoadKind,
     specifier: Option<String>,
     dirname_request: bool,
+    normalized_dirname_request: bool,
     import_attributes: ImportAttributes,
     type_only: bool,
     search_paths: Option<Vec<SearchRoot>>,
@@ -2150,6 +2169,7 @@ fn scan(
     let mut strings = ConstStringBindings::default();
     let mut strings_discovered = false;
     let mut directory_origin_stable = None;
+    let mut path_bindings = None;
     let mut loads = Vec::new();
     let mut notices = Vec::new();
     let mut cursor = tree.walk();
@@ -2520,6 +2540,7 @@ fn scan(
             }
             let mut search_paths = None;
             let mut dirname_request = false;
+            let mut normalized_dirname_request = false;
             if specifiers.is_none()
                 && !erased
                 && !lookup_paths
@@ -2542,6 +2563,39 @@ fn scan(
                         "module-relative loads require the unchanged module-owned __dirname binding"));
                 }
             }
+            if specifiers.is_none()
+                && !erased
+                && !lookup_paths
+                && matches!(kind, LoadKind::Require | LoadKind::RequireResolve)
+                && runtime_operand(argument).kind() == "call_expression"
+            {
+                if path_bindings.is_none() {
+                    path_bindings = Some(PathFunctionBindings::discover(
+                        tree.root_node(), text, budget, &bindings, &strings,
+                    )?);
+                }
+                if let Some(requests) = path_bindings.as_ref().and_then(|bindings| {
+                    bindings.dirname_requests(argument, text, &strings)
+                }) {
+                    let stable = match directory_origin_stable {
+                        Some(stable) => stable,
+                        None => {
+                            let stable = stable_search_directory_origin(tree.root_node(), text, budget)?;
+                            directory_origin_stable = Some(stable);
+                            stable
+                        }
+                    };
+                    if stable {
+                        specifiers = Some(requests);
+                        normalized_dirname_request = true;
+                    } else {
+                        issue = Some((
+                            "MUTABLE_DIRNAME_REQUEST",
+                            "path-derived loads require the unchanged module-owned dirname",
+                        ));
+                    }
+                }
+            }
             if kind == LoadKind::RequireResolve
                 && !lookup_paths
                 && !erased
@@ -2558,11 +2612,12 @@ fn scan(
                     captured = capture_search_options(node, text, &strings);
                 }
                 if let Some(roots) = captured {
-                    if dirname_request && roots.is_some() {
+                    if (dirname_request || normalized_dirname_request) && roots.is_some() {
                         issue = Some(("REQUIRE_RESOLVE_OPTIONS",
                             "dirname-derived filename lookup cannot be combined with explicit search roots"));
                         specifiers = None;
                         dirname_request = false;
+                        normalized_dirname_request = false;
                     } else if roots.as_ref().is_some_and(|roots| roots.iter().any(|root| root.importer_relative))
                         && !match directory_origin_stable {
                             Some(stable) => stable,
@@ -2586,6 +2641,12 @@ fn scan(
                 }
             }
             let unresolved = specifiers.is_none();
+            if unresolved {
+                // Refused options or an unproved operand retain no normalized
+                // origin authority in the diagnostic edge. Keep historical
+                // raw-dirname diagnostics byte-compatible with their reports.
+                normalized_dirname_request = false;
+            }
             // A finite choice is a set of potential routes at the same source
             // site, not a prediction of the branch that execution will take.
             // Charge each route before publishing any scan output. An unknown
@@ -2621,6 +2682,7 @@ fn scan(
                         kind,
                         specifier: specifier.clone(),
                         dirname_request,
+                        normalized_dirname_request,
                         import_attributes: attributes.clone(),
                         type_only: erased,
                         search_paths: selected.map(<[SearchRoot]>::to_vec),
@@ -2773,6 +2835,364 @@ fn search_root(
         importer_relative: false,
         text: value.clone(),
     })
+}
+
+#[derive(Clone, Copy)]
+enum CapturedPathFunction {
+    Join,
+    Resolve,
+}
+
+#[derive(Clone, Copy)]
+enum PathBindingKind {
+    Namespace,
+    Function(CapturedPathFunction),
+}
+
+struct PathFunctionBinding {
+    kind: PathBindingKind,
+    available_after: usize,
+    scope_end: usize,
+}
+
+/// Prove only immutable bindings to Node's POSIX path functions. Namespace
+/// objects and function values cannot escape or be reassigned in this module;
+/// aliases, shadowing and unknown binding syntax remain unproved. The runtime
+/// still checks every exact resulting request against its captured route, so
+/// changing a shared builtin from another module cannot add lookup authority.
+#[derive(Default)]
+struct PathFunctionBindings<'source> {
+    values: BTreeMap<&'source str, PathFunctionBinding>,
+    declarations: BTreeSet<usize>,
+    sources: BTreeSet<usize>,
+    valid: bool,
+}
+
+fn normalized_dirname_specifier(importer: &ModuleId, request: &str) -> Result<String> {
+    // path.join/resolve remove dot segments before filesystem lookup,
+    // including before symlinks. Check every step so leaving and re-entering
+    // the project cannot manufacture captured authority.
+    let path = super::normalize(parent(&importer.path), request)?;
+    let trailing = request.ends_with('/');
+    Ok(if path.is_empty() {
+        if trailing { "./" } else { "." }.to_owned()
+    } else {
+        format!("./{path}{}", if trailing { "/" } else { "" })
+    })
+}
+
+fn path_module_source(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    if node.kind() != "call_expression"
+        || !node.child_by_field_name("function").is_some_and(|callee| is_require(callee, source))
+    {
+        return false;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else { return false; };
+    let mut cursor = arguments.walk();
+    let mut arguments = arguments.named_children(&mut cursor)
+        .filter(|argument| argument.kind() != "comment");
+    arguments.next().and_then(|argument| literal(argument, source))
+        .is_some_and(|name| matches!(name.as_str(), "path" | "node:path" | "path/posix" | "node:path/posix"))
+        && arguments.next().is_none()
+}
+
+fn path_function_member(node: Node<'_>, source: &str) -> Option<CapturedPathFunction> {
+    if named_member(node, "join", source) {
+        Some(CapturedPathFunction::Join)
+    } else if named_member(node, "resolve", source) {
+        Some(CapturedPathFunction::Resolve)
+    } else {
+        None
+    }
+}
+
+impl<'source> PathFunctionBindings<'source> {
+    fn add(
+        &mut self,
+        name: Node<'_>,
+        kind: PathBindingKind,
+        available_after: usize,
+        scope_end: usize,
+        source: &'source str,
+    ) -> Result<()> {
+        if !matches!(name.kind(), "identifier" | "shorthand_property_identifier_pattern") {
+            self.valid = false;
+            return Ok(());
+        }
+        let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
+        if spelling.is_empty() || spelling.contains('\\') || self.values.contains_key(spelling) {
+            self.valid = false;
+            return Ok(());
+        }
+        if self.values.len() >= MAX_SITES {
+            return Err(limit());
+        }
+        self.values.insert(spelling, PathFunctionBinding { kind, available_after, scope_end });
+        self.declarations.insert(name.id());
+        Ok(())
+    }
+
+    fn discover(
+        root: Node<'_>,
+        source: &'source str,
+        budget: &mut Budget,
+        loaders: &CreateRequireBindings<'_>,
+        strings: &ConstStringBindings<'_>,
+    ) -> Result<Self> {
+        let mut bindings = Self { valid: true, ..Self::default() };
+        let mut cursor = root.walk();
+        loop {
+            budget.ast_nodes = budget.ast_nodes.checked_add(1).ok_or_else(limit)?;
+            if budget.ast_nodes > MAX_AST_NODES { return Err(limit()); }
+            let node = cursor.node();
+            if node.kind() == "variable_declarator"
+                && let Some(scope) = const_string_scope(node)
+                && let (Some(name), Some(value)) =
+                    (node.child_by_field_name("name"), node.child_by_field_name("value"))
+                && path_module_source(value, source)
+            {
+                bindings.sources.insert(runtime_operand(value).id());
+                if name.kind() == "identifier" {
+                    bindings.add(name, PathBindingKind::Namespace, node.end_byte(), scope.end_byte(), source)?;
+                } else if name.kind() == "object_pattern" {
+                    let mut members = name.walk();
+                    for member in name.named_children(&mut members).filter(|member| member.kind() != "comment") {
+                        let (key, local) = if member.kind() == "shorthand_property_identifier_pattern" {
+                            (member, member)
+                        } else if member.kind() == "pair_pattern"
+                            && let (Some(key), Some(value)) =
+                                (member.child_by_field_name("key"), member.child_by_field_name("value"))
+                        {
+                            (key, value)
+                        } else {
+                            bindings.valid = false;
+                            continue;
+                        };
+                        let key = key.utf8_text(source.as_bytes()).unwrap_or("");
+                        let kind = match key {
+                            "join" => CapturedPathFunction::Join,
+                            "resolve" => CapturedPathFunction::Resolve,
+                            _ => { bindings.valid = false; continue; }
+                        };
+                        bindings.add(local, PathBindingKind::Function(kind), node.end_byte(), scope.end_byte(), source)?;
+                    }
+                } else {
+                    bindings.valid = false;
+                }
+            } else if node.kind() == "import_statement"
+                && !keyword(node, "type")
+                && node.child_by_field_name("source").and_then(|value| literal(value, source))
+                    .is_some_and(|name| matches!(name.as_str(), "path" | "node:path" | "path/posix" | "node:path/posix"))
+            {
+                let mut clauses = node.walk();
+                for clause in node.named_children(&mut clauses).filter(|clause| clause.kind() == "import_clause") {
+                    let mut parts = clause.walk();
+                    for part in clause.named_children(&mut parts) {
+                        match part.kind() {
+                            "identifier" => bindings.add(part, PathBindingKind::Namespace, 0, root.end_byte(), source)?,
+                            "namespace_import" => {
+                                if let Some(name) = part.named_child(0) {
+                                    bindings.add(name, PathBindingKind::Namespace, 0, root.end_byte(), source)?;
+                                }
+                            }
+                            "named_imports" => {
+                                let mut names = part.walk();
+                                for specifier in part.named_children(&mut names) {
+                                    if specifier.kind() != "import_specifier" || keyword(specifier, "type") { continue; }
+                                    let Some(name) = specifier.child_by_field_name("name") else { continue; };
+                                    let kind = match name.utf8_text(source.as_bytes()).unwrap_or("") {
+                                        "default" => PathBindingKind::Namespace,
+                                        "join" => PathBindingKind::Function(CapturedPathFunction::Join),
+                                        "resolve" => PathBindingKind::Function(CapturedPathFunction::Resolve),
+                                        "posix" | "win32" => {
+                                            // These exports expose native namespace objects;
+                                            // an untracked alias could replace join/resolve.
+                                            bindings.valid = false;
+                                            continue;
+                                        }
+                                        _ if name.kind() == "string" => {
+                                            // String-named exports can spell the same aliases.
+                                            bindings.valid = false;
+                                            continue;
+                                        }
+                                        _ => continue,
+                                    };
+                                    let local = specifier.child_by_field_name("alias").unwrap_or(name);
+                                    bindings.declarations.insert(name.id());
+                                    bindings.add(local, kind, 0, root.end_byte(), source)?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if cursor.goto_first_child() { continue; }
+            loop {
+                if cursor.goto_next_sibling() { break; }
+                if !cursor.goto_parent() {
+                    return bindings.prove(root, source, budget, loaders, strings);
+                }
+            }
+        }
+    }
+
+    fn prove(
+        mut self,
+        root: Node<'_>,
+        source: &str,
+        budget: &mut Budget,
+        loaders: &CreateRequireBindings<'_>,
+        strings: &ConstStringBindings<'_>,
+    ) -> Result<Self> {
+        let mut cursor = root.walk();
+        loop {
+            budget.ast_nodes = budget.ast_nodes.checked_add(1).ok_or_else(limit)?;
+            if budget.ast_nodes > MAX_AST_NODES { return Err(limit()); }
+            let node = cursor.node();
+            let path_namespace = node.kind() == "call_expression"
+                && node.child_by_field_name("function").is_some_and(|callee| {
+                    let callee = runtime_operand(callee);
+                    callee.kind() == "import" || is_require(callee, source) || loaders.is_loader(callee, source)
+                })
+                && node.child_by_field_name("arguments").is_some_and(|arguments| {
+                    let mut children = arguments.walk();
+                    arguments.named_children(&mut children)
+                        .find(|argument| argument.kind() != "comment")
+                        .and_then(|argument| request_literals(argument, source, strings))
+                        .is_some_and(|names| names.iter().any(|name| {
+                            matches!(name.as_str(), "path" | "node:path" | "path/posix" | "node:path/posix")
+                        }))
+                });
+            if path_namespace && !self.sources.contains(&node.id()) {
+                // A fresh inline require('path').join/resolve call is allowed.
+                // Any other use can expose or replace the shared namespace.
+                let allowed = path_module_source(node, source) && node.parent().is_some_and(|member| {
+                    path_function_member(member, source).is_some()
+                        && member.child_by_field_name("object").is_some_and(|object| object.id() == node.id())
+                        && direct_callee(member, source)
+                });
+                self.valid &= allowed;
+            }
+            if matches!(node.kind(), "identifier" | "shorthand_property_identifier" | "shorthand_property_identifier_pattern") {
+                let name = node.utf8_text(source.as_bytes()).unwrap_or("");
+                if name.contains('\\') {
+                    self.valid = false;
+                } else if let Some(binding) = self.values.get(name)
+                    && !self.declarations.contains(&node.id())
+                {
+                    let within_scope = node.start_byte() >= binding.available_after && node.end_byte() <= binding.scope_end;
+                    let read_only = match binding.kind {
+                        PathBindingKind::Function(_) => direct_callee(node, source) || loader_typeof_probe(node),
+                        PathBindingKind::Namespace => Self::namespace_read(node, source),
+                    };
+                    self.valid &= within_scope && read_only;
+                }
+            }
+            if cursor.goto_first_child() { continue; }
+            loop {
+                if cursor.goto_next_sibling() { break; }
+                if !cursor.goto_parent() { return Ok(self); }
+            }
+        }
+    }
+
+    fn namespace_read(mut node: Node<'_>, source: &str) -> bool {
+        for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
+            let Some(parent) = node.parent() else { return false; };
+            if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
+                node = parent;
+                continue;
+            }
+            if !parent.child_by_field_name("object").is_some_and(|object| object.id() == node.id()) {
+                return false;
+            }
+            if ["sep", "delimiter"].iter().any(|name| named_member(parent, name, source)) {
+                return immutable_filename_use(parent);
+            }
+            return [
+                "join", "resolve", "normalize", "isAbsolute", "relative", "dirname",
+                "basename", "extname", "format", "parse", "toNamespacedPath", "matchesGlob",
+            ].iter().any(|name| named_member(parent, name, source))
+                && direct_callee(parent, source);
+        }
+        false
+    }
+
+    fn function(&self, callee: Node<'_>, source: &str) -> Option<CapturedPathFunction> {
+        let callee = runtime_operand(callee);
+        if callee.kind() == "identifier"
+            && let PathBindingKind::Function(function) =
+                self.values.get(callee.utf8_text(source.as_bytes()).ok()?)?.kind
+        {
+            return Some(function);
+        }
+        let function = path_function_member(callee, source)?;
+        let object = runtime_operand(callee.child_by_field_name("object")?);
+        if path_module_source(object, source)
+            || (object.kind() == "identifier"
+                && matches!(self.values.get(object.utf8_text(source.as_bytes()).ok()?)?.kind, PathBindingKind::Namespace))
+        {
+            Some(function)
+        } else {
+            None
+        }
+    }
+
+    fn dirname_requests(
+        &self,
+        node: Node<'_>,
+        source: &str,
+        strings: &ConstStringBindings<'_>,
+    ) -> Option<Vec<String>> {
+        if !self.valid { return None; }
+        let node = runtime_operand(node);
+        let function = self.function(node.child_by_field_name("function")?, source)?;
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let mut arguments = arguments.named_children(&mut cursor)
+            .filter(|argument| argument.kind() != "comment");
+        let origin = runtime_operand(arguments.next()?);
+        let own_dirname = (origin.kind() == "identifier"
+            && origin.utf8_text(source.as_bytes()) == Ok("__dirname"))
+            || (named_member(origin, "dirname", source)
+                && origin.child_by_field_name("object").is_some_and(|object| {
+                    let object = runtime_operand(object);
+                    object.kind() == "meta_property" && keyword(object, "import")
+                }));
+        if !own_dirname { return None; }
+        let mut values = BTreeSet::from([".".to_owned()]);
+        let mut copied = MAX_STRING_EXPRESSION_BYTES;
+        for (index, argument) in arguments.enumerate() {
+            if index >= MAX_STRING_ALTERNATIVES { return None; }
+            let alternatives = request_literals(argument, source, strings)?;
+            let mut joined = BTreeSet::new();
+            for prefix in &values {
+                for suffix in &alternatives {
+                    // resolve would reset its authority at an absolute later
+                    // operand. Do not infer a new origin or consult the cwd.
+                    if matches!(function, CapturedPathFunction::Resolve) && suffix.starts_with('/') {
+                        return None;
+                    }
+                    let length = prefix.len().checked_add(suffix.len())?.checked_add(1)?;
+                    if length > super::MAX_PATH { return None; }
+                    copied = copied.checked_sub(length)?;
+                    joined.insert(if suffix.is_empty() {
+                        prefix.clone()
+                    } else {
+                        format!("{prefix}/{suffix}")
+                    });
+                    if joined.len() > MAX_STRING_ALTERNATIVES { return None; }
+                }
+            }
+            values = joined;
+        }
+        if matches!(function, CapturedPathFunction::Resolve) {
+            values = values.into_iter().map(|value| value.trim_end_matches('/').to_owned()).collect();
+        }
+        Some(values.into_iter().collect())
+    }
 }
 
 /// Keep the exact suffix spelling: a captured dirname request is not a grant
@@ -3822,7 +4242,13 @@ import.meta.resolve('./absent.asset?mode=1#part');
 import.meta.resolve('https://example.com/a');
 "#;
         let incomplete = "import './missing.mjs'; import(loadAtRuntime);";
-        for (source, fully_resolved) in [(complete, true), (incomplete, false)] {
+        let normalized = "import './path-loader.cjs';";
+        put(root.path(), "path-loader.cjs", r#"
+const path = require('node:path');
+require(path.join(__dirname, '.', 'value.json'));
+require.resolve(path.resolve(__dirname, 'opaque.asset'));
+"#);
+        for (source, fully_resolved) in [(complete, true), (incomplete, false), (normalized, false)] {
             put(root.path(), "app.mjs", source);
             let captured = capture(
                 root.path(),
@@ -3865,6 +4291,11 @@ import.meta.resolve('https://example.com/a');
                 );
             }
             let encoded = capsule::encode(&captured).unwrap();
+            if source == normalized {
+                assert!(captured.report().diagnostics.is_empty());
+                assert_eq!(captured.report().edges.iter()
+                    .filter(|edge| edge.normalized_dirname_request).count(), 2);
+            }
             let report = serde_json::to_vec(captured.report()).unwrap();
             let signer = SigningKey::from_bytes(&[0x6d; 32]);
             let manifest = serde_json::to_vec(&serde_json::json!({

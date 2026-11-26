@@ -891,17 +891,18 @@ impl CapturedEngineResolver {
         context: &ResolutionContext,
         policy: &dyn ModulePolicyHook,
         root: Option<&Path>,
-        dirname_specifier: Option<&str>,
+        dirname_request: Option<&CapturedDirnameRequest>,
     ) -> ResolutionResult<Vec<ResolutionOutcome>> {
         self.validate_request(entry_request, context)?;
         let requests = self
             .registry
             .walk_source_requests(
                 entry_request.referrer.as_deref(),
-                dirname_specifier.unwrap_or(&entry_request.specifier),
+                dirname_request.map_or(entry_request.specifier.as_str(), |request| request.specifier.as_str()),
                 source_style(entry_request.style),
                 entry_request.import_attributes.as_map(),
-                dirname_specifier.is_some(),
+                dirname_request.is_some_and(|request| !request.normalized),
+                dirname_request.is_some_and(|request| request.normalized),
             )
             .map_err(|error| registry_error(error, entry_request, context))?;
         let mut outcomes: Vec<ResolutionOutcome> = Vec::new();
@@ -909,16 +910,21 @@ impl CapturedEngineResolver {
         let mut source_bytes = 0_usize;
         for route in requests {
             let route = route.map_err(|error| registry_error(error, entry_request, context))?;
-            let specifier = if route.dirname_request {
+            let specifier = if route.dirname_request || route.normalized_dirname_request {
                 let root = root.ok_or_else(|| denied(
                     ResolutionErrorCode::UnsupportedSpecifier,
                     "dirname-derived traversal requires an installed execution root",
                     entry_request, context, None,
                 ))?;
-                let origin = self.registry.source_origin(route.referrer)
-                    .map_err(|error| registry_error(error, entry_request, context))?;
-                dirname_runtime_specifier(root, origin, route.specifier)
-                    .map_err(|error| registry_error(error, entry_request, context))?
+                if route.normalized_dirname_request {
+                    normalized_dirname_runtime_specifier(root, route.specifier)
+                        .map_err(|error| registry_error(error, entry_request, context))?
+                } else {
+                    let origin = self.registry.source_origin(route.referrer)
+                        .map_err(|error| registry_error(error, entry_request, context))?;
+                    dirname_runtime_specifier(root, origin, route.specifier)
+                        .map_err(|error| registry_error(error, entry_request, context))?
+                }
             } else {
                 route.specifier.to_owned()
             };
@@ -972,12 +978,18 @@ struct RootedCapturedEngineResolver {
     root: PathBuf,
 }
 
+struct CapturedDirnameRequest {
+    specifier: String,
+    normalized: bool,
+}
+
 impl RootedCapturedEngineResolver {
     fn dirname_request(
         &self,
         request: &ModuleRequest,
         context: &ResolutionContext,
-    ) -> ResolutionResult<Option<String>> {
+        style: RequestStyle,
+    ) -> ResolutionResult<Option<CapturedDirnameRequest>> {
         if !Path::new(&request.specifier).is_absolute() {
             return Ok(None);
         }
@@ -994,6 +1006,33 @@ impl RootedCapturedEngineResolver {
         }
         let origin = self.inner.registry.source_origin(request.referrer.as_deref())
             .map_err(|error| registry_error(error, request, context))?;
+        let importer = request.referrer.as_deref().ok_or_else(invalid)?;
+        let root = normalized_dirname_runtime_specifier(&self.root, ".")
+            .map_err(|error| registry_error(error, request, context))?;
+        let captured = |specifier: &str| {
+            self.inner.registry.has_normalized_dirname_request(importer, specifier, style)
+                && normalized_dirname_runtime_specifier(&self.root, specifier)
+                    .is_ok_and(|absolute| absolute == request.specifier)
+        };
+        // A normalized path may cross to a sibling of its importer, but the
+        // exact project-relative spelling must have been captured for this
+        // caller and purpose. No lexical equivalent or live lookup is used.
+        if request.specifier == root {
+            for specifier in [".", "./"] {
+                if captured(specifier) {
+                    return Ok(Some(CapturedDirnameRequest {
+                        specifier: specifier.to_owned(), normalized: true,
+                    }));
+                }
+            }
+        }
+        let prefix = if root == "/" { "/".to_owned() } else { format!("{root}/") };
+        if let Some(suffix) = request.specifier.strip_prefix(&prefix) {
+            let specifier = format!("./{suffix}");
+            if captured(&specifier) {
+                return Ok(Some(CapturedDirnameRequest { specifier, normalized: true }));
+            }
+        }
         let filename = self.root.join(&origin.path);
         let directory = filename.parent().and_then(Path::to_str).ok_or_else(invalid)?;
         let suffix = request.specifier.strip_prefix(directory)
@@ -1004,7 +1043,7 @@ impl RootedCapturedEngineResolver {
         // exact route lookup, including reserved operator-state components.
         super::super::normalize(super::parent(&origin.path), &relative)
             .map_err(|error| registry_error(error, request, context))?;
-        Ok(Some(relative))
+        Ok(Some(CapturedDirnameRequest { specifier: relative, normalized: false }))
     }
 
     fn captured_paths(
@@ -1045,10 +1084,14 @@ impl ModuleResolver for RootedCapturedEngineResolver {
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<ResolutionOutcome> {
         self.inner.validate_request(request, context)?;
-        let Some(specifier) = self.dirname_request(request, context)? else {
+        let Some(derived) = self.dirname_request(request, context, RequestStyle::Require)? else {
             return self.inner.resolve(request, context, policy);
         };
-        let module = self.inner.registry.lookup_dirname(request.referrer.as_deref(), &specifier)
+        let module = if derived.normalized {
+            self.inner.registry.lookup_normalized_dirname(request.referrer.as_deref(), &derived.specifier)
+        } else {
+            self.inner.registry.lookup_dirname(request.referrer.as_deref(), &derived.specifier)
+        }
             .map_err(|error| registry_error(error, request, context))?;
         let record = self.inner.record(module, request, context)?;
         self.inner.authorize(request, &record, context, policy)?;
@@ -1059,10 +1102,14 @@ impl ModuleResolver for RootedCapturedEngineResolver {
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<SharedResolutionOutcome> {
         self.inner.validate_request(request, context)?;
-        let Some(specifier) = self.dirname_request(request, context)? else {
+        let Some(derived) = self.dirname_request(request, context, RequestStyle::Require)? else {
             return self.inner.resolve_shared(request, context, policy);
         };
-        let module = self.inner.registry.lookup_dirname(request.referrer.as_deref(), &specifier)
+        let module = if derived.normalized {
+            self.inner.registry.lookup_normalized_dirname(request.referrer.as_deref(), &derived.specifier)
+        } else {
+            self.inner.registry.lookup_dirname(request.referrer.as_deref(), &derived.specifier)
+        }
             .map_err(|error| registry_error(error, request, context))?;
         self.inner.resolve_shared_module(module, request, context, policy)
     }
@@ -1071,11 +1118,15 @@ impl ModuleResolver for RootedCapturedEngineResolver {
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<MetadataResolutionOutcome> {
         self.inner.validate_request(request, context)?;
-        let Some(specifier) = self.dirname_request(request, context)? else {
+        let Some(derived) = self.dirname_request(request, context, RequestStyle::RequireResolve)? else {
             return self.inner.resolve_metadata(request, context, policy);
         };
         self.inner.validate_commonjs_metadata(request, context)?;
-        let target = self.inner.registry.lookup_dirname_resolution(request.referrer.as_deref(), &specifier)
+        let target = if derived.normalized {
+            self.inner.registry.lookup_normalized_dirname_resolution(request.referrer.as_deref(), &derived.specifier)
+        } else {
+            self.inner.registry.lookup_dirname_resolution(request.referrer.as_deref(), &derived.specifier)
+        }
             .map_err(|error| registry_error(error, request, context))?;
         metadata_outcome(request, self.inner.filename_metadata(target), context, policy)
     }
@@ -1106,9 +1157,38 @@ impl ModuleResolver for RootedCapturedEngineResolver {
     fn resolve_chain(
         &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<Vec<ResolutionOutcome>> {
-        let specifier = self.dirname_request(request, context)?;
-        self.inner.resolve_chain_at(request, context, policy, Some(&self.root), specifier.as_deref())
+        let derived = self.dirname_request(request, context, RequestStyle::Require)?;
+        self.inner.resolve_chain_at(request, context, policy, Some(&self.root), derived.as_ref())
     }
+}
+
+fn normalized_dirname_runtime_specifier(root: &Path, specifier: &str) -> Result<String, CaptureError> {
+    // Native path functions normalize their dirname operand as well. The
+    // presentation root can contain trailing separators or lexical parents;
+    // collapse those without inspecting any directory or following links.
+    let mut directory = PathBuf::new();
+    for component in root.components() {
+        if component == std::path::Component::ParentDir {
+            directory.pop();
+        } else {
+            directory.push(component.as_os_str());
+        }
+    }
+    let root = directory.to_str().ok_or_else(|| super::error(
+        "ERR_MODULE_ENGINE_SOURCE_LOCATION", "execution root is not UTF-8",
+    ))?;
+    if specifier == "." {
+        return Ok(root.to_owned());
+    }
+    let suffix = specifier.strip_prefix("./").ok_or_else(|| super::error(
+        "ERR_MODULE_REGISTRY_ROUTE", "invalid normalized dirname request",
+    ))?;
+    if !suffix.is_empty() {
+        super::super::validate_path(suffix.strip_suffix('/').unwrap_or(suffix))?;
+    }
+    // Preserve a terminal separator, but avoid the double slash produced by
+    // raw dirname concatenation when an execution is rooted directly at '/'.
+    Ok(format!("{}{suffix}", if root == "/" { "/".to_owned() } else { format!("{root}/") }))
 }
 
 fn dirname_runtime_specifier(
@@ -1366,6 +1446,65 @@ mod tests {
         let chain = rooted.resolve_chain(&entry, &context(), &granted()).unwrap();
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[1].module.request_specifier, "//dep.cjs");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn normalized_path_requests_relocate_to_root_and_authorize_cycle_back_edges() {
+        struct Observe(RefCell<Vec<String>>);
+        impl ModulePolicyHook for Observe {
+            fn authorize(&self, request: &ModuleRequest, _: &ModuleRecord, _: &ResolutionContext)
+                -> ResolutionResult<()>
+            {
+                self.0.borrow_mut().push(request.specifier.clone());
+                Ok(())
+            }
+        }
+        let source = tempfile::tempdir().unwrap();
+        put(source.path(), "app.cjs", r#"
+const path=require('node:path');
+require(path.join(__dirname,'nested','dep.cjs'));
+require.resolve(path.resolve(__dirname,'asset.txt'));
+"#);
+        put(source.path(), "nested/dep.cjs",
+            "const path=require('node:path'); require(path.resolve(__dirname,'..','app.cjs'));");
+        put(source.path(), "asset.txt", "metadata only");
+        let graph = capture(source.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let inner = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let entry = inner.entry_request();
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,
+        ]));
+        assert!(inner.resolve_chain(&entry, &context(), &policy).is_err());
+        let request = |specifier: &str| ModuleRequest::new(specifier, ImportStyle::Require)
+            .with_referrer(entry.specifier.clone())
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let lexical_root = RootedCapturedEngineResolver {
+            inner: Arc::clone(&inner), root: PathBuf::from("/unopened/./discard/../"),
+        };
+        assert!(lexical_root.resolve_shared(&request("/unopened/nested/dep.cjs"), &context(), &policy).is_ok());
+        assert!(lexical_root.resolve_shared(&request("/unopened/discard/../nested/dep.cjs"), &context(), &policy).is_err());
+        let rooted = RootedCapturedEngineResolver { inner, root: PathBuf::from("/") };
+        let loaded = rooted.resolve_shared(&request("/nested/dep.cjs"), &context(), &policy).unwrap();
+        assert_eq!(loaded.module.request_specifier, "/nested/dep.cjs");
+        assert_eq!(rooted.resolve_metadata(&request("/asset.txt"), &context(), &policy)
+            .unwrap().module.request_specifier, "/asset.txt");
+        for uncaptured in ["//nested/dep.cjs", "/nested/./dep.cjs", "./nested/dep.cjs"] {
+            assert!(rooted.resolve_shared(&request(uncaptured), &context(), &policy).is_err());
+        }
+        assert!(rooted.resolve_metadata(&request("//asset.txt"), &context(), &policy).is_err());
+        let observe = Observe(RefCell::new(Vec::new()));
+        let chain = rooted.resolve_chain(&entry, &context(), &observe).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(*observe.0.borrow(), vec![
+            entry.specifier.clone(), "node:path".into(), "/nested/dep.cjs".into(),
+            "node:path".into(), "/app.cjs".into(),
+        ]);
+        let mut deny = policy;
+        deny.denied_specifiers.insert("/app.cjs".into());
+        assert_eq!(rooted.resolve_chain(&entry, &context(), &deny).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied);
     }
 
     #[test]

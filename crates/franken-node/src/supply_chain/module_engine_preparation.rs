@@ -11,7 +11,7 @@
 
 use super::super::{
     Budget, CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage,
-    SourceModule, error, scan,
+    SourceModule, error, normalized_dirname_specifier, scan,
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
 use frankenengine_engine::ast::ParseGoal;
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, CaptureError>;
-type Routes = BTreeSet<(String, RequestStyle, ImportAttributes, Option<CommonJsSearch>, bool)>;
+type Routes = BTreeSet<(String, RequestStyle, ImportAttributes, Option<CommonJsSearch>, bool, bool)>;
 const MAX_PREPARED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Source-free engine preparation evidence. A report identifies an original
@@ -225,12 +225,18 @@ impl SourcePreparer {
                 }
                 let commonjs_search = load.commonjs_search(&module.id)?;
                 let specifier = load.specifier.ok_or_else(invalid_preparation)?;
+                let specifier = if load.normalized_dirname_request {
+                    normalized_dirname_specifier(&module.id, &specifier)?
+                } else {
+                    specifier
+                };
                 routes.insert((
                     specifier,
                     request_style(load.kind),
                     load.import_attributes,
                     commonjs_search,
                     load.dirname_request,
+                    load.normalized_dirname_request,
                 ));
             }
             routes
@@ -353,6 +359,7 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             edge.import_attributes.clone(),
             edge.commonjs_search.clone(),
             edge.dirname_request,
+            edge.normalized_dirname_request,
         ));
         if matches!(
             edge.kind,
