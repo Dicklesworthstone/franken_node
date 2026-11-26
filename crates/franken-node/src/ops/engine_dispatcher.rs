@@ -4212,6 +4212,39 @@ fn validate_guest_source_spelling(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Fast path for canonicalizing a path known to sit under an already-canonical
+/// root directory: verifies each relative segment below `known_root` with
+/// `symlink_metadata` (avoiding `O(depth)` `readlink` walks from `/`), and
+/// falls back to `path.canonicalize()` whenever any segment is a symlink,
+/// `.`/`..`, outside `known_root`, or fails inspection.
+fn canonicalize_under_known_canonical_root(path: &Path, known_root: &Path) -> io::Result<PathBuf> {
+    if path == known_root {
+        return Ok(known_root.to_path_buf());
+    }
+    if let Ok(rel) = path.strip_prefix(known_root) {
+        let mut cursor = known_root.to_path_buf();
+        let mut all_plain = true;
+        for component in rel.components() {
+            let std::path::Component::Normal(segment) = component else {
+                all_plain = false;
+                break;
+            };
+            cursor.push(segment);
+            match std::fs::symlink_metadata(&cursor) {
+                Ok(meta) if !meta.file_type().is_symlink() => {}
+                _ => {
+                    all_plain = false;
+                    break;
+                }
+            }
+        }
+        if all_plain {
+            return Ok(cursor);
+        }
+    }
+    path.canonicalize()
+}
+
 impl RunProjectPaths {
     /// Resolve a run target without reading or executing application source.
     ///
@@ -4286,8 +4319,7 @@ impl RunProjectPaths {
                 .with_context(|| format!("inspect run target {}", requested.display()))?
         };
         validate_guest_source_spelling(&anchored)?;
-        let target = anchored
-            .canonicalize()
+        let target = canonicalize_under_known_canonical_root(&anchored, &invocation_root)
             .with_context(|| format!("resolve run target {}", anchored.display()))?;
         validate_guest_source_spelling(&target)?;
         let target_metadata = std::fs::metadata(&target)
@@ -4306,21 +4338,21 @@ impl RunProjectPaths {
             "--package-bin requires a package directory"
         );
         let mut package_manifests = Vec::new();
-        let (project_root, entrypoint) = if target_metadata.is_dir() {
+        let (project_root, entrypoint, entrypoint_already_canonical) = if target_metadata.is_dir() {
             let entrypoint = EngineDispatcher::resolve_directory_entrypoint(
                 &target,
                 &mut package_manifests,
                 package_bin,
             )
             .map_err(anyhow::Error::msg)?;
-            (target.clone(), entrypoint)
+            (target.clone(), entrypoint, false)
         } else if target_metadata.is_file() {
             // Use the selected path's parent before following the final file
             // symlink. Otherwise a symlink could choose its own broader root.
-            let parent = anchored
+            let anchored_parent = anchored
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("run file has no parent directory"))?
-                .canonicalize()
+                .ok_or_else(|| anyhow::anyhow!("run file has no parent directory"))?;
+            let parent = canonicalize_under_known_canonical_root(anchored_parent, &invocation_root)
                 .context("resolve run entrypoint parent")?;
             let mut project_root = parent.clone();
             if !app_path.is_absolute() {
@@ -4348,7 +4380,7 @@ impl RunProjectPaths {
                     })?;
                 }
             }
-            (project_root, target.clone())
+            (project_root, target.clone(), true)
         } else {
             anyhow::bail!(
                 "run target {} is not a regular file or directory",
@@ -4356,17 +4388,22 @@ impl RunProjectPaths {
             );
         };
 
-        validate_guest_source_spelling(&entrypoint)?;
-        let entrypoint = entrypoint
-            .canonicalize()
-            .with_context(|| format!("resolve run entrypoint {}", entrypoint.display()))?;
-        validate_guest_source_spelling(&entrypoint)?;
-        if !entrypoint.is_file() {
-            anyhow::bail!(
-                "run entrypoint {} is not a regular file",
-                entrypoint.display()
-            );
-        }
+        let entrypoint = if entrypoint_already_canonical {
+            entrypoint
+        } else {
+            validate_guest_source_spelling(&entrypoint)?;
+            let canonical_entry =
+                canonicalize_under_known_canonical_root(&entrypoint, &project_root)
+                    .with_context(|| format!("resolve run entrypoint {}", entrypoint.display()))?;
+            validate_guest_source_spelling(&canonical_entry)?;
+            if !canonical_entry.is_file() {
+                anyhow::bail!(
+                    "run entrypoint {} is not a regular file",
+                    canonical_entry.display()
+                );
+            }
+            canonical_entry
+        };
         if !entrypoint.starts_with(&project_root) {
             anyhow::bail!(
                 "run entrypoint {} escapes selected project root {}",
@@ -4676,8 +4713,14 @@ impl RunTrustRequirements {
             paths.len() <= 64,
             "operator protected paths exceed the admission bound"
         );
+        let mut seen = std::collections::BTreeSet::new();
+        let mut canonical_parents: std::collections::HashMap<PathBuf, PathBuf> =
+            std::collections::HashMap::new();
         let mut protected = Vec::new();
         for path in paths {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
             let configured = Self::normalize_operator_path(&path)?;
             let has_dot_segments = path.components().any(|component| {
                 matches!(
@@ -4687,17 +4730,40 @@ impl RunTrustRequirements {
             });
             let resolved = if !has_dot_segments {
                 // Fast path: resolve the deepest existing prefix in one
-                // `canonicalize()` call instead of O(depth^2) prefix walks.
-                // Any existing dangling symlink still fails closed on
-                // `canonicalize()` identically to the component loop.
+                // `canonicalize()` call (reusing already-canonicalized parent
+                // prefixes for non-symlink siblings) instead of repeated
+                // O(depth) `readlink` walks. Any existing dangling symlink
+                // still fails closed on `canonicalize()`.
                 let mut existing = path.clone();
                 let mut missing_tail = Vec::new();
                 loop {
                     match std::fs::symlink_metadata(&existing) {
-                        Ok(_) => {
-                            let mut canon = existing
-                                .canonicalize()
-                                .context("failed resolving operator protected path")?;
+                        Ok(meta) => {
+                            let mut canon = if !meta.file_type().is_symlink()
+                                && let Some(parent) = existing.parent()
+                                && let Some(file_name) = existing.file_name()
+                            {
+                                let canon_parent =
+                                    if let Some(cached) = canonical_parents.get(parent) {
+                                        cached.clone()
+                                    } else {
+                                        let resolved_parent = parent
+                                            .canonicalize()
+                                            .context("failed resolving operator protected path")?;
+                                        canonical_parents
+                                            .insert(parent.to_path_buf(), resolved_parent.clone());
+                                        resolved_parent
+                                    };
+                                let joined = canon_parent.join(file_name);
+                                if meta.is_dir() {
+                                    canonical_parents.insert(existing.clone(), joined.clone());
+                                }
+                                joined
+                            } else {
+                                existing
+                                    .canonicalize()
+                                    .context("failed resolving operator protected path")?
+                            };
                             for segment in missing_tail.into_iter().rev() {
                                 canon.push(segment);
                             }
@@ -4756,6 +4822,15 @@ impl RunTrustRequirements {
         protected.sort();
         protected.dedup();
         self.operator_protected_paths = protected;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Reuse operator protected paths that were just normalized, canonicalized,
+    /// sorted, and deduplicated by `operator_protected_paths_with_defaults`,
+    /// still enforcing `self.validate()`.
+    fn with_pre_resolved_operator_protected_paths(mut self, paths: Vec<PathBuf>) -> Result<Self> {
+        self.operator_protected_paths = paths;
         self.validate()?;
         Ok(self)
     }
@@ -10367,6 +10442,15 @@ impl EngineDispatcher {
         validate_native_frozen_modules(config)?;
         let requirements = RunTrustRequirements::new(&[], &[], false)?
             .with_operator_protected_paths(operator_protected_paths.to_vec())?;
+        Self::apply_operator_source_capture_defaults_with_requirements(config, paths, &requirements)
+    }
+
+    fn apply_operator_source_capture_defaults_with_requirements(
+        config: &mut Config,
+        paths: &RunProjectPaths,
+        requirements: &RunTrustRequirements,
+    ) -> Result<()> {
+        validate_native_frozen_modules(config)?;
         requirements.verify_operator_source_authority(paths)?;
         if config.runtime.frozen_modules == Some(true)
             || !requirements.operator_source_capture_required(paths)?
@@ -10574,10 +10658,12 @@ impl EngineDispatcher {
                 project_paths.project_root(),
                 &working_dir,
             )?;
-            Self::apply_operator_source_capture_defaults(
+            let capture_requirements = RunTrustRequirements::new(&[], &[], false)?
+                .with_pre_resolved_operator_protected_paths(operator_protected_paths.clone())?;
+            Self::apply_operator_source_capture_defaults_with_requirements(
                 &mut execution_config,
                 &project_paths,
-                &operator_protected_paths,
+                &capture_requirements,
             )?;
             validate_native_frozen_modules(&execution_config)?;
 
@@ -10646,7 +10732,7 @@ impl EngineDispatcher {
                 trusted_extension_ids,
                 self.preflight_registry_required,
             )?
-            .with_operator_protected_paths(operator_protected_paths)?;
+            .with_pre_resolved_operator_protected_paths(operator_protected_paths)?;
             if let Some(capture) = &self.preflight_dependency_capture {
                 trust_requirements = trust_requirements.with_dependency_capture(capture.clone())?;
             }
@@ -30765,6 +30851,65 @@ exec "$2" pinned-worker-image"#,
                 hex_tail
                     .chars()
                     .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_under_known_root_matches_canonicalize_for_plain_and_symlink_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sub = root.join("nested");
+        std::fs::create_dir(&sub).unwrap();
+        let file = sub.join("app.js");
+        std::fs::write(&file, "console.log(1);\n").unwrap();
+
+        // Exact root and plain relative paths match canonicalize().
+        assert_eq!(
+            super::canonicalize_under_known_canonical_root(&root, &root).unwrap(),
+            root
+        );
+        assert_eq!(
+            super::canonicalize_under_known_canonical_root(&file, &root).unwrap(),
+            file.canonicalize().unwrap()
+        );
+
+        #[cfg(unix)]
+        {
+            let link = root.join("link_app.js");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(
+                super::canonicalize_under_known_canonical_root(&link, &root).unwrap(),
+                file
+            );
+            let dangling = root.join("dangling.js");
+            std::os::unix::fs::symlink(root.join("missing.js"), &dangling).unwrap();
+            assert!(super::canonicalize_under_known_canonical_root(&dangling, &root).is_err());
+
+            // Sibling & duplicate paths in with_operator_protected_paths share
+            // parent canonicalization while resolving symlink leaves and failing
+            // closed on dangling symlinks.
+            let cfg_a = root.join("franken_node.toml");
+            let dot_dir = root.join(".franken-node");
+            std::fs::write(&cfg_a, "").unwrap();
+            std::fs::create_dir(&dot_dir).unwrap();
+            let req = super::RunTrustRequirements::default()
+                .with_operator_protected_paths(vec![
+                    cfg_a.clone(),
+                    dot_dir.clone(),
+                    cfg_a.clone(),
+                    link.clone(),
+                ])
+                .unwrap();
+            let retained = req.operator_protected_paths();
+            assert!(retained.contains(&cfg_a));
+            assert!(retained.contains(&dot_dir));
+            assert!(retained.contains(&link));
+            assert!(retained.contains(&file));
+            assert!(
+                super::RunTrustRequirements::default()
+                    .with_operator_protected_paths(vec![dangling])
+                    .is_err()
             );
         }
     }

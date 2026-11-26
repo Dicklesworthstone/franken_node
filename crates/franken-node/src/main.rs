@@ -27733,7 +27733,39 @@ fn run_preflight_decision(verdict: &PreFlightVerdict) -> Decision {
     }
 }
 
+fn sanitize_receipt_text_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn bound_receipt_rationale_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = sanitize_receipt_text_segment(value);
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    const SUFFIX: &str = "... (truncated; full verdict committed in output_hash)";
+    if max_bytes <= SUFFIX.len() {
+        return truncate_utf8_to_bytes(&sanitized, max_bytes).to_string();
+    }
+    let prefix = truncate_utf8_to_bytes(&sanitized, max_bytes - SUFFIX.len());
+    format!("{prefix}{SUFFIX}")
+}
+
 fn run_preflight_rationale(verdict: &PreFlightVerdict) -> String {
+    let max_bytes = security::decision_receipt::MAX_RECEIPT_TEXT_FIELD_BYTES;
     match verdict {
         PreFlightVerdict::Passed {
             checked, warnings, ..
@@ -27741,19 +27773,82 @@ fn run_preflight_rationale(verdict: &PreFlightVerdict) -> String {
             format!("trust preflight passed after checking {checked} dependency entries")
         }
         PreFlightVerdict::Passed { warnings, .. } => {
-            format!(
-                "trust preflight passed with {} warning(s): {}",
-                warnings.len(),
-                warnings.join("; ")
-            )
+            let prefix = format!(
+                "trust preflight passed with {} warning(s): ",
+                warnings.len()
+            );
+            let sanitized_warnings: Vec<String> = warnings
+                .iter()
+                .map(|warning| sanitize_receipt_text_segment(warning))
+                .collect();
+            let full = format!("{prefix}{}", sanitized_warnings.join("; "));
+            if full.len() <= max_bytes {
+                return full;
+            }
+            // Real multi-dependency npm projects can emit dozens of preflight
+            // warnings (>4 KiB joined). Keep the signed receipt's `rationale`
+            // within `MAX_RECEIPT_TEXT_FIELD_BYTES` while the complete verdict
+            // remains cryptographically committed in `Receipt::output_hash`.
+            let total = sanitized_warnings.len();
+            let mut out = prefix;
+            let mut included = 0usize;
+            for (idx, warning) in sanitized_warnings.iter().enumerate() {
+                let omitted_after = total.saturating_sub(idx + 1);
+                let tail = if omitted_after > 0 {
+                    format!(
+                        "; ... (+{omitted_after} more warning(s); full verdict committed in output_hash)"
+                    )
+                } else {
+                    String::new()
+                };
+                let sep = if included == 0 { "" } else { "; " };
+                if out.len() + sep.len() + warning.len() + tail.len() <= max_bytes {
+                    out.push_str(sep);
+                    out.push_str(warning);
+                    included += 1;
+                } else {
+                    break;
+                }
+            }
+            let omitted = total.saturating_sub(included);
+            if included == 0 {
+                let tail =
+                    format!("... (+{total} warning(s); full verdict committed in output_hash)");
+                let avail = max_bytes.saturating_sub(out.len() + tail.len() + 2);
+                if avail > 0 {
+                    out.push_str(truncate_utf8_to_bytes(&sanitized_warnings[0], avail));
+                    out.push_str("; ");
+                }
+                out.push_str(&tail);
+                return truncate_utf8_to_bytes(&out, max_bytes).to_string();
+            }
+            if omitted > 0 {
+                let tail = format!(
+                    "; ... (+{omitted} more warning(s); full verdict committed in output_hash)"
+                );
+                out.push_str(&tail);
+            }
+            bound_receipt_rationale_text(&out, max_bytes)
         }
         PreFlightVerdict::Blocked {
             reason, violations, ..
-        } => format!(
-            "{reason}; {} blocking trust violation(s) detected",
-            violations.len()
-        ),
-        PreFlightVerdict::Skipped { reason } => reason.clone(),
+        } => {
+            let suffix = format!(
+                "; {} blocking trust violation(s) detected",
+                violations.len()
+            );
+            let clean_reason = sanitize_receipt_text_segment(reason);
+            let combined = format!("{clean_reason}{suffix}");
+            if combined.len() <= max_bytes {
+                combined
+            } else {
+                const TRUNC: &str = "... (full verdict in output_hash)";
+                let budget = max_bytes.saturating_sub(suffix.len() + TRUNC.len());
+                let head = truncate_utf8_to_bytes(&clean_reason, budget);
+                format!("{head}{TRUNC}{suffix}")
+            }
+        }
+        PreFlightVerdict::Skipped { reason } => bound_receipt_rationale_text(reason, max_bytes),
     }
 }
 
@@ -57337,5 +57432,84 @@ mod time_math_wraparound_tests {
                 .contains("unknown registered swarm scenario"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn run_preflight_rationale_bounds_large_multi_dep_warnings_and_signs_cleanly() {
+        let max_bytes = security::decision_receipt::MAX_RECEIPT_TEXT_FIELD_BYTES;
+        let warnings: Vec<String> = (0..120)
+            .map(|idx| {
+                format!(
+                    "dependency 'npm:pkg-{idx:03}@1.0.{idx}' has no local trust card; run `franken-node trust scan .` (note\twith\nctrl-{idx})"
+                )
+            })
+            .collect();
+        let verdict = PreFlightVerdict::Passed {
+            checked: warnings.len(),
+            warnings,
+            results: Vec::new(),
+        };
+        let rationale = run_preflight_rationale(&verdict);
+        assert!(
+            rationale.len() <= max_bytes,
+            "rationale length {} exceeded MAX_RECEIPT_TEXT_FIELD_BYTES {}",
+            rationale.len(),
+            max_bytes
+        );
+        assert!(!rationale.chars().any(char::is_control));
+        assert!(rationale.contains("120 warning(s)"));
+        assert!(rationale.contains("full verdict committed in output_hash"));
+
+        // Building and signing the full decision receipt must succeed while
+        // keeping MAX_RECEIPT_TEXT_FIELD_BYTES strictly enforced.
+        let receipt = build_run_preflight_receipt(
+            Path::new("app.js"),
+            Path::new("/tmp/multi-dep-project"),
+            Profile::Balanced,
+            None,
+            &verdict,
+        )
+        .expect("large multi-dep preflight verdict must build a valid bounded receipt");
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let signed = sign_receipt(&receipt, &signing_key)
+            .expect("bounded preflight receipt must pass receipt validation and sign");
+        assert!(
+            frankenengine_node::security::decision_receipt::verify_receipt(
+                &signed,
+                &signing_key.verifying_key()
+            )
+            .expect("signed receipt verification must succeed")
+        );
+
+        // Short warning lists preserve exact verbatim formatting.
+        let short_verdict = PreFlightVerdict::Passed {
+            checked: 1,
+            warnings: vec!["single warning".to_string()],
+            results: Vec::new(),
+        };
+        assert_eq!(
+            run_preflight_rationale(&short_verdict),
+            "trust preflight passed with 1 warning(s): single warning"
+        );
+
+        // Overlong multi-byte UTF-8 Skipped and Blocked rationales never panic
+        // on char boundaries and stay strictly within MAX_RECEIPT_TEXT_FIELD_BYTES.
+        let huge_utf8 = "é".repeat(max_bytes);
+        let skipped = PreFlightVerdict::Skipped {
+            reason: huge_utf8.clone(),
+        };
+        let skipped_rationale = run_preflight_rationale(&skipped);
+        assert!(skipped_rationale.len() <= max_bytes);
+        assert!(!skipped_rationale.chars().any(char::is_control));
+
+        let blocked = PreFlightVerdict::Blocked {
+            reason: huge_utf8,
+            warnings: Vec::new(),
+            violations: Vec::new(),
+            results: Vec::new(),
+        };
+        let blocked_rationale = run_preflight_rationale(&blocked);
+        assert!(blocked_rationale.len() <= max_bytes);
+        assert!(!blocked_rationale.chars().any(char::is_control));
     }
 }

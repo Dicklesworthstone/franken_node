@@ -104,7 +104,7 @@ pub const DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION: &str = "decision-receipt-
 /// Receipts older than this are rejected to prevent replay attacks via clock skew.
 pub const MAX_RECEIPT_AGE_SECS: u64 = 3600; // 1 hour
 const MAX_RECEIPT_ID_BYTES: usize = 128;
-const MAX_RECEIPT_TEXT_FIELD_BYTES: usize = 4096;
+pub(crate) const MAX_RECEIPT_TEXT_FIELD_BYTES: usize = 4096;
 const MAX_RECEIPT_REFS: usize = 256;
 const MAX_RECEIPT_REF_BYTES: usize = 512;
 
