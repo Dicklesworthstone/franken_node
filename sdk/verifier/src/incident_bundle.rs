@@ -301,7 +301,17 @@ struct UnambiguousJson(Value);
 /// Rejects inputs larger than 64 MiB, invalid UTF-8/JSON, duplicate members
 /// (including escaped aliases), excessive nesting and trailing input.
 pub fn decode_evidence_json(bytes: &[u8]) -> Result<Value, IncidentBundleError> {
-    if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
+    decode_evidence_json_with_limit(bytes, MAX_INCIDENT_BUNDLE_BYTES)
+}
+
+/// Keep the same duplicate, recursion, UTF-8 and trailing-input checks for
+/// evidence formats with their own explicit transport bound. The public
+/// incident decoder retains its 64 MiB contract.
+pub(crate) fn decode_evidence_json_with_limit(
+    bytes: &[u8],
+    limit: usize,
+) -> Result<Value, IncidentBundleError> {
+    if bytes.len() > limit {
         return Err(IncidentBundleError::TooLarge { bytes: bytes.len() });
     }
     let UnambiguousJson(value) = serde_json::from_slice(bytes)
@@ -918,5 +928,32 @@ mod tests {
         ));
         let whitespace = format!("{CLI_BUNDLE}\n\t ");
         assert!(verify_incident_bundle(whitespace.as_bytes(), &trusted_key()).is_ok());
+    }
+
+    #[test]
+    fn explicit_transport_bound_preserves_unambiguous_json_checks() {
+        let limit = 1024;
+        let valid = br#"{"max":18446744073709551615} "#;
+        assert_eq!(
+            decode_evidence_json_with_limit(valid, limit).unwrap()["max"].as_u64(),
+            Some(u64::MAX),
+        );
+        assert!(matches!(
+            decode_evidence_json_with_limit(valid, valid.len() - 1),
+            Err(IncidentBundleError::TooLarge { .. }),
+        ));
+        let nested = format!("{}0{}", "[".repeat(256), "]".repeat(256));
+        for invalid in [
+            br#"{"x":1,"x":1}"#.as_slice(),
+            br#"{"nested":{"x":1,"\u0078":1}}"#.as_slice(),
+            b"{\"x\":\"\xff\"}".as_slice(),
+            b"{} {}".as_slice(),
+            nested.as_bytes(),
+        ] {
+            assert!(matches!(
+                decode_evidence_json_with_limit(invalid, limit),
+                Err(IncidentBundleError::Json(_)),
+            ));
+        }
     }
 }
