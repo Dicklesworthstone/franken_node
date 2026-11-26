@@ -38,19 +38,45 @@ fn bounded_reader_limit(max_bytes: u64) -> u64 {
     max_bytes.saturating_add(1)
 }
 
-/// Read file with size limits to prevent DoS via parser bombs.
-/// Returns file content as String if within size limit, error otherwise.
-pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
-    use std::fs::File;
-    use std::io::Read;
-
-    // Open file and check size atomically to prevent TOCTOU file swapping
-    let file = File::open(path)?;
+/// Validate the opened object rather than a pathname that can change before
+/// the read. On Unix, nonblocking open also avoids waiting for a FIFO writer.
+/// These helpers accept symlinks to regular files; authority-sensitive callers
+/// must separately enforce their path and symlink policies.
+fn open_bounded_regular_file(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // A byte cap alone cannot bound a blocking FIFO open. These flags have
+        // no effect on regular files; the descriptor check below refuses pipes
+        // and devices before any content is consumed.
+        let flags = rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOCTTY;
+        options.custom_flags(flags.bits() as i32);
+    }
+    let file = options.open(path)?;
     let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bounded input must be a regular file",
+        ));
+    }
     if metadata.len() > max_bytes {
         return Err(file_too_large_error(metadata.len(), max_bytes));
     }
+    Ok(file)
+}
 
+/// Read a regular file with size limits to prevent DoS via parser bombs.
+/// Returns file content as String if within size limit, error otherwise.
+pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let file = open_bounded_regular_file(path, max_bytes)?;
     let mut content = String::new();
     let mut limited = file.take(bounded_reader_limit(max_bytes));
     limited.read_to_string(&mut content)?;
@@ -61,19 +87,12 @@ pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io
     Ok(content)
 }
 
-/// Read file with size limits to prevent DoS via parser bombs.
+/// Read a regular file with size limits to prevent DoS via parser bombs.
 /// Returns file content as Vec<u8> if within size limit, error otherwise.
 pub fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-    use std::fs::File;
     use std::io::Read;
 
-    // Open file and check size atomically to prevent TOCTOU file swapping
-    let file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.len() > max_bytes {
-        return Err(file_too_large_error(metadata.len(), max_bytes));
-    }
-
+    let file = open_bounded_regular_file(path, max_bytes)?;
     let mut content = Vec::new();
     let mut limited = file.take(bounded_reader_limit(max_bytes));
     limited.read_to_end(&mut content)?;
@@ -1497,6 +1516,106 @@ mod tests {
         // Test with u64::MAX limit (should not overflow)
         let result = bounded_read_to_string(empty_file.path(), u64::MAX);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn bounded_reads_preserve_binary_contents_and_reject_directories() {
+        let directory = tempfile::tempdir().expect("bounded-read fixtures");
+        let path = directory.path().join("binary.bin");
+        let bytes = [0, 0xff, b'x', 0];
+        std::fs::write(&path, bytes).expect("binary fixture");
+        assert_eq!(bounded_read(&path, 4).unwrap(), bytes);
+        assert_eq!(
+            bounded_read(&path, 3).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            super::bounded_read_to_string(&path, 4).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+            "the text reader must still reject invalid UTF-8"
+        );
+        assert!(bounded_read(directory.path(), 1024).is_err());
+        assert!(super::bounded_read_to_string(directory.path(), 1024).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reads_preserve_symlinks_to_regular_files() {
+        let directory = tempfile::tempdir().expect("bounded-read fixtures");
+        let target = directory.path().join("regular.txt");
+        let link = directory.path().join("operator-selected.txt");
+        let content = "operator-selected regular file\n";
+        std::fs::write(&target, content).unwrap();
+        std::os::unix::fs::symlink("regular.txt", &link).unwrap();
+        assert_eq!(
+            bounded_read(&link, content.len() as u64).unwrap(),
+            content.as_bytes()
+        );
+        assert_eq!(
+            super::bounded_read_to_string(&link, content.len() as u64).unwrap(),
+            content
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reads_refuse_devices_before_reading() {
+        for name in ["/dev/null", "/dev/zero"] {
+            let path = std::path::Path::new(name);
+            for result in [
+                bounded_read(path, 0).map(|_| ()),
+                super::bounded_read_to_string(path, 0).map(|_| ()),
+            ] {
+                let error = result.expect_err("device input is not a regular file");
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("regular file"), "{error}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reads_refuse_writerless_fifos_without_blocking() {
+        const PROBE_ROOT: &str = "FRANKEN_NODE_TEST_BOUNDED_INPUT_FIFO_ROOT";
+        const PROBE_DONE: &str = "bounded-reader-fifo-probe-complete";
+        if let Some(root) = std::env::var_os(PROBE_ROOT) {
+            let root = std::path::PathBuf::from(root);
+            for name in ["input.fifo", "linked.fifo"] {
+                let path = root.join(name);
+                for result in [
+                    bounded_read(&path, 1024).map(|_| ()),
+                    super::bounded_read_to_string(&path, 1024).map(|_| ()),
+                ] {
+                    let error = result.expect_err("FIFO must refuse without a writer");
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                    assert!(error.to_string().contains("regular file"), "{error}");
+                }
+            }
+            println!("{PROBE_DONE}");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("FIFO fixtures");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            directory.path().join("input.fifo"),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .expect("create FIFO with no writer");
+        std::os::unix::fs::symlink("input.fifo", directory.path().join("linked.fifo"))
+            .expect("link to FIFO");
+        // Isolate the blocking regression: the previous implementation must
+        // fail on timeout instead of hanging the entire test runner.
+        let assertion = assert_cmd::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::bounded_reads_refuse_writerless_fifos_without_blocking",
+                "--nocapture",
+            ])
+            .env(PROBE_ROOT, directory.path())
+            .timeout(std::time::Duration::from_secs(5))
+            .assert()
+            .success();
+        assert!(String::from_utf8_lossy(&assertion.get_output().stdout).contains(PROBE_DONE));
     }
 
     #[test]
