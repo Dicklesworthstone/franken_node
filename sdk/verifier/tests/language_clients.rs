@@ -105,7 +105,8 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"))
         .arg(sdk.join("tests/fixtures/module_source_capsules.json"))
         .arg(sdk.join("tests/fixtures/fleet_quiescence_observations.json"))
-        .arg(sdk.join("tests/fixtures/fleet_epoch_commit.json"));
+        .arg(sdk.join("tests/fixtures/fleet_epoch_commit.json"))
+        .arg(sdk.join("tests/fixtures/native_session_cold_archives.json"));
     checked(&mut vectors);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
@@ -145,6 +146,14 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
     assert!(
         cases.iter().filter(|case| case["format"] == "counterfactual-promotion").count() >= 30,
         "independent signed promotion and nested contract refusal matrix must execute",
+    );
+    assert!(
+        cases
+            .iter()
+            .filter(|case| case["format"] == "native-session-cold-archive")
+            .count()
+            >= 22,
+        "independent archive signatures, canonical leaves, semantic refusals and population pins must execute",
     );
     for case in &cases {
         let mut verifier = Command::new(root.join("verifier"));
@@ -187,6 +196,7 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             ("graph_report_path", "--graph-report"),
             ("expected_session_nonce", "--expected-session-nonce"),
             ("expected_admission_sha256", "--expected-admission-sha256"),
+            ("expected_archive_root_sha256", "--expected-archive-root-sha256"),
         ] {
             if let Some(value) = case[field].as_str() {
                 verifier.args([option, value]);
@@ -218,6 +228,32 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             if case["format"] == "ltv-evidence" {
                 assert_eq!(response["scope"], "authenticated_ltv_anteriority");
                 assert_eq!(response["facts"], case["ltv_facts"]);
+            }
+            if case["format"] == "native-session-cold-archive" {
+                assert_eq!(
+                    response["scope"],
+                    "authenticated_archived_supervisor_observations"
+                );
+                assert_eq!(response["facts"], case["archive_facts"]);
+                assert_eq!(response["facts"]["archive_sha256"], case["artifact_sha256"]);
+                for flag in [
+                    "original_receipt_signatures_verified",
+                    "replay_certified",
+                    "quiescence_certified",
+                    "historical_completeness",
+                ] {
+                    assert_eq!(response["facts"][flag], false, "archive cannot promote {flag}");
+                }
+                if let Some(expected_root) = case["expected_archive_root_sha256"].as_str() {
+                    assert_eq!(response["facts"]["merkle_root_sha256"], expected_root);
+                }
+            }
+            if let Some(graph) = case.get("incident_graph_report") {
+                assert_eq!(response["facts"]["graph_report"], *graph);
+                assert_eq!(
+                    response["facts"]["graph_report"]["graph_semantics_reconstructed"],
+                    false
+                );
             }
             if case["format"] == "fleet-quiescence-observations" {
                 assert_eq!(
@@ -399,6 +435,11 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 "--dev",
                 "/dev",
                 "--tmpfs",
+                "/tmp",
+                // A caller's TMPDIR may name a host directory hidden by this
+                // private mount. All consumers must use the isolated /tmp.
+                "--setenv",
+                "TMPDIR",
                 "/tmp",
             ]);
             if Path::new("/lib64").exists() {

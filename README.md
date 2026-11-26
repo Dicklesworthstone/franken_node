@@ -4709,7 +4709,8 @@ JavaScript. Results bind `artifact_sha256` to those exact input bytes. The
 versioned response is `franken-verifier-cli/v1`; errors throw `VerifierError`
 with a stable `code` and optional process exit/status diagnostics. The CLI
 exits 0 only for authenticated evidence, 1 for refusal and 2 for usage/I/O
-errors. Inputs are limited to 64 MiB, JSON nesting uses the Rust decoder's
+errors. Inputs default to a 64 MiB ceiling, with smaller format-specific limits;
+native-session forensics v3 supports up to 96 MiB. JSON nesting uses the Rust decoder's
 128-level limit, responses are bounded to 64 KiB, and callers can set a
 timeout up to 120 seconds (default 10 seconds). The executable is trusted
 code, not a sandbox for running arbitrary verifier programs.
@@ -4717,12 +4718,27 @@ code, not a sandbox for running arbitrary verifier programs.
 | Explicit format | Authenticated scope | Signature input |
 |---|---|---|
 | `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
+| `native-session-forensics` | `authenticated_supervisor_observations`: original admission, retained journal, optional outcome and v3 source capsule, preserving pending/interrupted states | Original product-root signatures under an independently enrolled key; optional retained session/admission identity pins |
+| `native-session-cold-archive` | `authenticated_archived_supervisor_observations`: signed compaction-time observations and independently recomputed ordered Merkle population | Product-root archive signature; optional retained population root via `expected_archive_root_sha256`, `expectedArchiveRootSha256` or `--expected-archive-root-sha256` |
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
 | `signed-session` | `authenticated_verification_session`: a sealed verification session's ordered steps and recorded verdict | Embedded Ed25519 signature checked under the caller's independent verifier key |
 | `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
 | `publisher-source` | `authenticated_publisher_source_content`: publisher-signed registration, source-capsule byte integrity, and declared execution ceilings | Required detached registration `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI), checked under the caller's publisher key |
 | `publisher-source-trust` | `authenticated_publisher_source_trust`: authenticated source, fresh signed revocations, and optional signed version lineage | Publisher signature, independent revocation/provenance authorities, evaluation time, and maximum revocation age |
+
+For incident bundles with retained native sources, Python `graph_report`,
+JavaScript/TypeScript `graphReport`, and CLI `--graph-report` independently bind
+a source-graph report to the authenticated capture. The clients also pin the
+exact caller-read report bytes. This preserves the selected origin scope and
+does not certify resolver semantics or guest execution. See
+[incident graph verification](sdk/verifier/RUN_ORIGIN.md#independently-recompute-an-incidents-source-graph).
+
+The Rust API and CLI also verify graph reports for pending and interrupted
+native-session exports. Cold archives are supported across Rust, CLI and all
+three language clients, with explicit bounds and false original-receipt,
+replay, quiescence and historical-completeness claims. See
+[native-session and cold-archive verification](sdk/verifier/NATIVE_SESSION_FORENSICS.md).
 
 To authenticate a sealed session exported by
 `VerifierSdk::export_signed_session`, supply the verifier's independently

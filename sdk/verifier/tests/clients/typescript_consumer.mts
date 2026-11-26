@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts, CounterfactualPromotionFacts, SourceGraphCommitment } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, NativeSessionColdArchiveFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts, CounterfactualPromotionFacts, SourceGraphCommitment } from "./franken_verifier.mjs";
 
 type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
@@ -13,6 +13,7 @@ type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclud
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
   expected_session_nonce?: string; expected_admission_sha256?: string; graph_report_path?: string;
+  expected_archive_root_sha256?: string; archive_facts?: NativeSessionColdArchiveFacts;
   incident_graph_report?: SourceGraphCommitment;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
@@ -370,6 +371,39 @@ for (const observation of cases.filter((item) => item.format === "native-session
   }
 }
 if (nativePositive === 0 || nativeNegative === 0) throw new Error("native-session matrix is missing");
+let archivePositive = 0;
+let archiveNegative = 0;
+for (const archive of cases.filter((item) => item.format === "native-session-cold-archive")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(archive.input_hex, "hex"), archive.anchor, {
+      verifier: resolve("verifier"), format: "native-session-cold-archive",
+      expectedArchiveRootSha256: archive.expected_archive_root_sha256,
+    });
+    if (archive.expected !== "verified" || verified.format !== "native-session-cold-archive"
+        || verified.scope !== "authenticated_archived_supervisor_observations") throw new Error("archive scope mismatch");
+    const facts: NativeSessionColdArchiveFacts = verified.facts;
+    assert.deepEqual(facts, archive.archive_facts, archive.name);
+    assert.equal(facts.archive_sha256, archive.artifact_sha256);
+    const originals: false = facts.original_receipt_signatures_verified;
+    const replay: false = facts.replay_certified;
+    const cleanup: false = facts.quiescence_certified;
+    const history: false = facts.historical_completeness;
+    assert.equal(originals || replay || cleanup || history, false);
+    const population: number = facts.session_count;
+    const sourceBound: number = facts.source_bound_sessions;
+    assert(population >= 1 && population <= 16_384 && sourceBound >= 0 && sourceBound <= population);
+    if (archive.expected_archive_root_sha256 !== undefined) {
+      assert.equal(facts.merkle_root_sha256, archive.expected_archive_root_sha256);
+    }
+    assert.equal(JSON.stringify(facts).includes("PRIVATE-"), false);
+    archivePositive += 1;
+  } catch (error: unknown) {
+    if (archive.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== archive.expected) throw error;
+    archiveNegative += 1;
+  }
+}
+assert(archivePositive === 7 && archiveNegative === 15, "archive population and authority matrix must execute");
 let sessionPositive = 0;
 let sessionNegative = 0;
 const sessionVerdicts = new Set<string>();
@@ -462,12 +496,13 @@ for (const candidate of allCases.filter((item): item is EpochCase => item.format
   }
 }
 assert(epochPositive >= 6 && epochNegative >= 30, "independent epoch commit and authority controls must execute");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + graphPositive + incidentGraphPositive + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
-  negative: 2 + graphNegative + incidentGraphNegative + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + graphPositive + incidentGraphPositive + trustPositive + nativePositive + archivePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
+  negative: 2 + graphNegative + incidentGraphNegative + trustNegative + nativeNegative + archiveNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
   publisher_graph_cases: graphPositive + graphNegative,
   incident_graph_cases: incidentGraphPositive + incidentGraphNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
+  cold_archive_cases: archivePositive + archiveNegative,
   ltv_policy_cases: ltvPositive + ltvNegative,
   fleet_observation_cases: fleetPositive + fleetNegative,
   fleet_epoch_commit_cases: epochPositive + epochNegative,

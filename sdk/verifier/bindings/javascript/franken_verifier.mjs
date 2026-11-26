@@ -8,6 +8,7 @@ import { constants as fsConstants } from "node:fs";
 export const PROTOCOL = "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 export const MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024;
+export const MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024;
 export const MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024;
@@ -16,6 +17,7 @@ const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
   "native-session-forensics": "authenticated_supervisor_observations",
+  "native-session-cold-archive": "authenticated_archived_supervisor_observations",
   capsule: "authenticated_capsule_content",
   "signed-bundle": "authenticated_sdk_replay_bundle",
   "signed-session": "authenticated_verification_session",
@@ -338,6 +340,22 @@ function nativeJournalValid(journal, facts) {
     && journal.returned_provider_calls <= journal.admitted_provider_calls
     && journal.indeterminate_provider_calls === journal.admitted_provider_calls - journal.returned_provider_calls
     && journal.indeterminate_provider_calls <= 1;
+}
+
+function nativeArchiveValid(facts, anchor) {
+  return keys(facts, ["schema_version", "scope", "archive_sha256", "signer_public_key_hex", "product_root_key_id",
+    "archived_at", "session_count", "source_bound_sessions", "merkle_root_sha256",
+    "original_receipt_signatures_verified", "replay_certified", "quiescence_certified", "historical_completeness"])
+    && facts.schema_version === "franken-node/native-session-cold-archive/v1"
+    && facts.scope === "authenticated_archived_supervisor_observations"
+    && facts.signer_public_key_hex === anchor && facts.product_root_key_id === `ed25519:${anchor}`
+    && ["archive_sha256", "merkle_root_sha256"].every((key) => typeof facts[key] === "string"
+      && facts[key].length === 64 && /^[0-9a-f]{64}$/u.test(facts[key]))
+    && instantNs(facts.archived_at) !== null
+    && count(facts.session_count) && facts.session_count >= 1 && facts.session_count <= 16_384
+    && count(facts.source_bound_sessions) && facts.source_bound_sessions <= facts.session_count
+    && ["original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
+      "historical_completeness"].every((key) => facts[key] === false);
 }
 
 function nativeSessionValid(facts, anchor) {
@@ -663,6 +681,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   revocationAnchor, provenanceAnchor, evaluationTime, maxAge, incidentAnchor, expectedBaseline,
   graphReportRequested = false) {
   if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
+  if (format === "native-session-cold-archive") return nativeArchiveValid(facts, anchor);
   if (format === "publisher-source-trust") {
     return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge,
       graphReportRequested);
@@ -815,6 +834,13 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * Publisher identity pins come from caller policy. The exact manifest pin is
  * required when supplemental raw source-artifact or graph commitments are used;
  * none is inferred from the candidate. A graph pin does not reconstruct a graph.
+ * Native-session cold archives require the independently enrolled product root
+ * as the primary key. They authenticate compaction-time observations, without
+ * original receipt signatures, replay, quiescence, or historical completeness.
+ * expectedArchiveRootSha256 optionally pins the ordered session population to
+ * an independently retained lowercase 64-digit SHA-256, without a prefix. It
+ * does not fix archive metadata or prove freshness; archive_sha256 identifies
+ * the exact supplied bytes.
  * Fleet observations require a null single-key anchor and trustedFleetPolicy,
  * a separately provisioned file with enrolled roots, population, action context
  * and evaluation time. They do not certify an epoch commit or current quiescence.
@@ -829,11 +855,12 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     trustedFleetPolicy, trustedSessionPolicyPath, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash, graphReport,
-    expectedSessionNonce, expectedAdmissionSha256,
+    expectedSessionNonce, expectedAdmissionSha256, expectedArchiveRootSha256,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
   const inputLimit = format === "native-session-forensics" ? MAX_NATIVE_SESSION_INPUT_BYTES
+    : format === "native-session-cold-archive" ? MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES
     : ["fleet-quiescence-observations", "fleet-epoch-commit"].includes(format) ? MAX_FLEET_QUIESCENCE_INPUT_BYTES : MAX_INPUT_BYTES;
   if (data.byteLength > inputLimit) throw new VerifierError("INPUT_TOO_LARGE", `evidence exceeds ${inputLimit / (1024 * 1024)} MiB`);
   // Retain the invocation's bytes before policy I/O yields to the caller,
@@ -918,6 +945,11 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       throw new VerifierError("EXPECTED_NATIVE_IDENTITY_INVALID", "native-session identity pins require a canonical session nonce and admission SHA-256");
     }
   }
+  if (expectedArchiveRootSha256 !== undefined
+      && (format !== "native-session-cold-archive" || typeof expectedArchiveRootSha256 !== "string"
+        || expectedArchiveRootSha256.length !== 64 || !/^[0-9a-f]{64}$/u.test(expectedArchiveRootSha256))) {
+    throw new VerifierError("EXPECTED_ARCHIVE_ROOT_INVALID", "an archive root pin requires native-session-cold-archive and a lowercase SHA-256");
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const anchor = trustedPublicKeyHex?.toLowerCase();
@@ -946,6 +978,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   if (graphReport !== undefined) args.push("--graph-report", graphReport);
   if (expectedSessionNonce !== undefined) args.push("--expected-session-nonce", expectedSessionNonce,
     "--expected-admission-sha256", expectedAdmissionSha256);
+  if (expectedArchiveRootSha256 !== undefined) args.push("--expected-archive-root-sha256", expectedArchiveRootSha256);
   if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"].includes(format)) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
@@ -1003,6 +1036,14 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
             || (expectedSourceArtifactSha256 !== undefined && source.artifact_sha256 !== expectedSourceArtifactSha256)
             || (expectedGraphInputHash !== undefined && source.capsule.graph_input_hash !== expectedGraphInputHash)) {
           return reject(new VerifierError("EXPECTED_IDENTITY_MISMATCH", "authenticated publisher source does not match the expected identity"));
+        }
+      }
+      if (format === "native-session-cold-archive") {
+        if (result.facts.archive_sha256 !== result.artifact_sha256) {
+          return reject(new VerifierError("PROTOCOL_INVALID", "archive facts do not match the supplied bytes"));
+        }
+        if (expectedArchiveRootSha256 !== undefined && result.facts.merkle_root_sha256 !== expectedArchiveRootSha256) {
+          return reject(new VerifierError("EXPECTED_ARCHIVE_ROOT_MISMATCH", "authenticated native archive does not match the expected root"));
         }
       }
       if (expectedSessionNonce !== undefined

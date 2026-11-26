@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "counterfactual-incident" | "counterfactual-promotion" | "ltv-evidence" | "fleet-quiescence-observations" | "fleet-epoch-commit";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "native-session-cold-archive" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "counterfactual-incident" | "counterfactual-promotion" | "ltv-evidence" | "fleet-quiescence-observations" | "fleet-epoch-commit";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -29,6 +29,8 @@ export interface VerifierOptions {
   expectedSessionNonce?: string;
   /** Original receipt's domain-separated admission commitment: 64 lowercase hex digits, without sha256:. Requires expectedSessionNonce. Does not prove outcome freshness. */
   expectedAdmissionSha256?: string;
+  /** Independently retained ordered population root: 64 lowercase hex digits, without sha256:. Cold archives only; does not pin metadata or establish freshness. */
+  expectedArchiveRootSha256?: string;
   /** Required detached signature for signed-bundle, publisher-source formats, and counterfactual-receipt. */
   signatureHex?: string;
   timeoutMs?: number;
@@ -157,6 +159,22 @@ export interface NativeSessionEffectJournalFacts {
   indeterminate_provider_calls: number;
   head_record_sha256: string;
   trailing_partial_record: boolean;
+  replay_certified: false;
+  quiescence_certified: false;
+  historical_completeness: false;
+}
+/** Authenticated compaction observations; original receipts and execution are not certified. */
+export interface NativeSessionColdArchiveFacts {
+  schema_version: "franken-node/native-session-cold-archive/v1";
+  scope: "authenticated_archived_supervisor_observations";
+  archive_sha256: string;
+  signer_public_key_hex: string;
+  product_root_key_id: string;
+  archived_at: string;
+  session_count: number;
+  source_bound_sessions: number;
+  merkle_root_sha256: string;
+  original_receipt_signatures_verified: false;
   replay_certified: false;
   quiescence_certified: false;
   historical_completeness: false;
@@ -401,6 +419,7 @@ export type Verification = {
   | { format: "incident-bundle"; scope: "authenticated_run_incident"; facts: RunIncidentFacts }
   | { format: "incident-bundle"; scope: "authenticated_runtime_incident"; facts: RuntimeIncidentFacts }
   | { format: "native-session-forensics"; scope: "authenticated_supervisor_observations"; facts: NativeSessionForensicsFacts }
+  | { format: "native-session-cold-archive"; scope: "authenticated_archived_supervisor_observations"; facts: NativeSessionColdArchiveFacts }
   | { format: "fleet-quiescence-observations"; scope: "authenticated_fleet_supervisor_observations"; facts: FleetQuiescenceFacts }
   | { format: "fleet-epoch-commit"; scope: "authenticated_fleet_epoch_commit"; facts: FleetEpochCommitFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
@@ -424,6 +443,7 @@ export const PROTOCOL: "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES: number;
 /** Native-session transport limit; other formats retain MAX_INPUT_BYTES. */
 export const MAX_NATIVE_SESSION_INPUT_BYTES: number;
+export const MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
 export const MAX_SIGNED_SESSION_POLICY_BYTES: number;

@@ -9,7 +9,7 @@ import tempfile
 import time
 
 from franken_verifier import (
-    MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES,
+    MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES,
     VerifierError, verify_artifact,
 )
 
@@ -107,10 +107,11 @@ for case in cases:
                                  expected_graph_input_hash=case.get("expected_graph_input_hash"),
                                  graph_report=Path(case["graph_report_path"]) if "graph_report_path" in case else None,
                                  expected_session_nonce=case.get("expected_session_nonce"),
-                                 expected_admission_sha256=case.get("expected_admission_sha256"))
+                                 expected_admission_sha256=case.get("expected_admission_sha256"),
+                                 expected_archive_root_sha256=case.get("expected_archive_root_sha256"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
-        if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"):
+        if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics", "native-session-cold-archive", "signed-session"):
             assert "PRIVATE-" not in str(error)
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
     else:
@@ -143,6 +144,15 @@ for case in cases:
             assert result["facts"]["quiescence_certified"] is False
             assert result["facts"]["historical_completeness"] is False
             assert isinstance(result["facts"]["security_epoch"], str)
+        elif case["format"] == "native-session-cold-archive":
+            assert result["scope"] == "authenticated_archived_supervisor_observations"
+            assert result["facts"] == case["archive_facts"], case["name"]
+            assert result["facts"]["archive_sha256"] == result["artifact_sha256"]
+            assert all(result["facts"][field] is False for field in (
+                "original_receipt_signatures_verified", "replay_certified",
+                "quiescence_certified", "historical_completeness",
+            ))
+            assert "PRIVATE-" not in json.dumps(result["facts"])
         elif case["format"] == "resolution-receipt":
             assert result["scope"] == "authenticated_resolution_decision"
             assert result["facts"]["decision"] == case["decision"]
@@ -618,6 +628,99 @@ for field, value in (("expected_session_nonce", "0199abcd-1234-7000-8000-1234567
         raise AssertionError("executable ignored " + field)
     print(json.dumps({"case": "native_ignored_" + field, "result": "EXPECTED_NATIVE_IDENTITY_MISMATCH"}), flush=True)
 
+# BEGIN cold archive protocol controls (fake child; no signature claims).
+archive_client_cases = 0
+archive_protocol_cases = 0
+archive_root_pin = "a" * 64
+for pin in ("", False, 7, [], {}, b"a" * 64, "a" * 63, "A" * 64, "sha256:" + "a" * 64, "a" * 64 + "\n"):
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                        format="native-session-cold-archive", expected_archive_root_sha256=pin)
+    except VerifierError as error:
+        assert error.code == "EXPECTED_ARCHIVE_ROOT_INVALID" and error.exit_code is None
+    else:
+        raise AssertionError("invalid archive root pin reached the child")
+    archive_client_cases += 1
+for format in ("incident-bundle", "native-session-forensics", "capsule", "signed-session"):
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                        format=format, expected_archive_root_sha256=archive_root_pin)
+    except VerifierError as error:
+        assert error.code == "EXPECTED_ARCHIVE_ROOT_INVALID" and error.exit_code is None
+    else:
+        raise AssertionError("archive pin accepted for " + format)
+    archive_client_cases += 1
+for untrusted in (None, "", "aa", False):
+    try:
+        verify_artifact(b"{}", untrusted, verifier=root / "does-not-exist", format="native-session-cold-archive")
+    except VerifierError as error:
+        assert error.code == "ANCHOR_INVALID" and error.exit_code is None
+    else:
+        raise AssertionError("archive evidence selected its own product root")
+    archive_client_cases += 1
+for options, expected in (
+    ({"graph_report": "PRIVATE-missing-report"}, "INPUT_INVALID"),
+    ({"signature_hex": "00" * 64}, "INPUT_INVALID"),
+    ({"expected_session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+      "expected_admission_sha256": "a" * 64}, "EXPECTED_NATIVE_IDENTITY_INVALID"),
+    ({"expected_manifest_sha256": "sha256:" + "a" * 64}, "EXPECTED_IDENTITY_INVALID"),
+):
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                        format="native-session-cold-archive", **options)
+    except VerifierError as error:
+        assert error.code == expected and error.exit_code is None and "PRIVATE-" not in str(error)
+    else:
+        raise AssertionError("unrelated evidence option accepted for an archive")
+    archive_client_cases += 1
+archive_controls = [
+    "wrong_schema", "wrong_scope", "wrong_nested_scope", "wrong_signer", "wrong_root_key", "substituted_bytes",
+    "bad_archive_digest", "uppercase_merkle", "prefixed_merkle", "newline_merkle", "short_merkle",
+    "invalid_time", "empty_population", "excess_population", "boolean_population", "fractional_population",
+    "string_population", "excess_sources", "negative_sources", "boolean_sources", "original_signatures_claim",
+    "replay_claim", "quiescence_claim", "history_claim", "numeric_proof_flag", "missing_root",
+    "missing_proof_flag", "unknown_field",
+]
+for control in archive_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": "archive_" + control}).encode(), cases[0]["anchor"],
+                        verifier=root / "fake_verifier", format="native-session-cold-archive",
+                        expected_archive_root_sha256=archive_root_pin)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID" and "PRIVATE-" not in str(error), (control, error.code)
+    else:
+        raise AssertionError("invalid archive facts accepted: " + control)
+    archive_protocol_cases += 1
+for control in ("valid", "maximum_population", "forwarded"):
+    data = json.dumps({"protocol_control": "archive_" + control}).encode()
+    options = {"expected_archive_root_sha256": archive_root_pin} if control == "forwarded" else {}
+    verified = verify_artifact(data, cases[0]["anchor"].upper(), verifier=root / "fake_verifier",
+                               format="native-session-cold-archive", **options)
+    assert verified["scope"] == "authenticated_archived_supervisor_observations"
+    assert verified["facts"]["archive_sha256"] == hashlib.sha256(data).hexdigest()
+    assert verified["facts"]["original_receipt_signatures_verified"] is False
+    assert verified["facts"]["session_count"] == (16_384 if control == "maximum_population" else 3)
+    archive_protocol_cases += 1
+try:
+    verify_artifact(json.dumps({"protocol_control": "archive_ignored_pin"}).encode(), cases[0]["anchor"],
+                    verifier=root / "fake_verifier", format="native-session-cold-archive",
+                    expected_archive_root_sha256="b" * 64)
+except VerifierError as error:
+    assert error.code == "EXPECTED_ARCHIVE_ROOT_MISMATCH" and "b" * 64 not in str(error)
+else:
+    raise AssertionError("child ignored the archive population pin")
+archive_protocol_cases += 1
+assert MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES == 64 * 1024 * 1024
+try:
+    verify_artifact(bytes(MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES + 1), cases[0]["anchor"],
+                    verifier=root / "does-not-exist", format="native-session-cold-archive")
+except VerifierError as error:
+    assert error.code == "INPUT_TOO_LARGE" and error.exit_code is None
+else:
+    raise AssertionError("oversized archive reached the child")
+archive_client_cases += 1
+# END cold archive protocol controls.
+
 # Exercise the exact transport boundary without launching a subprocess or
 # constructing a large JSON/base64 artifact. Other formats retain their cap.
 assert MAX_NATIVE_SESSION_INPUT_BYTES == 96 * 1024 * 1024
@@ -1038,9 +1141,9 @@ for mode in ltv_controls:
         raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
                   "transport_cases": check_bounded_transport(),
-                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases + graph_client_cases + len(promotion_inputs),
+                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases + graph_client_cases + archive_client_cases + len(promotion_inputs),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)
                   + len(publisher_trust_controls) + len(publisher_trust_positives) + identity_protocol_cases + graph_protocol_cases
                   + len(counterfactual_controls) + len(ltv_controls) + len(promotion_controls) + 2
-                  + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)
+                  + len(native_controls) + len(native_positives) + archive_protocol_cases + 1, "passed": True}), flush=True)

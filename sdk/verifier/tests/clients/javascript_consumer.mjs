@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
+import { MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
 
 for (const path of JSON.parse(process.env.ABSENT_CHECKOUTS ?? "[]")) assert.equal(existsSync(path), false, `product checkout visible: ${path}`);
 assert.equal(existsSync("Cargo.toml"), false);
@@ -28,7 +28,8 @@ for (const test of cases) {
       expectedGraphInputHash: test.expected_graph_input_hash,
       graphReport: test.graph_report_path,
       expectedSessionNonce: test.expected_session_nonce,
-      expectedAdmissionSha256: test.expected_admission_sha256 });
+      expectedAdmissionSha256: test.expected_admission_sha256,
+      expectedArchiveRootSha256: test.expected_archive_root_sha256 });
     assert.equal(test.expected, "verified", test.name);
     assert.equal(result.artifact_sha256, createHash("sha256").update(data).digest("hex"));
     if (test.format === "incident-bundle") {
@@ -60,6 +61,13 @@ for (const test of cases) {
       assert.equal(result.facts.quiescence_certified, false);
       assert.equal(result.facts.historical_completeness, false);
       assert.equal(typeof result.facts.security_epoch, "string");
+    } else if (test.format === "native-session-cold-archive") {
+      assert.equal(result.scope, "authenticated_archived_supervisor_observations");
+      assert.deepEqual(result.facts, test.archive_facts, test.name);
+      assert.equal(result.facts.archive_sha256, result.artifact_sha256);
+      for (const field of ["original_receipt_signatures_verified", "replay_certified",
+        "quiescence_certified", "historical_completeness"]) assert.equal(result.facts[field], false);
+      assert.equal(JSON.stringify(result.facts).includes("PRIVATE-"), false);
     } else if (test.format === "resolution-receipt") {
       assert.equal(result.scope, "authenticated_resolution_decision");
       assert.equal(result.facts.decision, test.decision);
@@ -169,7 +177,7 @@ for (const test of cases) {
   } catch (error) {
     assert(error instanceof VerifierError, `${test.name}: ${error}`);
     assert.equal(error.code, test.expected, test.name);
-    if (["publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
+    if (["publisher-source", "publisher-source-trust", "native-session-forensics", "native-session-cold-archive", "signed-session"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
@@ -499,6 +507,77 @@ for (const [field, value] of [["expectedSessionNonce", "0199abcd-1234-7000-8000-
     && !error.message.includes(value));
   console.log(JSON.stringify({ case: `native_ignored_${field}`, result: "EXPECTED_NATIVE_IDENTITY_MISMATCH" }));
 }
+// BEGIN cold archive protocol controls (fake child; no signature claims).
+let archiveClientCases = 0;
+let archiveProtocolCases = 0;
+const archiveRootPin = "a".repeat(64);
+for (const pin of ["", null, false, 7, [], {}, "a".repeat(63), "A".repeat(64), "sha256:" + "a".repeat(64), "a".repeat(64) + "\n"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive", expectedArchiveRootSha256: pin }),
+  (error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const format of ["incident-bundle", "native-session-forensics", "capsule", "signed-session"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format, expectedArchiveRootSha256: archiveRootPin }),
+  (error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const untrusted of [null, "", "aa", false]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), untrusted,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive" }),
+  (error) => error instanceof VerifierError && error.code === "ANCHOR_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const [options, expected] of [
+  [{ graphReport: "PRIVATE-missing-report" }, "INPUT_INVALID"],
+  [{ signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
+  [{ expectedSessionNonce: "0199abcd-1234-7000-8000-123456789abc", expectedAdmissionSha256: "a".repeat(64) }, "EXPECTED_NATIVE_IDENTITY_INVALID"],
+  [{ expectedManifestSha256: "sha256:" + "a".repeat(64) }, "EXPECTED_IDENTITY_INVALID"],
+]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive", ...options }),
+  (error) => error instanceof VerifierError && error.code === expected && error.exitCode === null
+    && !error.message.includes("PRIVATE-"));
+  archiveClientCases += 1;
+}
+const archiveControls = [
+  "wrong_schema", "wrong_scope", "wrong_nested_scope", "wrong_signer", "wrong_root_key", "substituted_bytes",
+  "bad_archive_digest", "uppercase_merkle", "prefixed_merkle", "newline_merkle", "short_merkle",
+  "invalid_time", "empty_population", "excess_population", "boolean_population", "fractional_population",
+  "string_population", "excess_sources", "negative_sources", "boolean_sources", "original_signatures_claim",
+  "replay_claim", "quiescence_claim", "history_claim", "numeric_proof_flag", "missing_root",
+  "missing_proof_flag", "unknown_field",
+];
+for (const control of archiveControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_" + control })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: archiveRootPin }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID" && !error.message.includes("PRIVATE-"), control);
+  archiveProtocolCases += 1;
+}
+for (const control of ["valid", "maximum_population", "forwarded"]) {
+  const data = Buffer.from(JSON.stringify({ protocol_control: "archive_" + control }));
+  const options = control === "forwarded" ? { expectedArchiveRootSha256: archiveRootPin } : {};
+  const verified = await verifyArtifact(data, cases[0].anchor.toUpperCase(),
+    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", ...options });
+  assert.equal(verified.scope, "authenticated_archived_supervisor_observations");
+  assert.equal(verified.facts.archive_sha256, createHash("sha256").update(data).digest("hex"));
+  assert.equal(verified.facts.original_receipt_signatures_verified, false);
+  assert.equal(verified.facts.session_count, control === "maximum_population" ? 16_384 : 3);
+  archiveProtocolCases += 1;
+}
+await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_ignored_pin" })), cases[0].anchor,
+  { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: "b".repeat(64) }),
+(error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_MISMATCH"
+  && !error.message.includes("b".repeat(64)));
+archiveProtocolCases += 1;
+assert.equal(MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, 64 * 1024 * 1024);
+await assert.rejects(verifyArtifact(new Uint8Array(MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES + 1), cases[0].anchor,
+  { verifier: resolve("does-not-exist"), format: "native-session-cold-archive" }),
+(error) => error instanceof VerifierError && error.code === "INPUT_TOO_LARGE" && error.exitCode === null);
+archiveClientCases += 1;
+// END cold archive protocol controls.
+
 // Check exact transport limits without launching a process or retaining a huge
 // serialized fixture. Oversized inputs in every other format still fail above.
 assert.equal(MAX_NATIVE_SESSION_INPUT_BYTES, 96 * 1024 * 1024);
@@ -850,8 +929,8 @@ for (const mode of ltvControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
-  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + graphClientCases + promotionInputs.length,
+  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + graphClientCases + archiveClientCases + promotionInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
     + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases + graphProtocolCases
     + counterfactualControls.length + ltvControls.length + promotionControls.length + 2
-    + nativeControls.length + nativePositives.length + 1, passed: true }));
+    + nativeControls.length + nativePositives.length + archiveProtocolCases + 1, passed: true }));

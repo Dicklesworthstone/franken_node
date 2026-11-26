@@ -26,13 +26,14 @@ from typing import Any, Literal, TypedDict
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024
+MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
 MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024
 MAX_SOURCE_GRAPH_REPORT_BYTES = 32 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
-    "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
+    "incident-bundle", "native-session-forensics", "native-session-cold-archive", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
     "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident",
     "counterfactual-promotion", "ltv-evidence",
     "fleet-quiescence-observations", "fleet-epoch-commit",
@@ -40,6 +41,7 @@ EvidenceFormat = Literal[
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
     "native-session-forensics": "authenticated_supervisor_observations",
+    "native-session-cold-archive": "authenticated_archived_supervisor_observations",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
     "signed-session": "authenticated_verification_session",
@@ -61,6 +63,7 @@ class Verification(TypedDict):
     format: EvidenceFormat
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
                    "authenticated_runtime_incident", "authenticated_supervisor_observations",
+                   "authenticated_archived_supervisor_observations",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
                    "authenticated_verification_session",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
@@ -276,6 +279,24 @@ class SourceCapsuleSummary(TypedDict):
 class _NativeSessionSourceFacts(TypedDict, total=False):
     # Required by v3 and absent from v1/v2; checked before returning a result.
     source_capsule: SourceCapsuleSummary
+
+
+class NativeSessionColdArchiveFacts(TypedDict):
+    """Product-root-authenticated compaction observations, not original receipts."""
+
+    schema_version: Literal["franken-node/native-session-cold-archive/v1"]
+    scope: Literal["authenticated_archived_supervisor_observations"]
+    archive_sha256: str
+    signer_public_key_hex: str
+    product_root_key_id: str
+    archived_at: str
+    session_count: int
+    source_bound_sessions: int
+    merkle_root_sha256: str
+    original_receipt_signatures_verified: Literal[False]
+    replay_certified: Literal[False]
+    quiescence_certified: Literal[False]
+    historical_completeness: Literal[False]
 
 
 class NativeSessionForensicsFacts(_NativeSessionSourceFacts):
@@ -848,6 +869,32 @@ def _native_journal_valid(journal: Any, facts: dict[str, Any]) -> bool:
     )
 
 
+def _native_archive_valid(facts: Any, anchor: str) -> bool:
+    return (
+        isinstance(facts, dict)
+        and set(facts) == {
+            "schema_version", "scope", "archive_sha256", "signer_public_key_hex", "product_root_key_id",
+            "archived_at", "session_count", "source_bound_sessions", "merkle_root_sha256",
+            "original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
+            "historical_completeness",
+        }
+        and facts["schema_version"] == "franken-node/native-session-cold-archive/v1"
+        and facts["scope"] == "authenticated_archived_supervisor_observations"
+        and facts["signer_public_key_hex"] == anchor
+        and facts["product_root_key_id"] == "ed25519:" + anchor
+        and all(isinstance(facts[field], str) and re.fullmatch(r"[0-9a-f]{64}", facts[field]) is not None
+                for field in ("archive_sha256", "merkle_root_sha256"))
+        and _instant_ns(facts["archived_at"]) is not None
+        and type(facts["session_count"]) is int and 1 <= facts["session_count"] <= 16_384
+        and type(facts["source_bound_sessions"]) is int
+        and 0 <= facts["source_bound_sessions"] <= facts["session_count"]
+        and all(facts[field] is False for field in (
+            "original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
+            "historical_completeness",
+        ))
+    )
+
+
 def _native_session_valid(facts: Any, anchor: str) -> bool:
     source_backed = isinstance(facts, dict) and facts.get("schema_version") == "franken-node/native-session-forensics/v3"
     if (not isinstance(facts, dict) or set(facts) != {
@@ -1166,6 +1213,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  expected_baseline: str | None = None, graph_report_requested: bool = False) -> bool:
     if format == "native-session-forensics":
         return _native_session_valid(facts, anchor)
+    if format == "native-session-cold-archive":
+        return _native_archive_valid(facts, anchor)
     if format == "publisher-source-trust":
         return _publisher_source_trust_valid(
             facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
@@ -1376,6 +1425,7 @@ def verify_artifact(
     graph_report: str | os.PathLike[str] | None = None,
     expected_session_nonce: str | None = None,
     expected_admission_sha256: str | None = None,
+    expected_archive_root_sha256: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -1415,6 +1465,13 @@ def verify_artifact(
     The admission pin is 64 lowercase hex digits from the original receipt's
     domain-separated commitment, not a plain hash of JSON or the export. A
     match does not prove that the supplied outcome or journal is the latest.
+    Native-session cold archives require the independently enrolled product root
+    as the primary key. They authenticate compaction-time observations, without
+    original receipt signatures, replay, quiescence, or historical completeness.
+    Optional ``expected_archive_root_sha256`` pins an independently retained
+    ordered session population with 64 lowercase hex digits, without ``sha256:``.
+    The pin does not fix archive metadata or establish freshness. The returned
+    archive SHA-256 always identifies the exact input bytes.
     Publisher-source trust requires an independent revocation authority, an
     explicit RFC3339 evaluation time, and a positive decimal u64 freshness window.
     An optional independent provenance authority requires matching chain evidence.
@@ -1448,6 +1505,7 @@ def verify_artifact(
     if not isinstance(format, str) or format not in _SCOPES:
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
     input_limit = (MAX_NATIVE_SESSION_INPUT_BYTES if format == "native-session-forensics" else
+                   MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES if format == "native-session-cold-archive" else
                    MAX_FLEET_QUIESCENCE_INPUT_BYTES if format in ("fleet-quiescence-observations", "fleet-epoch-commit") else MAX_INPUT_BYTES)
     if len(data) > input_limit:
         raise VerifierError("INPUT_TOO_LARGE", f"evidence exceeds {input_limit // (1024 * 1024)} MiB")
@@ -1535,6 +1593,12 @@ def verify_artifact(
                 or not isinstance(expected_admission_sha256, str)
                 or re.fullmatch(r"[0-9a-f]{64}", expected_admission_sha256) is None):
             raise VerifierError("EXPECTED_NATIVE_IDENTITY_INVALID", "native-session identity pins require a canonical session nonce and admission SHA-256")
+    if expected_archive_root_sha256 is not None and (
+        format != "native-session-cold-archive"
+        or not isinstance(expected_archive_root_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_archive_root_sha256) is None
+    ):
+        raise VerifierError("EXPECTED_ARCHIVE_ROOT_INVALID", "an archive root pin requires native-session-cold-archive and a lowercase SHA-256")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -1584,6 +1648,8 @@ def verify_artifact(
     if expected_session_nonce is not None:
         args.extend(["--expected-session-nonce", expected_session_nonce,
                      "--expected-admission-sha256", expected_admission_sha256])
+    if expected_archive_root_sha256 is not None:
+        args.extend(["--expected-archive-root-sha256", expected_archive_root_sha256])
     if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
@@ -1631,6 +1697,12 @@ def verify_artifact(
         if (source["graph_report"]["report_sha256"] != graph_report_digest
                 or (format == "incident-bundle" and not _incident_graph_matches(source, data))):
             raise VerifierError("PROTOCOL_INVALID", "graph commitment does not match the requested inputs")
+    if format == "native-session-cold-archive":
+        if result["facts"]["archive_sha256"] != result["artifact_sha256"]:
+            raise VerifierError("PROTOCOL_INVALID", "archive facts do not match the supplied bytes")
+        if (expected_archive_root_sha256 is not None
+                and result["facts"]["merkle_root_sha256"] != expected_archive_root_sha256):
+            raise VerifierError("EXPECTED_ARCHIVE_ROOT_MISMATCH", "authenticated native archive does not match the expected root")
     if expected_manifest_sha256 is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
         if (source["manifest_sha256"] != expected_manifest_sha256

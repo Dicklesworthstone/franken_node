@@ -403,6 +403,64 @@ if mode.startswith(("fleet_", "epoch_")):
             "statement_sha256": "a" * 64,
         })
 exit_code = 0
+if mode.startswith("archive_"):
+    response["format"] = "native-session-cold-archive"
+    response["scope"] = "authenticated_archived_supervisor_observations"
+    response["facts"] = {
+        "schema_version": "franken-node/native-session-cold-archive/v1",
+        "scope": "authenticated_archived_supervisor_observations",
+        "archive_sha256": hashlib.sha256(data).hexdigest(), "signer_public_key_hex": anchor,
+        "product_root_key_id": "ed25519:" + anchor, "archived_at": "2026-11-26T00:00:02.123456789Z",
+        "session_count": 3, "source_bound_sessions": 1, "merkle_root_sha256": "a" * 64,
+        "original_receipt_signatures_verified": False, "replay_certified": False,
+        "quiescence_certified": False, "historical_completeness": False,
+    }
+    action = mode[len("archive_"):]
+    changes = {
+        "wrong_schema": ("schema_version", "franken-node/native-session-cold-archive/v2"),
+        "wrong_nested_scope": ("scope", "authenticated_supervisor_observations"),
+        "wrong_signer": ("signer_public_key_hex", "1" * 64),
+        "wrong_root_key": ("product_root_key_id", "ed25519:" + "1" * 64),
+        "substituted_bytes": ("archive_sha256", "0" * 64),
+        "bad_archive_digest": ("archive_sha256", "sha256:" + "a" * 64),
+        "uppercase_merkle": ("merkle_root_sha256", "A" * 64),
+        "prefixed_merkle": ("merkle_root_sha256", "sha256:" + "a" * 64),
+        "newline_merkle": ("merkle_root_sha256", "a" * 64 + "\n"),
+        "short_merkle": ("merkle_root_sha256", "a" * 63),
+        "invalid_time": ("archived_at", "2026-02-30T00:00:00Z"),
+        "empty_population": ("session_count", 0),
+        "excess_population": ("session_count", 16_385),
+        "boolean_population": ("session_count", True),
+        "fractional_population": ("session_count", 1.5),
+        "string_population": ("session_count", "3"),
+        "excess_sources": ("source_bound_sessions", 4),
+        "negative_sources": ("source_bound_sessions", -1),
+        "boolean_sources": ("source_bound_sessions", True),
+        "original_signatures_claim": ("original_receipt_signatures_verified", True),
+        "replay_claim": ("replay_certified", True),
+        "quiescence_claim": ("quiescence_certified", True),
+        "history_claim": ("historical_completeness", True),
+        "numeric_proof_flag": ("original_receipt_signatures_verified", 0),
+    }
+    if action in changes:
+        field, value = changes[action]
+        response["facts"][field] = value
+    elif action == "wrong_scope":
+        response["scope"] = "authenticated_runtime_incident"
+    elif action == "missing_root":
+        del response["facts"]["merkle_root_sha256"]
+    elif action == "missing_proof_flag":
+        del response["facts"]["original_receipt_signatures_verified"]
+    elif action == "unknown_field":
+        response["facts"]["guest_execution_verified"] = True
+    elif action == "maximum_population":
+        response["facts"].update(session_count=16_384, source_bound_sessions=16_384)
+    elif action == "forwarded":
+        if (sys.argv.count("--expected-archive-root-sha256") != 1
+                or sys.argv[sys.argv.index("--expected-archive-root-sha256") + 1] != "a" * 64):
+            response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
+                        "error": {"code": "ARCHIVE_ARGUMENT_MISSING", "message": "archive root pin was not forwarded"}}
+            exit_code = 2
 graph_prefix = next((prefix for prefix in ("publisher_graph_witness_", "publisher_trust_graph_witness_",
                                           "incident_graph_witness_")
                      if mode.startswith(prefix)), None)

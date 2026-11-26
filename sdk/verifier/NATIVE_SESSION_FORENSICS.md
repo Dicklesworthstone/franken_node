@@ -528,8 +528,9 @@ expectations. It exercises the wire protocol, not a live multi-node campaign.
 
 `ops session-inventory compact --archive-dir ...` retains completed clean
 sessions in a product-root-signed `franken-node/native-session-cold-archive/v1`
-archive. The standalone Rust SDK and CLI can authenticate those portable
-archives without the product database or the original session files:
+archive. The standalone Rust SDK, CLI, and Python and JavaScript/TypeScript
+clients can authenticate those portable archives without the product database
+or the original session files:
 
 ```sh
 franken-verifier verify --format native-session-cold-archive \
@@ -548,8 +549,40 @@ transported bytes.
 Rust callers use `native_session::verify_native_session_cold_archive(bytes,
 &trusted_root)` or
 `native_session::verify_native_session_cold_archive_with_expected_root(bytes,
-&trusted_root, expected_merkle_root)`. This archive format is currently exposed
-through Rust and the CLI; the Python and JavaScript clients do not yet expose it.
+&trusted_root, expected_merkle_root)`.
+
+The language clients use the same explicit product root and optional population
+pin. Keep the input as original bytes so that full-width admission integers and
+the transport digest remain exact:
+
+```python
+verified = verify_artifact(
+    archive_bytes,
+    enrolled_product_root_hex,
+    verifier="/trusted/bin/franken-verifier",
+    format="native-session-cold-archive",
+    expected_archive_root_sha256=retained_population_root,
+)
+assert verified["facts"]["original_receipt_signatures_verified"] is False
+```
+
+```typescript
+const verified = await verifyArtifact(archiveBytes, enrolledProductRootHex, {
+  verifier: "/trusted/bin/franken-verifier",
+  format: "native-session-cold-archive",
+  expectedArchiveRootSha256: retainedPopulationRoot,
+});
+if (verified.format === "native-session-cold-archive") {
+  const replayCertified: false = verified.facts.replay_certified;
+  console.log(verified.facts.session_count, verified.facts.merkle_root_sha256);
+}
+```
+
+Both clients reject malformed or misapplied root pins before launching the
+verifier. They require the returned scope, root identity, digest encodings,
+population bounds and false proof flags to match the archive contract. Returned
+archive facts must bind to the exact supplied bytes, and a requested population
+root must match even if a faulty verifier ignores the command-line option.
 
 Verification rejects duplicate JSON members, unknown fields, duplicate session
 nonces, entry/root identity disagreement, invalid admission paths and metadata,

@@ -1,12 +1,12 @@
 // Independent protocol vectors: Node's crypto and explicit wire encodings.
 // This never imports the producer or the Rust SDK. The RFC seed is test-only
 // input and is not copied into the verifier distribution/consumer sandbox.
-import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, verify as verifySignature } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
-const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath, fleetObservationsPath, fleetEpochCommitPath] = process.argv.slice(2);
+const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath, fleetObservationsPath, fleetEpochCommitPath, nativeColdArchivesPath] = process.argv.slice(2);
 const anchor = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const foreign = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 const seed = Buffer.from(readFileSync(seedPath, "utf8").trim(), "hex");
@@ -1462,6 +1462,90 @@ function addNative(name, fixture, expected = "verified", options = {}) {
   add(name, "native-session-forensics", ordered(fixture.bundle), expected,
     { native_facts: fixture.facts, ...options });
 }
+// Retain independently generated Python signatures and exact canonical admission
+// snippets. Parsing and reserializing the archive would round u64::MAX fields.
+const coldArchives = JSON.parse(readFileSync(nativeColdArchivesPath, "utf8"));
+assert.equal(coldArchives.trusted_key_hex, anchor);
+const coldArchiveDomain = Buffer.from("franken-node/native-session-cold-archive-sig/v1\0");
+function coldArchiveWire(fixture, metadataChanges) {
+  const metadata = JSON.parse(fixture.expected.canonical_signature_metadata_json);
+  Object.assign(metadata, metadataChanges);
+  const canonicalMetadata = ordered(metadata);
+  const signature = metadataChanges === undefined ? fixture.expected.signature_hex
+    : sign(null, Buffer.concat([coldArchiveDomain, Buffer.from(canonicalMetadata)]), key).toString("hex");
+  // The retained alternative timestamp spellings are signed-equivalent. Copy
+  // only those string values; never re-encode the parsed admission numbers.
+  const withTime = (raw, field, value) => raw.replace(
+    new RegExp(`"${field}":"[^"\\\\]*"`, "u"), `${JSON.stringify(field)}:${JSON.stringify(value)}`);
+  const entries = fixture.expected.entries.map((entry, index) => {
+    const original = fixture.archive.entries[index];
+    const admission = withTime(entry.canonical_admission_json, "admitted_at", original.admission.admitted_at);
+    const outcome = withTime(entry.canonical_outcome_json, "observed_at", original.outcome.observed_at);
+    return `{"session_nonce":${JSON.stringify(original.session_nonce)},"leaf_sha256":${JSON.stringify(entry.leaf_sha256)},"admission":${admission},"outcome":${outcome}}`;
+  });
+  const wireMetadata = metadataChanges === undefined
+    ? withTime(canonicalMetadata, "archived_at", fixture.archive.archived_at) : canonicalMetadata;
+  return `${wireMetadata.slice(0, -1)},"signature_hex":${JSON.stringify(signature)},"entries":[${entries.join(",")}]}`;
+}
+function coldArchiveFacts(fixture, wire, archivedAt) {
+  return {
+    schema_version: "franken-node/native-session-cold-archive/v1",
+    scope: "authenticated_archived_supervisor_observations", archive_sha256: hash(wire),
+    signer_public_key_hex: anchor, product_root_key_id: `ed25519:${anchor}`,
+    archived_at: archivedAt ?? JSON.parse(fixture.expected.canonical_signature_metadata_json).archived_at,
+    session_count: fixture.expected.session_count,
+    source_bound_sessions: fixture.expected.entries.filter((entry) =>
+      Object.hasOwn(JSON.parse(entry.canonical_admission_json), "source_capsule")).length,
+    merkle_root_sha256: fixture.expected.merkle_root_sha256,
+    original_receipt_signatures_verified: false, replay_certified: false,
+    quiescence_certified: false, historical_completeness: false,
+  };
+}
+for (const fixture of coldArchives.cases) {
+  assert(verifySignature(null, Buffer.from(fixture.expected.signature_preimage_hex, "hex"),
+    createPublicKey(key), Buffer.from(fixture.expected.signature_hex, "hex")), fixture.name);
+  const wire = coldArchiveWire(fixture);
+  const expected = fixture.valid ? "verified"
+    : fixture.name === "empty_archive" ? "ARCHIVE_INVALID" : "ARCHIVE_SESSION_INVALID";
+  const metadata = fixture.valid ? { archive_facts: coldArchiveFacts(fixture, wire) } : {};
+  add("cold_archive_" + fixture.name, "native-session-cold-archive", wire, expected, metadata);
+  if (fixture.valid) {
+    add("cold_archive_pinned_" + fixture.name, "native-session-cold-archive", wire, "verified", {
+      ...metadata, expected_archive_root_sha256: fixture.expected.merkle_root_sha256,
+    });
+  }
+}
+const singleArchive = coldArchives.cases.find((fixture) => fixture.name === "single");
+const tripleArchive = coldArchives.cases.find((fixture) => fixture.name === "triple");
+const singleArchiveWire = coldArchiveWire(singleArchive);
+const tripleArchiveWire = coldArchiveWire(tripleArchive);
+assert(tripleArchiveWire.includes('"security_epoch":18446744073709551615'));
+assert(tripleArchiveWire.includes('"admission_generation":18446744073709551615'));
+const reattestedArchiveTime = "2026-11-26T00:01:00Z";
+const reattestedArchiveWire = coldArchiveWire(tripleArchive, {
+  archived_at: reattestedArchiveTime, operator_id: "PRIVATE-other-operator", reason: "PRIVATE-other-reason",
+});
+add("cold_archive_pinned_metadata_reattestation", "native-session-cold-archive", reattestedArchiveWire, "verified", {
+  expected_archive_root_sha256: tripleArchive.expected.merkle_root_sha256,
+  archive_facts: coldArchiveFacts(tripleArchive, reattestedArchiveWire, reattestedArchiveTime),
+});
+for (const [name, fixture, different] of [["single", singleArchive, tripleArchive], ["triple", tripleArchive, singleArchive]]) {
+  add("cold_archive_pinned_population_substitution_" + name, "native-session-cold-archive", coldArchiveWire(fixture),
+    "EXPECTED_ARCHIVE_ROOT_MISMATCH", { expected_archive_root_sha256: different.expected.merkle_root_sha256 });
+}
+for (const [name, wire, expected, metadata] of [
+  ["foreign_anchor", singleArchiveWire, "SIGNER_UNTRUSTED", { anchor: foreign }],
+  ["invalid_signature", singleArchiveWire.replace(singleArchive.expected.signature_hex, "00".repeat(64)), "SIGNATURE_INVALID", {}],
+  ["malformed_signature", singleArchiveWire.replace(singleArchive.expected.signature_hex, "aa".repeat(63)), "SIGNATURE_MALFORMED", {}],
+  ["metadata_tamper", singleArchiveWire.replace('"capacity recovery"', '"PRIVATE-changed-reason"'), "SIGNATURE_INVALID", {}],
+  ["leaf_tamper", singleArchiveWire.replace(`"leaf_sha256":"${singleArchive.expected.leaf_sha256[0]}"`,
+    `"leaf_sha256":"${"0".repeat(64)}"`), "ARCHIVE_LEAF_MISMATCH", {}],
+  ["signed_wrong_root", coldArchiveWire(singleArchive, { merkle_root_sha256: "0".repeat(64) }), "ARCHIVE_ROOT_MISMATCH", {}],
+  ["duplicate_member", singleArchiveWire.replace('"session_count":', '"session_count":1,"session_\\u0063ount":'), "JSON_INVALID", {}],
+  ["unsigned_member", singleArchiveWire.replace('{', '{"PRIVATE-unsigned-claim":true,'), "JSON_INVALID", {}],
+  ["wrong_schema", singleArchiveWire.replace('native-session-cold-archive/v1', 'native-session-cold-archive/v9'), "SCHEMA_UNSUPPORTED", {}],
+]) add("cold_archive_" + name, "native-session-cold-archive", wire, expected, metadata);
+
 const nativePending = nativeFixture(18_446_744_073_709_551_615n);
 addNative("native_pending_max_epoch", nativePending);
 addNative("native_pending_zero_epoch", nativeFixture(0n));
