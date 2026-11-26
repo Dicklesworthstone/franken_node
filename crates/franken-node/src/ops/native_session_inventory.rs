@@ -1862,12 +1862,14 @@ fn retain_admission_record_with_root(
 }
 
 /// Stage and durably flush pre-spawn admission artifacts (optionally including
-/// the freshly minted identity capture and pre-staged effect-journal header) in
-/// parallel before publishing them in strict causal order
-/// (`identity-capture` -> `session-admission` -> `session-admission-record`) and
-/// coalescing their directory `fsync`s. The staged effect journal remains
-/// unpublished until `native-sessions.db` commits with `admitted == true`, so
-/// refused admissions leave no journal artifact behind.
+/// the freshly minted identity capture and pre-staged effect-journal header,
+/// plus the unpublished supervisor ownership lease) in parallel before
+/// publishing `identity-capture` -> `session-admission` -> `session-admission-record`
+/// in strict causal order and coalescing their directory `fsync`s. The staged
+/// supervisor lease remains unpublished until uniqueness/capacity checks pass
+/// inside the `native-sessions.db` transaction, and the staged effect journal
+/// remains unpublished until `native-sessions.db` commits with `admitted == true`,
+/// so refused admissions leave neither artifact behind.
 #[allow(clippy::too_many_arguments)]
 fn retain_pre_spawn_artifacts_with_root(
     protected_root: &Path,
@@ -1877,7 +1879,11 @@ fn retain_pre_spawn_artifacts_with_root(
     admission_json: &str,
     deferred_capture_bytes: Option<&[u8]>,
     stage_journal: bool,
-) -> Result<Option<super::native_session_journal::StagedNativeSessionEffectJournal>> {
+) -> Result<(
+    Option<super::native_session_journal::StagedNativeSessionEffectJournal>,
+    supervisor_lease::StagedSupervisorLease,
+    String,
+)> {
     use std::io::Write as _;
 
     let capture_dir = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
@@ -1886,107 +1892,131 @@ fn retain_pre_spawn_artifacts_with_root(
     let receipt_path = admission_receipt_path(protected_root, &admission.session_nonce);
     let record_path = admission_record_path(protected_root, &admission.session_nonce);
 
-    // Sign the admission receipt first so the staged effect journal can bind to
-    // the exact `admission_sha256` inside the same parallel flush barrier.
+    // Sign the admission receipt first so both the staged effect journal and
+    // staged supervisor lease bind to the exact `admission_sha256` inside the
+    // same parallel flush barrier.
     let receipt =
         NativeSessionAdmissionReceipt::issue_with_verifying_key(admission, root, verifying_key)?;
     let receipt_bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
+    let admission_sha256 = receipt.admission_sha256.clone();
 
     // Phase 1: Stage and `fsync` all pre-spawn temp files concurrently so ext4
-    // jbd2 coalesces up to 4 file `fsync`s into one journal commit and overlaps
+    // jbd2 coalesces up to 5 file `fsync`s into one journal commit and overlaps
     // `check_admission_record_capacity` with disk flush. No final path is
     // published yet.
-    let (capture_stage, receipt_stage, journal_stage, record_stage) = std::thread::scope(|scope| {
-        let capture_handle = deferred_capture_bytes.map(|capture_bytes| {
-            scope.spawn(|| -> Result<tempfile::NamedTempFile> {
-                let mut staged = tempfile::NamedTempFile::new_in(&capture_dir)
-                    .context("stage private runtime evidence identity capture")?;
-                validate_runtime_evidence_private_file_metadata(
-                    &admission.identity_capture_path,
-                    &staged.as_file().metadata().with_context(|| {
-                        format!(
-                            "inspect staged runtime evidence capture {}",
-                            admission.identity_capture_path.display()
-                        )
-                    })?,
-                )?;
-                staged.write_all(capture_bytes)?;
+    let (capture_stage, receipt_stage, journal_stage, lease_stage, record_stage) =
+        std::thread::scope(|scope| {
+            let capture_handle = deferred_capture_bytes.map(|capture_bytes| {
+                scope.spawn(|| -> Result<tempfile::NamedTempFile> {
+                    let mut staged = tempfile::NamedTempFile::new_in(&capture_dir)
+                        .context("stage private runtime evidence identity capture")?;
+                    validate_runtime_evidence_private_file_metadata(
+                        &admission.identity_capture_path,
+                        &staged.as_file().metadata().with_context(|| {
+                            format!(
+                                "inspect staged runtime evidence capture {}",
+                                admission.identity_capture_path.display()
+                            )
+                        })?,
+                    )?;
+                    staged.write_all(capture_bytes)?;
+                    staged.as_file().sync_all()?;
+                    Ok(staged)
+                })
+            });
+
+            let receipt_handle = scope.spawn(|| -> Result<(tempfile::NamedTempFile, bool)> {
+                let created_dir =
+                    ensure_runtime_evidence_directory_with_status(&receipt_dir, true)?;
+                let mut staged = tempfile::NamedTempFile::new_in(&receipt_dir)
+                    .context("stage private native-session admission receipt")?;
+                staged.write_all(receipt_bytes.as_bytes())?;
                 staged.as_file().sync_all()?;
-                Ok(staged)
-            })
-        });
+                Ok((staged, created_dir))
+            });
 
-        let receipt_handle = scope.spawn(|| -> Result<(tempfile::NamedTempFile, bool)> {
-            let created_dir = ensure_runtime_evidence_directory_with_status(&receipt_dir, true)?;
-            let mut staged = tempfile::NamedTempFile::new_in(&receipt_dir)
-                .context("stage private native-session admission receipt")?;
-            staged.write_all(receipt_bytes.as_bytes())?;
-            staged.as_file().sync_all()?;
-            Ok((staged, created_dir))
-        });
-
-        let journal_handle = if stage_journal {
-            let root_clone = root.clone();
-            let admission_sha256 = receipt.admission_sha256.as_str();
-            Some(scope.spawn(move || {
-                super::native_session_journal::StagedNativeSessionEffectJournal::stage(
-                    protected_root,
-                    &admission.session_nonce,
-                    &admission.product_root_key_id,
-                    admission_sha256,
-                    root_clone,
-                )
-            }))
-        } else {
-            None
-        };
-
-        let record_result = (|| -> Result<(Option<tempfile::NamedTempFile>, bool)> {
-            let created_dir = ensure_runtime_evidence_directory_with_status(&record_dir, true)?;
-            let exists = validate_private_path_if_present(&record_path)?;
-            check_admission_record_capacity(
-                &record_dir,
-                usize::from(!exists),
-                if exists { 0 } else { admission_json.len() },
-                MAX_STORED_SESSIONS,
-                MAX_RETAINED_ADMISSION_BYTES,
-            )?;
-            let staged = if exists {
-                None
+            let journal_handle = if stage_journal {
+                let root_clone = root.clone();
+                let admission_sha256 = admission_sha256.as_str();
+                Some(scope.spawn(move || {
+                    super::native_session_journal::StagedNativeSessionEffectJournal::stage(
+                        protected_root,
+                        &admission.session_nonce,
+                        &admission.product_root_key_id,
+                        admission_sha256,
+                        root_clone,
+                    )
+                }))
             } else {
-                let mut staged = tempfile::NamedTempFile::new_in(&record_dir)
-                    .context("stage private native-session admission record")?;
-                staged.write_all(admission_json.as_bytes())?;
-                staged.as_file().sync_all()?;
-                Some(staged)
+                None
             };
-            Ok((staged, created_dir))
-        })();
 
-        let capture_result = capture_handle.map(|handle| {
-            handle.join().unwrap_or_else(|_| {
-                Err(anyhow::anyhow!("identity capture staging thread panicked"))
-            })
+            let lease_handle = {
+                let admission_sha256 = admission_sha256.as_str();
+                scope.spawn(move || {
+                    supervisor_lease::stage(
+                        protected_root,
+                        &supervisor_lease::Binding {
+                            session_nonce: &admission.session_nonce,
+                            product_root_key_id: &admission.product_root_key_id,
+                            admission_sha256,
+                        },
+                        root,
+                    )
+                })
+            };
+
+            let record_result = (|| -> Result<(Option<tempfile::NamedTempFile>, bool)> {
+                let created_dir = ensure_runtime_evidence_directory_with_status(&record_dir, true)?;
+                let exists = validate_private_path_if_present(&record_path)?;
+                check_admission_record_capacity(
+                    &record_dir,
+                    usize::from(!exists),
+                    if exists { 0 } else { admission_json.len() },
+                    MAX_STORED_SESSIONS,
+                    MAX_RETAINED_ADMISSION_BYTES,
+                )?;
+                let staged = if exists {
+                    None
+                } else {
+                    let mut staged = tempfile::NamedTempFile::new_in(&record_dir)
+                        .context("stage private native-session admission record")?;
+                    staged.write_all(admission_json.as_bytes())?;
+                    staged.as_file().sync_all()?;
+                    Some(staged)
+                };
+                Ok((staged, created_dir))
+            })();
+
+            let capture_result = capture_handle.map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("identity capture staging thread panicked"))
+                })
+            });
+            let receipt_result = receipt_handle.join().unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("admission receipt staging thread panicked"))
+            });
+            let journal_result = journal_handle.map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("effect journal staging thread panicked"))
+                })
+            });
+            let lease_result = lease_handle.join().unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("supervisor lease staging thread panicked"))
+            });
+            (
+                capture_result,
+                receipt_result,
+                journal_result,
+                lease_result,
+                record_result,
+            )
         });
-        let receipt_result = receipt_handle
-            .join()
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("admission receipt staging thread panicked")));
-        let journal_result = journal_handle.map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("effect journal staging thread panicked")))
-        });
-        (
-            capture_result,
-            receipt_result,
-            journal_result,
-            record_result,
-        )
-    });
 
     let capture_staged = capture_stage.transpose()?;
     let (receipt_staged, created_receipt_dir) = receipt_stage?;
     let journal_staged = journal_stage.transpose()?;
+    let lease_staged = lease_stage?;
     let (record_staged, created_record_dir) = record_stage?;
 
     // Phase 2: Publish in strict causal order:
@@ -2106,7 +2136,7 @@ fn retain_pre_spawn_artifacts_with_root(
         published_receipt,
         published_record,
     );
-    Ok(journal_staged)
+    Ok((journal_staged, lease_staged, admission_sha256))
 }
 
 fn read_admission_receipt(
@@ -2705,19 +2735,21 @@ impl NativeSessionInventoryGuard {
                     .context("native-session inventory was not created")?,
             },
         );
-        let staged_journal = retain_pre_spawn_artifacts_with_root(
-            protected_root,
-            &admission,
-            &product_root,
-            &verifying_key,
-            &admission_json,
-            deferred_capture.map(|(_, bytes)| bytes),
-            deferred_capture.is_some(),
-        )?;
-        let admission_sha256 = admission_digest(&admission)?;
-        // Keep an acquired descriptor across transaction retries. Refused
+        let (mut staged_journal, staged_lease, admission_sha256) =
+            retain_pre_spawn_artifacts_with_root(
+                protected_root,
+                &admission,
+                &product_root,
+                &verifying_key,
+                &admission_json,
+                deferred_capture.map(|(_, bytes)| bytes),
+                deferred_capture.is_some(),
+            )?;
+        let mut staged_lease = Some(staged_lease);
+        // Keep acquired descriptors across transaction retries. Refused
         // uniqueness/capacity checks must not create extra ownership objects.
         let mut supervisor_lease = None;
+        let mut published_journal = None;
         // A refused attempt keeps the same decision and timestamp through
         // transaction retries. Its receipt is issued only after this unique
         // insertion commits, so a duplicate/losing admission cannot create a
@@ -2793,18 +2825,69 @@ impl NativeSessionInventoryGuard {
                 check_reservation_usage(count, bytes, MAX_STORED_SESSIONS, MAX_RESERVED_BYTES)?;
             }
             // The row is still private to this transaction and the inventory
-            // writer lock excludes compaction. Acquire before publishing the
-            // admission, after its immutable retention and reservation checks.
-            if supervisor_lease.is_none() {
-                supervisor_lease = supervisor_lease::acquire(
-                    protected_root,
-                    &supervisor_lease::Binding {
-                        session_nonce: &admission.session_nonce,
-                        product_root_key_id: &admission.product_root_key_id,
-                        admission_sha256: &admission_sha256,
-                    },
-                    &product_root,
-                )?;
+            // writer lock excludes compaction and concurrent drain transitions.
+            // Publish the pre-staged, locked, already-`fsync`ed ownership lease
+            // (and, when `admitted`, the pre-staged effect journal) concurrently
+            // so their two disjoint directory `fsync`s coalesce into one ext4
+            // jbd2 barrier before `tx.commit()`. Refused/drain-fenced attempts
+            // leave `staged_journal` unpublished so it drops cleanly below.
+            let pending_lease = if supervisor_lease.is_none() {
+                Some(staged_lease.take())
+            } else {
+                None
+            };
+            let pending_journal = if admitted && published_journal.is_none() {
+                staged_journal.take()
+            } else {
+                None
+            };
+            match (pending_lease, pending_journal) {
+                (Some(lease_opt), Some(journal_staged)) => {
+                    let (lease_res, journal_res) = std::thread::scope(|scope| {
+                        let journal_handle =
+                            scope.spawn(|| journal_staged.publish(protected_root));
+                        let lease_res = match lease_opt {
+                            Some(staged) => staged.publish(protected_root),
+                            None => supervisor_lease::acquire(
+                                protected_root,
+                                &supervisor_lease::Binding {
+                                    session_nonce: &admission.session_nonce,
+                                    product_root_key_id: &admission.product_root_key_id,
+                                    admission_sha256: &admission_sha256,
+                                },
+                                &product_root,
+                            ),
+                        };
+                        let journal_res = journal_handle.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("effect journal publication thread panicked"))
+                        });
+                        (lease_res, journal_res)
+                    });
+                    supervisor_lease = lease_res?;
+                    published_journal = Some(journal_res.context(
+                        "native-session durable effect journal could not be established; worker was not started",
+                    )?);
+                }
+                (Some(lease_opt), None) => {
+                    supervisor_lease = match lease_opt {
+                        Some(staged) => staged.publish(protected_root)?,
+                        None => supervisor_lease::acquire(
+                            protected_root,
+                            &supervisor_lease::Binding {
+                                session_nonce: &admission.session_nonce,
+                                product_root_key_id: &admission.product_root_key_id,
+                                admission_sha256: &admission_sha256,
+                            },
+                            &product_root,
+                        )?,
+                    };
+                }
+                (None, Some(journal_staged)) => {
+                    published_journal = Some(journal_staged.publish(protected_root).context(
+                        "native-session durable effect journal could not be established; worker was not started",
+                    )?);
+                }
+                (None, None) => {}
             }
             tx.commit()?;
             protect_sidecars(protected_root)?;
@@ -2849,10 +2932,13 @@ impl NativeSessionInventoryGuard {
             finished: false,
             supervisor_lease,
         };
-        let journal = staged_journal
-            .map(|staged| staged.publish(protected_root))
-            .transpose()
-            .context("native-session durable effect journal could not be established; worker was not started")?;
+        let journal = match published_journal {
+            Some(writer) => Some(writer),
+            None => staged_journal
+                .map(|staged| staged.publish(protected_root))
+                .transpose()
+                .context("native-session durable effect journal could not be established; worker was not started")?,
+        };
         Ok((guard, journal))
     }
 
@@ -3120,8 +3206,21 @@ fn control_hint_path_at(protected_root: &Path, project_root: &Path) -> Result<Pa
 /// The local inventory owner supplies this exact project-keyed hint path.
 /// It is unrelated to a remote coordinator's configurable fleet state directory.
 /// Absence or corruption is handled by periodic authoritative control rechecks.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn native_session_control_hint_path(project_root: &Path) -> Result<PathBuf> {
     control_hint_path_at(&inventory_root()?, project_root)
+}
+
+pub(crate) fn native_session_control_hint_path_at(
+    protected_root: &Path,
+    project_root: &Path,
+) -> Result<PathBuf> {
+    control_hint_path_at(protected_root, project_root)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn native_session_inventory_root() -> Result<PathBuf> {
+    inventory_root()
 }
 
 /// Best-effort wakeup after a committed local fence transition. This cache is
@@ -3371,22 +3470,145 @@ fn check_retained_drain_byte_budget(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InventoryFileFingerprint {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl InventoryFileFingerprint {
+    fn same_identity_and_len(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        let same_inode = self.dev == other.dev && self.ino == other.ino;
+        #[cfg(not(unix))]
+        let same_inode = true;
+        same_inode && self.len == other.len
+    }
+}
+
+fn inventory_file_fingerprint(path: &Path) -> Option<InventoryFileFingerprint> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.dev(), metadata.ino())
+    };
+    Some(InventoryFileFingerprint {
+        #[cfg(unix)]
+        dev,
+        #[cfg(unix)]
+        ino,
+        len: metadata.len(),
+        mtime: metadata.modified().ok(),
+    })
+}
+
+/// Pre-opened handle to an already-existing `native-sessions.db`, validated
+/// against concurrent modification before reuse. Never creates files or
+/// directories when the inventory is absent.
+pub(crate) struct PreopenedNativeSessionInventory {
+    protected_root: PathBuf,
+    database_identity: Option<(u64, u64)>,
+    db_fp: InventoryFileFingerprint,
+    wal_fp: Option<InventoryFileFingerprint>,
+    connection: Connection,
+}
+
+impl PreopenedNativeSessionInventory {
+    fn is_fresh(&self) -> bool {
+        let database_path = self.protected_root.join(INVENTORY_FILE);
+        let wal_path = self.protected_root.join(format!("{INVENTORY_FILE}-wal"));
+        inventory_file_fingerprint(&database_path) == Some(self.db_fp)
+            && inventory_file_fingerprint(&wal_path) == self.wal_fp
+    }
+}
+
+fn open_existing_inventory_for_prewarm_at(
+    protected_root: &Path,
+) -> Option<PreopenedNativeSessionInventory> {
+    let database_path = protected_root.join(INVENTORY_FILE);
+    if !validate_private_path_if_present(&database_path).ok()? {
+        return None;
+    }
+    let wal_path = protected_root.join(format!("{INVENTORY_FILE}-wal"));
+    let db_fp_before = inventory_file_fingerprint(&database_path)?;
+    let wal_fp_before = inventory_file_fingerprint(&wal_path);
+    let database_identity = path_file_identity(&database_path);
+    let connection = open_inventory_unlocked(protected_root, false)
+        .ok()
+        .flatten()?;
+    // `PRAGMA journal_mode=WAL` in fsqlite rewrites page 1 of `.db` in place
+    // (updating `.db` mtime without changing `(dev, ino, len)` or `-wal`).
+    // Confirm the DB kept its inode/length and `-wal` did not change during open,
+    // then store post-open fingerprints for exact freshness checking before reuse.
+    let db_fp_after = inventory_file_fingerprint(&database_path)?;
+    let wal_fp_after = inventory_file_fingerprint(&wal_path);
+    if !db_fp_before.same_identity_and_len(&db_fp_after) || wal_fp_before != wal_fp_after {
+        return None;
+    }
+    Some(PreopenedNativeSessionInventory {
+        protected_root: protected_root.to_path_buf(),
+        database_identity,
+        db_fp: db_fp_after,
+        wal_fp: wal_fp_after,
+        connection,
+    })
+}
+
+/// Pre-open an already-existing `native-sessions.db` on the current thread
+/// (since `fsqlite::Connection` is `!Send`), meant to run on the main thread
+/// while `std::thread::scope` overlaps `Send + Sync` pre-admission checks and
+/// `PrewarmedEvidenceWorker` overlaps `evidence-ledger.db` open. Never creates
+/// files or directories when the inventory is absent.
+pub(crate) fn preopen_existing_native_session_inventory() -> Option<PreopenedNativeSessionInventory>
+{
+    let root = existing_admission_root().ok().flatten()?;
+    open_existing_inventory_for_prewarm_at(&root)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
-    admission_ticket_with_connection_at(protected_root, project_root)
+    admission_ticket_with_connection_at_preopened(protected_root, project_root, None)
         .map(|ticket| ticket.generation)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn admission_ticket_with_connection_at(
     protected_root: &Path,
     project_root: &Path,
+) -> Result<NativeSessionAdmissionTicket> {
+    admission_ticket_with_connection_at_preopened(protected_root, project_root, None)
+}
+
+fn admission_ticket_with_connection_at_preopened(
+    protected_root: &Path,
+    project_root: &Path,
+    mut preopened: Option<PreopenedNativeSessionInventory>,
 ) -> Result<NativeSessionAdmissionTicket> {
     project_key(project_root)?;
     let database_path = protected_root.join(INVENTORY_FILE);
     retry_snapshot_conflict(|| {
         let before_identity = path_file_identity(&database_path);
-        let Some(connection) = open_inventory(protected_root, false)? else {
-            return Ok(NativeSessionAdmissionTicket::bare(0));
+        let reused = preopened.take().filter(|pre| {
+            pre.protected_root == protected_root
+                && pre.database_identity == before_identity
+                && pre.is_fresh()
+        });
+        let connection = match reused {
+            Some(pre) => pre.connection,
+            None => {
+                let Some(connection) = open_inventory(protected_root, false)? else {
+                    return Ok(NativeSessionAdmissionTicket::bare(0));
+                };
+                connection
+            }
         };
         let (generation, held_fence, schema_verified) = {
             let mut tx = connection.transaction()?;
@@ -3430,20 +3652,32 @@ fn existing_admission_root() -> Result<Option<PathBuf>> {
 /// enclosing revision in the same transaction that records the worker obligation.
 /// An active ancestor fence also makes the live observer cancel old workers.
 pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
-    native_session_admission_ticket_with_connection(project_root).map(|ticket| ticket.generation)
+    native_session_admission_ticket_with_preopened(project_root, None)
+        .map(|ticket| ticket.generation)
 }
 
 /// Same contract as [`native_session_admission_ticket`], retaining the opened
 /// inventory handle so immediate admission on the same database inode can reuse
 /// the already-configured WAL connection instead of opening a second one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn native_session_admission_ticket_with_connection(
     project_root: &Path,
+) -> Result<NativeSessionAdmissionTicket> {
+    native_session_admission_ticket_with_preopened(project_root, None)
+}
+
+/// Same contract as [`native_session_admission_ticket_with_connection`],
+/// optionally reusing a background pre-opened connection when both `.db` and
+/// `-wal` fingerprints are unchanged.
+pub(crate) fn native_session_admission_ticket_with_preopened(
+    project_root: &Path,
+    preopened: Option<PreopenedNativeSessionInventory>,
 ) -> Result<NativeSessionAdmissionTicket> {
     project_key(project_root)?;
     let Some(root) = existing_admission_root()? else {
         return Ok(NativeSessionAdmissionTicket::bare(0));
     };
-    admission_ticket_with_connection_at(&root, project_root)
+    admission_ticket_with_connection_at_preopened(&root, project_root, preopened)
 }
 
 /// Reference runtimes execute outside the native worker inventory, but they
@@ -13341,5 +13575,58 @@ mod tests {
         )
         .expect_err("DB outcome disagreeing with signed receipt must fail closed");
         assert!(err.to_string().contains("disagrees with its signed"));
+    }
+
+    #[test]
+    fn preopened_inventory_reuses_when_fresh_and_observes_concurrent_drain_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+
+        // Missing DB: preopen must return None without creating files or dirs.
+        assert!(open_existing_inventory_for_prewarm_at(&root).is_none());
+        assert!(!root.exists());
+
+        // Initialize inventory with one admitted & completed session.
+        let admission = fixture(&root, 91);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::Completed,
+            clean_compaction_ledger_observation(),
+        );
+        drop(guard);
+
+        // Fresh reuse: preopened connection stays fresh and issues a reusable ticket.
+        let preopened =
+            open_existing_inventory_for_prewarm_at(&root).expect("existing inventory must preopen");
+        assert!(preopened.is_fresh());
+        let ticket =
+            admission_ticket_with_connection_at_preopened(&root, &project, Some(preopened))
+                .expect("fresh preopened inventory must issue open admission ticket");
+        assert_eq!(ticket.generation, 0);
+        assert!(ticket.connection.is_some());
+
+        // Concurrent drain fence: preopen before another writer commits a held
+        // drain fence; ticket acquisition MUST detect the change and refuse.
+        let stale_preopened = open_existing_inventory_for_prewarm_at(&root)
+            .expect("existing inventory must preopen before concurrent drain");
+        let checkpoint = actions(1);
+        begin_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(
+            !stale_preopened.is_fresh(),
+            "concurrent drain commit must invalidate preopened inventory fingerprint"
+        );
+        let fenced_err =
+            admission_ticket_with_connection_at_preopened(&root, &project, Some(stale_preopened))
+                .err()
+                .expect("admission ticket MUST fail closed on concurrent drain fence");
+        assert!(
+            fenced_err
+                .to_string()
+                .contains("fenced by local fleet drain"),
+            "unexpected error: {fenced_err:#}"
+        );
     }
 }

@@ -31,6 +31,17 @@ pub(super) struct SupervisorLease {
     _file: File,
 }
 
+#[cfg(unix)]
+pub(super) struct StagedSupervisorLease {
+    staged: tempfile::NamedTempFile,
+    directory: PathBuf,
+    lease_path: PathBuf,
+    created_directory: bool,
+}
+
+#[cfg(not(unix))]
+pub(super) struct StagedSupervisorLease;
+
 #[derive(Debug)]
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(super) enum Probe {
@@ -46,9 +57,51 @@ pub(super) fn path(protected_root: &Path, nonce: &str) -> PathBuf {
     ))
 }
 
+/// Stage, lock, sign, and `fsync` a supervisor ownership marker as an
+/// unpublished private temp file inside `session-supervisor-leases/`.
+///
+/// The final `path(protected_root, nonce)` is NOT created until
+/// [`StagedSupervisorLease::publish`] runs after uniqueness and capacity
+/// checks succeed; dropping an unpublished handle unlinks the temp file and
+/// leaves no ownership object behind. Because `persist_noclobber` atomically
+/// links the same inode inside the same directory, the signed `(dev, ino)`
+/// binding and held `flock` descriptor remain continuous across publication.
+pub(super) fn stage(
+    protected_root: &Path,
+    binding: &Binding<'_>,
+    signing_root: &SigningKey,
+) -> Result<StagedSupervisorLease> {
+    #[cfg(unix)]
+    {
+        unix::stage(protected_root, binding, signing_root)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (protected_root, binding, signing_root);
+        Ok(StagedSupervisorLease)
+    }
+}
+
+impl StagedSupervisorLease {
+    /// Atomically publish the already-locked, already-`fsync`ed lease marker
+    /// at its final immutable path and durably sync its parent directory.
+    pub(super) fn publish(self, protected_root: &Path) -> Result<Option<SupervisorLease>> {
+        #[cfg(unix)]
+        {
+            unix::publish(self, protected_root).map(Some)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (self, protected_root);
+            Ok(None)
+        }
+    }
+}
+
 /// Called only after bounded immutable admission retention and before the DB
 /// admission commits, with the inventory writer lock still held. A failed
 /// publication is never resumed or overwritten.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn acquire(
     protected_root: &Path,
     binding: &Binding<'_>,
@@ -248,6 +301,87 @@ mod unix {
         Ok(opened)
     }
 
+    pub(super) fn stage(
+        protected_root: &Path,
+        binding: &Binding<'_>,
+        signing_root: &SigningKey,
+    ) -> Result<StagedSupervisorLease> {
+        let trusted_root = signing_root.verifying_key();
+        validate_binding(binding, &trusted_root)?;
+        validate_root(protected_root)?;
+        let directory = protected_root.join(DIRECTORY);
+        let created_directory = match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                return Err(error)
+                    .context("create private native-session supervisor lease directory");
+            }
+        };
+        validate_directory(&directory)?;
+        let lease_path = path(protected_root, binding.session_nonce);
+        let mut staged = tempfile::NamedTempFile::new_in(&directory)
+            .context("stage immutable native-session supervisor lease")?;
+        staged.as_file().try_lock().map_err(|error| {
+            anyhow::anyhow!("staged native-session supervisor lease could not be locked: {error}")
+        })?;
+        let metadata = validate_opened(staged.path(), staged.as_file())?;
+        let mut marker = Marker {
+            schema_version: SCHEMA.to_owned(),
+            session_nonce: binding.session_nonce.to_owned(),
+            product_root_key_id: binding.product_root_key_id.to_owned(),
+            admission_sha256: binding.admission_sha256.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            signature_hex: String::new(),
+        };
+        marker.signature_hex = hex::encode(signing_root.sign(&marker.preimage()?).to_bytes());
+        marker.verify(binding, &metadata, &trusted_root)?;
+        let bytes = serde_json::to_vec(&marker)?;
+        if bytes.len() > MAX_MARKER_BYTES {
+            bail!("native-session supervisor lease exceeds its marker byte bound");
+        }
+        staged
+            .as_file_mut()
+            .write_all(&bytes)
+            .context("write staged native-session supervisor lease marker")?;
+        staged
+            .as_file()
+            .sync_all()
+            .context("sync staged native-session supervisor lease marker")?;
+        Ok(StagedSupervisorLease {
+            staged,
+            directory,
+            lease_path,
+            created_directory,
+        })
+    }
+
+    pub(super) fn publish(
+        staged: StagedSupervisorLease,
+        protected_root: &Path,
+    ) -> Result<SupervisorLease> {
+        let StagedSupervisorLease {
+            staged,
+            directory,
+            lease_path,
+            created_directory,
+        } = staged;
+        let file = staged.persist_noclobber(&lease_path).map_err(|error| {
+            anyhow::anyhow!(
+                "publish immutable native-session supervisor lease: {}",
+                error.error
+            )
+        })?;
+        validate_opened(&lease_path, &file)?;
+        File::open(&directory)?.sync_all()?;
+        if created_directory {
+            File::open(protected_root)?.sync_all()?;
+        }
+        Ok(SupervisorLease { _file: file })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn acquire(
         protected_root: &Path,
         binding: &Binding<'_>,
@@ -592,5 +726,46 @@ mod tests {
             Probe::Orphaned(_)
         ));
         assert_eq!(std::fs::read(path(&root, NONCE)).unwrap(), original);
+    }
+
+    #[test]
+    fn staged_lease_publishes_same_locked_inode_and_drops_cleanly_when_unpublished() {
+        let (_temp, root, key, root_id) = fixture();
+        let binding = binding(&root_id);
+        let lease_path = path(&root, NONCE);
+
+        // Staging must not publish the final lease path; dropping removes its temp file.
+        let unpublished = stage(&root, &binding, &key).unwrap();
+        assert!(!lease_path.exists());
+        assert!(matches!(
+            probe(&root, &binding, &key.verifying_key()).unwrap(),
+            Probe::Unproven
+        ));
+        drop(unpublished);
+        assert!(!lease_path.exists());
+        assert_eq!(
+            std::fs::read_dir(root.join(DIRECTORY)).unwrap().count(),
+            0,
+            "dropping an unpublished staged lease must leave zero files behind"
+        );
+
+        // Publishing keeps the signed (dev, ino) and held flock continuous.
+        let staged = stage(&root, &binding, &key).unwrap();
+        let owner = staged.publish(&root).unwrap().unwrap();
+        assert!(lease_path.exists());
+        let original = std::fs::read(&lease_path).unwrap();
+        assert!(matches!(
+            probe(&root, &binding, &key.verifying_key()).unwrap(),
+            Probe::Live
+        ));
+        // Second staged lease for the same nonce must refuse to clobber.
+        let duplicate = stage(&root, &binding, &key).unwrap();
+        assert!(duplicate.publish(&root).is_err());
+        assert_eq!(std::fs::read(&lease_path).unwrap(), original);
+        drop(owner);
+        assert!(matches!(
+            probe(&root, &binding, &key.verifying_key()).unwrap(),
+            Probe::Orphaned(_)
+        ));
     }
 }

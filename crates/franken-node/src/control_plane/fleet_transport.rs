@@ -928,130 +928,94 @@ pub fn validate_fleet_policy_project_root(project: &Path) -> Result<(), FleetTra
     validate_fleet_policy_project_root_with_operator(project, None)
 }
 
-/// Preserve one independently admitted deployment operator without widening
-/// the release's filesystem authority. Callers must enforce that operator's
-/// policy separately; this exception only permits its exact retained ancestor
-/// while continuing to inspect every enclosing enrollment for corruption or
-/// another control owner that has not been retained.
-pub fn validate_fleet_policy_project_root_with_operator(
-    project: &Path,
-    operator: Option<&Path>,
-) -> Result<(), FleetTransportError> {
-    if let Some(operator) = operator {
-        let normalized: PathBuf = operator.components().collect();
-        if !operator.is_absolute()
-            || normalized.as_os_str() != operator.as_os_str()
-            || operator.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::CurDir | std::path::Component::ParentDir
-                )
-            })
-        {
-            return Err(FleetTransportError::stale_state(
-                "retained fleet operator must be a normalized absolute canonical project root",
-            ));
-        }
-        let canonical_operator = operator.canonicalize().map_err(|error| {
-            FleetTransportError::io(format!(
+#[cfg(unix)]
+fn is_normalized_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+        && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+}
+
+#[cfg(unix)]
+fn validate_operator_canonical_unix(operator: &Path) -> Result<(), FleetTransportError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use rustix::io::Errno;
+    use std::path::Component;
+
+    if !is_normalized_absolute_path(operator) {
+        return Err(FleetTransportError::stale_state(
+            "retained fleet operator must be a normalized absolute canonical project root",
+        ));
+    }
+    let directories = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut current = match open("/", directories, Mode::empty()) {
+        Ok(fd) => File::from(fd),
+        Err(error) => {
+            return Err(FleetTransportError::io(format!(
                 "failed resolving retained fleet operator project root {}: {error}",
                 operator.display()
-            ))
-        })?;
-        if canonical_operator.as_os_str() != operator.as_os_str() {
-            return Err(FleetTransportError::stale_state(
-                "retained fleet operator must be a normalized absolute canonical project root",
-            ));
+            )));
         }
-    }
-    let canonical = project.canonicalize().map_err(|error| {
-        FleetTransportError::io(format!(
-            "failed resolving fleet policy project root {}: {error}",
-            project.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use rustix::fs::{Mode, OFlags, open, openat};
-        use std::path::Component;
-
-        let directories = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let parts: Vec<&std::ffi::OsStr> = canonical
-            .components()
-            .filter_map(|part| match part {
-                Component::Normal(name) => Some(name),
-                _ => None,
-            })
-            .collect();
-        if !parts.is_empty() {
-            // Walk once downward from `/` with O_NOFOLLOW to collect strict
-            // ancestor FDs in O(depth) syscalls instead of O(depth^2), then
-            // inspect them in identical nearest-ancestor-first order.
-            let mut ancestors = Vec::with_capacity(parts.len());
-            let mut current_path = PathBuf::from("/");
-            let mut current_dir =
-                File::from(open("/", directories, Mode::empty()).map_err(|error| {
-                    FleetTransportError::stale_state(format!(
-                        "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
-                         failed opening project fleet policy: {error}; \
-                         restore that enrollment and select its project directory explicitly",
-                        current_path.display(),
-                        canonical.display()
+    };
+    for part in operator.components() {
+        let Component::Normal(name) = part else {
+            continue;
+        };
+        match openat(&current, name, directories, Mode::empty()) {
+            Ok(fd) => current = File::from(fd),
+            Err(Errno::LOOP) => {
+                return Err(FleetTransportError::stale_state(
+                    "retained fleet operator must be a normalized absolute canonical project root",
+                ));
+            }
+            Err(Errno::NOTDIR | Errno::ACCESS) => {
+                let canonical_operator = operator.canonicalize().map_err(|error| {
+                    FleetTransportError::io(format!(
+                        "failed resolving retained fleet operator project root {}: {error}",
+                        operator.display()
                     ))
-                })?);
-            for name in &parts[..parts.len().saturating_sub(1)] {
-                let next_path = current_path.join(name);
-                let next_dir = File::from(
-                    openat(&current_dir, *name, directories, Mode::empty()).map_err(|error| {
-                        FleetTransportError::stale_state(format!(
-                            "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
-                             failed opening project fleet policy: {error}; \
-                             restore that enrollment and select its project directory explicitly",
-                            next_path.display(),
-                            canonical.display()
-                        ))
-                    })?,
-                );
-                ancestors.push((current_path, current_dir));
-                current_path = next_path;
-                current_dir = next_dir;
-            }
-            ancestors.push((current_path, current_dir));
-
-            for (ancestor, dir) in ancestors.into_iter().rev() {
-                let active = FleetPolicyStore::open_in_directory(&dir, false)
-                    .and_then(|store| store.map(|store| store.active()).transpose())
-                    .map(Option::flatten)
-                    .map_err(|error| {
-                        FleetTransportError::stale_state(format!(
-                            "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
-                             restore that enrollment and select its project directory explicitly",
-                            ancestor.display(),
-                            canonical.display()
-                        ))
-                    })?;
-                if active.is_some() && operator != Some(ancestor.as_path()) {
-                    return Err(FleetTransportError::stale_state(format!(
-                        "selected project {} is inside fleet-managed project {}; \
-                         select the enrolled project directory explicitly to preserve its policy",
-                        canonical.display(),
-                        ancestor.display()
-                    )));
+                })?;
+                if canonical_operator.as_os_str() != operator.as_os_str() {
+                    return Err(FleetTransportError::stale_state(
+                        "retained fleet operator must be a normalized absolute canonical project root",
+                    ));
                 }
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(FleetTransportError::io(format!(
+                    "failed resolving retained fleet operator project root {}: {error}",
+                    operator.display()
+                )));
             }
         }
     }
-    #[cfg(not(unix))]
-    for ancestor in canonical.ancestors().skip(1) {
-        let active = load_active_fleet_policy(ancestor).map_err(|error| {
-            FleetTransportError::stale_state(format!(
-                "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
-                 restore that enrollment and select its project directory explicitly",
-                ancestor.display(),
-                canonical.display()
-            ))
-        })?;
-        if active.is_some() && operator != Some(ancestor) {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn inspect_strict_ancestor_descriptors(
+    ancestors: Vec<(PathBuf, File)>,
+    canonical: &Path,
+    operator: Option<&Path>,
+) -> Result<(), FleetTransportError> {
+    for (ancestor, dir) in ancestors.into_iter().rev() {
+        let active = FleetPolicyStore::open_in_directory(&dir, false)
+            .and_then(|store| store.map(|store| store.active()).transpose())
+            .map(Option::flatten)
+            .map_err(|error| {
+                FleetTransportError::stale_state(format!(
+                    "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
+                     restore that enrollment and select its project directory explicitly",
+                    ancestor.display(),
+                    canonical.display()
+                ))
+            })?;
+        if active.is_some() && operator != Some(ancestor.as_path()) {
             return Err(FleetTransportError::stale_state(format!(
                 "selected project {} is inside fleet-managed project {}; \
                  select the enrolled project directory explicitly to preserve its policy",
@@ -1061,6 +1025,197 @@ pub fn validate_fleet_policy_project_root_with_operator(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn validate_and_optionally_load_unix(
+    project: &Path,
+    operator: Option<&Path>,
+    load_project_policy: bool,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use rustix::io::Errno;
+    use std::path::Component;
+
+    if let Some(operator) = operator {
+        validate_operator_canonical_unix(operator)?;
+    }
+
+    let directories = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    // Fast path: when `project` is already normalized and absolute, walk once
+    // from `/` through every component of `project` with `O_NOFOLLOW | O_DIRECTORY`.
+    // Success proves `project` is canonical without calling `canonicalize()`
+    // (avoiding O(depth) `readlink` syscalls) AND yields both strict ancestor
+    // descriptors and `project_dir` in one pass.
+    if is_normalized_absolute_path(project) {
+        let parts: Vec<&std::ffi::OsStr> = project
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        let mut ancestors = Vec::with_capacity(parts.len());
+        let mut current_path = PathBuf::from("/");
+        if let Ok(mut current_dir) = open("/", directories, Mode::empty()).map(File::from) {
+            let mut hit_fallback = false;
+            for name in &parts {
+                let next_path = current_path.join(name);
+                match openat(&current_dir, *name, directories, Mode::empty()) {
+                    Ok(fd) => {
+                        ancestors.push((current_path, current_dir));
+                        current_path = next_path;
+                        current_dir = File::from(fd);
+                    }
+                    Err(Errno::LOOP | Errno::NOTDIR | Errno::ACCESS) => {
+                        hit_fallback = true;
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(FleetTransportError::io(format!(
+                            "failed resolving fleet policy project root {}: {}",
+                            project.display(),
+                            std::io::Error::from(error)
+                        )));
+                    }
+                }
+            }
+            if !hit_fallback {
+                inspect_strict_ancestor_descriptors(ancestors, project, operator)?;
+                if load_project_policy {
+                    return FleetPolicyStore::open_in_directory(&current_dir, false)?
+                        .map(|store| store.active())
+                        .transpose()
+                        .map(Option::flatten);
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    // Fallback path for relative, unnormalized, symlinked, or non-directory inputs.
+    let canonical = project.canonicalize().map_err(|error| {
+        FleetTransportError::io(format!(
+            "failed resolving fleet policy project root {}: {error}",
+            project.display()
+        ))
+    })?;
+    let parts: Vec<&std::ffi::OsStr> = canonical
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    if !parts.is_empty() {
+        let mut ancestors = Vec::with_capacity(parts.len());
+        let mut current_path = PathBuf::from("/");
+        let mut current_dir =
+            File::from(open("/", directories, Mode::empty()).map_err(|error| {
+                FleetTransportError::stale_state(format!(
+                    "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
+                     failed opening project fleet policy: {error}; \
+                     restore that enrollment and select its project directory explicitly",
+                    current_path.display(),
+                    canonical.display()
+                ))
+            })?);
+        for name in &parts[..parts.len().saturating_sub(1)] {
+            let next_path = current_path.join(name);
+            let next_dir = File::from(
+                openat(&current_dir, *name, directories, Mode::empty()).map_err(|error| {
+                    FleetTransportError::stale_state(format!(
+                        "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: \
+                         failed opening project fleet policy: {error}; \
+                         restore that enrollment and select its project directory explicitly",
+                        next_path.display(),
+                        canonical.display()
+                    ))
+                })?,
+            );
+            ancestors.push((current_path, current_dir));
+            current_path = next_path;
+            current_dir = next_dir;
+        }
+        ancestors.push((current_path, current_dir));
+        inspect_strict_ancestor_descriptors(ancestors, &canonical, operator)?;
+    }
+    if load_project_policy {
+        load_active_fleet_policy(project)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Preserve one independently admitted deployment operator without widening
+/// the release's filesystem authority. Callers must enforce that operator's
+/// policy separately; this exception only permits its exact retained ancestor
+/// while continuing to inspect every enclosing enrollment for corruption or
+/// another control owner that has not been retained.
+pub fn validate_fleet_policy_project_root_with_operator(
+    project: &Path,
+    operator: Option<&Path>,
+) -> Result<(), FleetTransportError> {
+    #[cfg(unix)]
+    {
+        validate_and_optionally_load_unix(project, operator, false).map(|_| ())
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(operator) = operator {
+            let normalized: PathBuf = operator.components().collect();
+            if !operator.is_absolute()
+                || normalized.as_os_str() != operator.as_os_str()
+                || operator.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+            {
+                return Err(FleetTransportError::stale_state(
+                    "retained fleet operator must be a normalized absolute canonical project root",
+                ));
+            }
+            let canonical_operator = operator.canonicalize().map_err(|error| {
+                FleetTransportError::io(format!(
+                    "failed resolving retained fleet operator project root {}: {error}",
+                    operator.display()
+                ))
+            })?;
+            if canonical_operator.as_os_str() != operator.as_os_str() {
+                return Err(FleetTransportError::stale_state(
+                    "retained fleet operator must be a normalized absolute canonical project root",
+                ));
+            }
+        }
+        let canonical = project.canonicalize().map_err(|error| {
+            FleetTransportError::io(format!(
+                "failed resolving fleet policy project root {}: {error}",
+                project.display()
+            ))
+        })?;
+        for ancestor in canonical.ancestors().skip(1) {
+            let active = load_active_fleet_policy(ancestor).map_err(|error| {
+                FleetTransportError::stale_state(format!(
+                    "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
+                     restore that enrollment and select its project directory explicitly",
+                    ancestor.display(),
+                    canonical.display()
+                ))
+            })?;
+            if active.is_some() && operator != Some(ancestor) {
+                return Err(FleetTransportError::stale_state(format!(
+                    "selected project {} is inside fleet-managed project {}; \
+                     select the enrolled project directory explicitly to preserve its policy",
+                    canonical.display(),
+                    ancestor.display()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Apply policy to a copy and commit that copy only on success. The selected
@@ -1098,8 +1253,13 @@ pub fn enforce_active_fleet_policy_with_operator(
         })?)
     };
     let project = canonical_relative.as_deref().unwrap_or(project);
-    validate_fleet_policy_project_root_with_operator(project, operator)?;
-    let active = load_active_fleet_policy(project)?;
+    #[cfg(unix)]
+    let active = validate_and_optionally_load_unix(project, operator, true)?;
+    #[cfg(not(unix))]
+    let active = {
+        validate_fleet_policy_project_root_with_operator(project, operator)?;
+        load_active_fleet_policy(project)?
+    };
     if let Some(active) = &active {
         if config.profile != profile {
             return Err(FleetTransportError::stale_state(

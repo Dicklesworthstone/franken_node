@@ -5673,7 +5673,17 @@ impl NativeRunControlWakeup {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn for_projects(project: &Path, operator: Option<&Path>) -> Self {
+        let Ok(protected_root) =
+            crate::ops::native_session_inventory::native_session_inventory_root()
+        else {
+            return Self::new([]);
+        };
+        Self::for_projects_at(&protected_root, project, operator)
+    }
+
+    fn for_projects_at(protected_root: &Path, project: &Path, operator: Option<&Path>) -> Self {
         // A nested entrypoint remains controlled by every enclosing owner.
         // Shared ancestors need one hint read even when the deployment's
         // operator project and release have overlapping ancestry.
@@ -5682,7 +5692,11 @@ impl NativeRunControlWakeup {
             .flat_map(Path::ancestors)
             .collect::<std::collections::BTreeSet<_>>();
         let paths = projects.into_iter().filter_map(|project| {
-            crate::ops::native_session_inventory::native_session_control_hint_path(project).ok()
+            crate::ops::native_session_inventory::native_session_control_hint_path_at(
+                protected_root,
+                project,
+            )
+            .ok()
         });
         Self::new(paths)
     }
@@ -10505,166 +10519,228 @@ impl EngineDispatcher {
                 .context("operator fleet project requires its retained control anchor")?
                 .validate_project_root(operator_project)?;
         }
-        let project_paths = match self.project_paths.as_ref() {
-            Some(paths) => {
-                paths.verify_target_with_operator_project(
+        struct PreAdmissionOutcome {
+            project_paths: RunProjectPaths,
+            active_fleet_policy: Option<ActiveFleetPolicy>,
+            process_spawn_admission: Option<ChildProcessSpawnAdmission>,
+            process_spawn_trust_key_hex: Option<String>,
+            #[cfg(feature = "engine")]
+            ifc_trust_key_hex: Option<String>,
+            trust_requirements: RunTrustRequirements,
+            execution_config: Config,
+        }
+        let pre_admission = || -> Result<PreAdmissionOutcome> {
+            let mut execution_config = execution_config;
+            let project_paths = match self.project_paths.as_ref() {
+                Some(paths) => {
+                    paths.verify_target_with_operator_project(
+                        app_path,
+                        &working_dir,
+                        self.operator_fleet_project_root.as_deref(),
+                        self.registry_artifact_approval.as_ref(),
+                    )?;
+                    paths.clone()
+                }
+                None => RunProjectPaths::resolve_with_registry_artifact(
                     app_path,
                     &working_dir,
                     self.operator_fleet_project_root.as_deref(),
                     self.registry_artifact_approval.as_ref(),
-                )?;
-                paths.clone()
-            }
-            None => RunProjectPaths::resolve_with_registry_artifact(
-                app_path,
-                &working_dir,
-                self.operator_fleet_project_root.as_deref(),
-                self.registry_artifact_approval.as_ref(),
-            )?,
-        };
-        project_paths.enforce_safe_mode()?;
-        let active_fleet_policy = enforce_execution_fleet_policy_with_operator(
-            project_paths.project_root(),
-            &mut execution_config,
-            self.preflight_fleet_policy.as_ref(),
-            self.operator_fleet_project_root.as_deref(),
-        )?;
-        let operator_fleet_policy =
-            if let Some(operator_project) = &self.operator_fleet_project_root {
-                enforce_execution_fleet_policy(
-                    operator_project,
-                    &mut execution_config,
-                    self.preflight_operator_fleet_policy.as_ref(),
-                )?
-            } else {
-                anyhow::ensure!(
-                    self.preflight_operator_fleet_policy.is_none(),
-                    "operator fleet policy has no retained operator project"
-                );
-                None
+                )?,
             };
-        let operator_protected_paths = Self::operator_protected_paths_with_defaults(
-            &self.operator_protected_paths,
-            project_paths.project_root(),
-            &working_dir,
-        )?;
-        Self::apply_operator_source_capture_defaults(
-            &mut execution_config,
-            &project_paths,
-            &operator_protected_paths,
-        )?;
-        validate_native_frozen_modules(&execution_config)?;
-        #[cfg(not(feature = "engine"))]
-        let _ = &active_fleet_policy;
-        let config = &execution_config;
+            project_paths.enforce_safe_mode()?;
+            let active_fleet_policy = enforce_execution_fleet_policy_with_operator(
+                project_paths.project_root(),
+                &mut execution_config,
+                self.preflight_fleet_policy.as_ref(),
+                self.operator_fleet_project_root.as_deref(),
+            )?;
+            let operator_fleet_policy =
+                if let Some(operator_project) = &self.operator_fleet_project_root {
+                    enforce_execution_fleet_policy(
+                        operator_project,
+                        &mut execution_config,
+                        self.preflight_operator_fleet_policy.as_ref(),
+                    )?
+                } else {
+                    anyhow::ensure!(
+                        self.preflight_operator_fleet_policy.is_none(),
+                        "operator fleet policy has no retained operator project"
+                    );
+                    None
+                };
+            let operator_protected_paths = Self::operator_protected_paths_with_defaults(
+                &self.operator_protected_paths,
+                project_paths.project_root(),
+                &working_dir,
+            )?;
+            Self::apply_operator_source_capture_defaults(
+                &mut execution_config,
+                &project_paths,
+                &operator_protected_paths,
+            )?;
+            validate_native_frozen_modules(&execution_config)?;
 
-        // The compatibility runner may supply a public key through its
-        // kernel-authenticated exact-parent channel. These environment values
-        // are only rendezvous hints; a value is accepted only after peer PID,
-        // uid/gid, executable identity, and nonce validation. Ordinary runs
-        // never take a key from config or environment and retain the fixed
-        // operator trust anchor.
-        #[cfg(all(feature = "engine", target_os = "linux"))]
-        let process_spawn_trust_key_hex =
-            receive_authenticated_corpus_process_authority().map_err(|error| {
+            // The compatibility runner may supply a public key through its
+            // kernel-authenticated exact-parent channel. These environment values
+            // are only rendezvous hints; a value is accepted only after peer PID,
+            // uid/gid, executable identity, and nonce validation. Ordinary runs
+            // never take a key from config or environment and retain the fixed
+            // operator trust anchor.
+            #[cfg(all(feature = "engine", target_os = "linux"))]
+            let process_spawn_trust_key_hex = receive_authenticated_corpus_process_authority()
+                .map_err(|error| {
+                    ActionableError::new(
+                        format!("Authenticated corpus process authority failed: {error}"),
+                        "Run through `franken-node ops compat-corpus-run`, or remove the internal corpus authority rendezvous variables",
+                    )
+                })?;
+            #[cfg(not(all(feature = "engine", target_os = "linux")))]
+            let process_spawn_trust_key_hex: Option<String> = None;
+            if process_spawn_trust_key_hex.is_some()
+                && execution_config.security.child_process_spawn.is_none()
+            {
+                return Err(ActionableError::new(
+                    "Authenticated corpus process authority was presented without a signed child-process policy.",
+                    "Use the corpus runner's complete per-case signed policy, or remove the internal authority channel",
+                )
+                .into());
+            }
+
+            // Authenticate the signed opt-in and establish backend readiness before
+            // any guest execution. The returned value is deliberately not enough
+            // to grant authority: the worker independently reconstructs the active
+            // namespace proof before `process_spawn` enters its capability set.
+            let process_spawn_admission = match process_spawn_trust_key_hex.as_deref() {
+                Some(trusted_key) => {
+                    configured_child_process_spawn_admission_from_authenticated_run_key(
+                        &execution_config,
+                        trusted_key,
+                    )
+                }
+                None => configured_child_process_spawn_admission(&execution_config),
+            }
+            .map_err(|error| {
                 ActionableError::new(
-                    format!("Authenticated corpus process authority failed: {error}"),
-                    "Run through `franken-node ops compat-corpus-run`, or remove the internal corpus authority rendezvous variables",
+                    format!("Child-process-spawn admission failed: {error}"),
+                    "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
                 )
             })?;
-        #[cfg(not(all(feature = "engine", target_os = "linux")))]
-        let process_spawn_trust_key_hex: Option<String> = None;
-        if process_spawn_trust_key_hex.is_some() && config.security.child_process_spawn.is_none() {
-            return Err(ActionableError::new(
-                "Authenticated corpus process authority was presented without a signed child-process policy.",
-                "Use the corpus runner's complete per-case signed policy, or remove the internal authority channel",
+            #[cfg(feature = "engine")]
+            let ifc_trust_key_hex = verify_configured_ifc_declassifications(
+                project_paths.project_root(),
+                &execution_config,
+                None,
+                security_epoch_for_profile(execution_config.profile).as_u64(),
             )
-            .into());
-        }
-
-        // Authenticate the signed opt-in and establish backend readiness before
-        // any guest execution. The returned value is deliberately not enough
-        // to grant authority: the worker independently reconstructs the active
-        // namespace proof before `process_spawn` enters its capability set.
-        let process_spawn_admission = match process_spawn_trust_key_hex.as_deref() {
-            Some(trusted_key) => {
-                configured_child_process_spawn_admission_from_authenticated_run_key(
-                    config,
-                    trusted_key,
+            .map_err(|error| {
+                ActionableError::new(
+                    format!("IFC declassification policy admission failed: {error}"),
+                    "Sign rules with `franken-node trust sign-declassification` using the project operator key, or remove invalid `[[security.ifc.declassify]]` entries",
                 )
-            }
-            None => configured_child_process_spawn_admission(config),
-        }
-        .map_err(|error| {
-            ActionableError::new(
-                format!("Child-process-spawn admission failed: {error}"),
-                "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
-            )
-        })?;
-        #[cfg(not(feature = "engine"))]
-        let _ = &process_spawn_admission;
-        #[cfg(feature = "engine")]
-        verify_configured_ifc_declassifications(
-            project_paths.project_root(),
-            config,
-            None,
-            security_epoch_for_profile(config.profile).as_u64(),
-        )
-        .map_err(|error| {
-            ActionableError::new(
-                format!("IFC declassification policy admission failed: {error}"),
-                "Sign rules with `franken-node trust sign-declassification` using the project operator key, or remove invalid `[[security.ifc.declassify]]` entries",
-            )
-        })?;
+            })?
+            .map(|(pk_hex, _)| pk_hex);
 
-        let mut trust_requirements = RunTrustRequirements::new(
-            &self.preflight_dependency_ids,
-            trusted_extension_ids,
-            self.preflight_registry_required,
-        )?
-        .with_operator_protected_paths(operator_protected_paths)?;
-        if let Some(capture) = &self.preflight_dependency_capture {
-            trust_requirements = trust_requirements.with_dependency_capture(capture.clone())?;
-        }
-        if let Some(approval) = &self.registry_artifact_approval {
-            trust_requirements =
-                trust_requirements.with_registry_artifact_approval(approval.clone())?;
-        }
-        if let Some(scope) = &self.operator_safe_mode_scope {
-            trust_requirements = trust_requirements.with_operator_safe_mode_scope(scope.clone())?;
-        }
-        if let Some(project_root) = &self.operator_fleet_project_root {
-            trust_requirements = trust_requirements
-                .with_operator_fleet_project(project_root.clone(), operator_fleet_policy)?;
-        }
-        if let Some(restriction) = &self.deployment_activation {
-            trust_requirements =
-                trust_requirements.with_deployment_activation(restriction.clone())?;
-        }
-        if let Some(nonce) = &self.admitted_native_session_nonce {
-            trust_requirements =
-                trust_requirements.with_admitted_native_session_nonce(nonce.clone())?;
-        }
-        trust_requirements
-            .enforce_operator_safe_mode()
-            .context("operator safe-mode admission failed at dispatch")?;
-        trust_requirements
-            .enforce_deployment_activation()
-            .context("deployment activation admission failed at dispatch")?;
-        trust_requirements
-            .verify_registry_artifact(&project_paths, config)
-            .context("publisher source admission failed at dispatch")?;
-        trust_requirements
-            .verify_dependency_capture(project_paths.project_root())
-            .context("dependency metadata changed after run preflight")?;
-        for warning in validate_execution_trust(
-            project_paths.project_root(),
-            config,
-            &trust_requirements,
-            now_secs,
-        )? {
-            tracing::warn!(%warning, "Dependency trust warning at dispatch admission");
-        }
+            let mut trust_requirements = RunTrustRequirements::new(
+                &self.preflight_dependency_ids,
+                trusted_extension_ids,
+                self.preflight_registry_required,
+            )?
+            .with_operator_protected_paths(operator_protected_paths)?;
+            if let Some(capture) = &self.preflight_dependency_capture {
+                trust_requirements = trust_requirements.with_dependency_capture(capture.clone())?;
+            }
+            if let Some(approval) = &self.registry_artifact_approval {
+                trust_requirements =
+                    trust_requirements.with_registry_artifact_approval(approval.clone())?;
+            }
+            if let Some(scope) = &self.operator_safe_mode_scope {
+                trust_requirements =
+                    trust_requirements.with_operator_safe_mode_scope(scope.clone())?;
+            }
+            if let Some(project_root) = &self.operator_fleet_project_root {
+                trust_requirements = trust_requirements
+                    .with_operator_fleet_project(project_root.clone(), operator_fleet_policy)?;
+            }
+            if let Some(restriction) = &self.deployment_activation {
+                trust_requirements =
+                    trust_requirements.with_deployment_activation(restriction.clone())?;
+            }
+            if let Some(nonce) = &self.admitted_native_session_nonce {
+                trust_requirements =
+                    trust_requirements.with_admitted_native_session_nonce(nonce.clone())?;
+            }
+            trust_requirements
+                .enforce_operator_safe_mode()
+                .context("operator safe-mode admission failed at dispatch")?;
+            trust_requirements
+                .enforce_deployment_activation()
+                .context("deployment activation admission failed at dispatch")?;
+            trust_requirements
+                .verify_registry_artifact(&project_paths, &execution_config)
+                .context("publisher source admission failed at dispatch")?;
+            trust_requirements
+                .verify_dependency_capture(project_paths.project_root())
+                .context("dependency metadata changed after run preflight")?;
+            for warning in validate_execution_trust(
+                project_paths.project_root(),
+                &execution_config,
+                &trust_requirements,
+                now_secs,
+            )? {
+                tracing::warn!(%warning, "Dependency trust warning at dispatch admission");
+            }
+            Ok(PreAdmissionOutcome {
+                project_paths,
+                active_fleet_policy,
+                process_spawn_admission,
+                process_spawn_trust_key_hex,
+                #[cfg(feature = "engine")]
+                ifc_trust_key_hex,
+                trust_requirements,
+                execution_config,
+            })
+        };
+
+        // Pre-open an already-existing `native-sessions.db` on the main thread
+        // (since `fsqlite::Connection` is `!Send`) concurrently with the
+        // `Send + Sync` pre-admission checks and `PrewarmedEvidenceWorker`'s
+        // `evidence-ledger.db` open. Never creates files or directories when
+        // the inventory is absent.
+        #[cfg(feature = "engine")]
+        let (pre_admission_result, mut preopened_inventory) = if matches!(
+            self.requested_runtime,
+            PreferredRuntime::Auto | PreferredRuntime::FrankenEngine
+        ) {
+            std::thread::scope(|scope| {
+                let handle = scope.spawn(pre_admission);
+                let preopened =
+                    crate::ops::native_session_inventory::preopen_existing_native_session_inventory(
+                    );
+                let result = handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("dispatcher pre-admission panicked")));
+                (result, preopened)
+            })
+        } else {
+            (pre_admission(), None)
+        };
+        #[cfg(not(feature = "engine"))]
+        let pre_admission_result = pre_admission();
+
+        let PreAdmissionOutcome {
+            project_paths,
+            active_fleet_policy,
+            process_spawn_admission,
+            process_spawn_trust_key_hex,
+            #[cfg(feature = "engine")]
+            ifc_trust_key_hex,
+            trust_requirements,
+            execution_config,
+        } = pre_admission_result?;
+        #[cfg(not(feature = "engine"))]
+        let _ = (&active_fleet_policy, &process_spawn_admission);
+        let config = &execution_config;
 
         // Precedence: explicit runtime selection > CLI --engine-bin > FRANKEN_ENGINE_BIN env > config [engine].binary_path > candidates.
         let env_override = std::env::var("FRANKEN_ENGINE_BIN").ok();
@@ -11004,6 +11080,8 @@ impl EngineDispatcher {
                 } else {
                     None
                 },
+                preopened_inventory.take(),
+                Some(ifc_trust_key_hex),
             )
             .map_err(|mut error| {
                 record_native_panic_for_run(
@@ -11666,12 +11744,15 @@ impl EngineDispatcher {
             app_args,
             capture_replay,
             None,
+            None,
+            None,
         )
     }
 
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::option_option)]
     fn run_engine_native_with_error_handling_and_finalizer(
         app_path: &Path,
         project_paths: &RunProjectPaths,
@@ -11688,6 +11769,10 @@ impl EngineDispatcher {
         deferred_finalizer: Option<
             &mut Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>,
         >,
+        preopened_inventory: Option<
+            crate::ops::native_session_inventory::PreopenedNativeSessionInventory,
+        >,
+        preverified_ifc_trust_key_hex: Option<Option<String>>,
     ) -> Result<NativeEngineDispatchSuccess> {
         use std::time::Duration;
 
@@ -11713,6 +11798,8 @@ impl EngineDispatcher {
             capture_replay,
             timeout,
             deferred_finalizer,
+            preopened_inventory,
+            preverified_ifc_trust_key_hex,
         )
     }
 
@@ -11753,11 +11840,14 @@ impl EngineDispatcher {
             capture_replay,
             timeout,
             None,
+            None,
+            None,
         )
     }
 
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::option_option)]
     // Nine arguments, two over the lint's threshold. Every one is a distinct,
     // independently-sourced input to a single subprocess supervision call — the
     // app, the resolved config, the policy mode, two socket/worker paths, the
@@ -11789,6 +11879,10 @@ impl EngineDispatcher {
         deferred_finalizer: Option<
             &mut Option<crate::ops::native_session_inventory::DeferredNativeSessionFinalizer>,
         >,
+        preopened_inventory: Option<
+            crate::ops::native_session_inventory::PreopenedNativeSessionInventory,
+        >,
+        preverified_ifc_trust_key_hex: Option<Option<String>>,
     ) -> Result<NativeEngineDispatchSuccess> {
         use base64::Engine as _;
         use std::sync::mpsc;
@@ -12196,8 +12290,9 @@ impl EngineDispatcher {
         // authority and compared atomically with the admission record. A
         // completed parent fence cannot admit a preflight predating its census.
         let admission_ticket =
-            crate::ops::native_session_inventory::native_session_admission_ticket_with_connection(
+            crate::ops::native_session_inventory::native_session_admission_ticket_with_preopened(
                 project_paths.project_root(),
+                preopened_inventory,
             )?;
         let operator_admission = trust_requirements
             .operator_fleet_project_root
@@ -12378,7 +12473,8 @@ impl EngineDispatcher {
         // Snapshot the advisory control-hint pages before inventory admission
         // so even a drain fence published between admission and monitor spawn
         // wakes the observer immediately on its first wait check.
-        let control_wakeup = NativeRunControlWakeup::for_projects(
+        let control_wakeup = NativeRunControlWakeup::for_projects_at(
+            &runtime_evidence_state_root,
             project_paths.project_root(),
             trust_requirements.operator_fleet_project_root.as_deref(),
         );
@@ -12416,21 +12512,24 @@ impl EngineDispatcher {
                 &evidence_capture_bytes,
             )
             .context("native-session inventory admission failed; worker was not started")?;
-        let ifc_trust_key_hex = verify_configured_ifc_declassifications(
-            project_paths.project_root(),
-            config,
-            None,
-            security_epoch_for_profile(config.profile).as_u64(),
-        )
-        .map_err(|error| {
-            EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: format!("IFC declassification policy admission failed: {error}"),
-                phase: "worker startup".to_string(),
-            }
-            .to_actionable()
-        })?
-        .map(|(pk_hex, _)| pk_hex);
+        let ifc_trust_key_hex = match preverified_ifc_trust_key_hex {
+            Some(preverified) => preverified,
+            None => verify_configured_ifc_declassifications(
+                project_paths.project_root(),
+                config,
+                None,
+                security_epoch_for_profile(config.profile).as_u64(),
+            )
+            .map_err(|error| {
+                EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf.clone(),
+                    error_message: format!("IFC declassification policy admission failed: {error}"),
+                    phase: "worker startup".to_string(),
+                }
+                .to_actionable()
+            })?
+            .map(|(pk_hex, _)| pk_hex),
+        };
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
