@@ -241,6 +241,69 @@ including when an exporter tries to strip them and downgrade to v1 or v2.
 Source data and base64 are redacted from diagnostic and `Debug` output; the
 private export itself contains the retained source code.
 
+### Verify a retained source-graph report
+
+Rust and CLI callers can also supply the graph report captured for the admitted
+source capsule. This works before any terminal outcome exists and after a worker
+is interrupted. The report must describe the exact sources already authenticated
+by the original admission; the verifier never recaptures the current project.
+
+```sh
+franken-verifier verify --format native-session-forensics \
+  --trusted-key-hex "$TRUSTED_PRODUCT_ROOT_PUBLIC_KEY_HEX" \
+  --expected-session-nonce "$EXPECTED_SESSION_NONCE" \
+  --expected-admission-sha256 "$EXPECTED_ADMISSION_SHA256" \
+  --graph-report captured-source-graph.json \
+  < INC-SESSION-UUID.fnforensics.json
+```
+
+The expected session and admission options remain optional as a pair. When
+supplied, they retain the same independent enrollment requirement described
+above. The verifier authenticates the original admission, source capsule,
+durable journal and outcome, and checks these identity pins before interpreting
+the report. A valid graph report cannot replace any of these checks.
+
+The report is separately bounded to 32 MiB. The CLI accepts a regular file,
+including a symlink to one, with checks on the opened descriptor and the actual
+bytes read. The Rust API accepts the report bytes directly:
+
+```rust,ignore
+let verified = native_session::verify_native_session_forensics_with_graph_report(
+    &export_bytes,
+    &trusted_product_root,
+    expected_identity.as_ref(), // Option<&NativeSessionExpectedIdentity>
+    &graph_report_bytes,
+)?;
+```
+
+This verifies the report's strict schema, canonical graph commitment, retained
+input observations, module and resolution targets, edges, and source byte
+commitments against the pre-entry capsule. It adds `graph_report` with a
+source-free digest and count summary. `graph_report.graph_hash_recomputed` is
+`true`; `graph_report.graph_semantics_reconstructed` remains `false`. The
+existing byte-only `source_capsule.graph_hash_recomputed` remains `false`.
+`report_sha256` identifies the exact supplied report bytes. The summary does
+not include graph paths, module specifiers, dependency names or source code.
+
+The verification scope remains `authenticated_supervisor_observations`.
+Pending and interrupted observations keep their original process and effect
+status. Rehashing the recorded graph does not independently reconstruct resolver
+semantics, prove that execution completed, certify remote-effect cleanup or
+show that the retained history is complete. The graph's
+`declared_fully_resolved` is the producer's declaration, and all existing replay,
+quiescence and historical-completeness flags remain false.
+
+Requesting a graph check for an otherwise valid v1/v2 export without sources
+fails with `GRAPH_REPORT_MISSING`. A malformed, ambiguous, modified or foreign
+report fails with `GRAPH_REPORT_INVALID`; unavailable or nonregular report files
+fail with `GRAPH_REPORT_IO`, and oversized CLI files with `INPUT_TOO_LARGE`.
+Missing or damaged v3 source data still fails its original schema or source
+check. An explicit graph requirement never falls back to byte-only success.
+Omitting `--graph-report` preserves the existing output without a
+`graph_report` field. Native-session graph verification is currently exposed
+through Rust and the CLI; the Python, JavaScript and TypeScript clients do not
+expose this native graph option.
+
 ## Bounded, unambiguous parsing
 
 The complete v1 export is limited to 16 MiB, v2 to 32 MiB and v3 to 96 MiB.
@@ -460,3 +523,103 @@ reconstruct the full epoch/action history, or prove that admission holds remain
 active now. The fixture `tests/fixtures/fleet_epoch_commit.json` was signed
 independently using Node's Ed25519 implementation and includes canonical digest
 expectations. It exercises the wire protocol, not a live multi-node campaign.
+
+## Independently verify compacted native sessions
+
+`ops session-inventory compact --archive-dir ...` retains completed clean
+sessions in a product-root-signed `franken-node/native-session-cold-archive/v1`
+archive. The standalone Rust SDK, CLI, and Python and JavaScript/TypeScript
+clients can authenticate those portable archives without the product database
+or the original session files:
+
+```sh
+franken-verifier verify --format native-session-cold-archive \
+  --trusted-key-hex "$ENROLLED_PRODUCT_ROOT_PUBLIC_KEY" \
+  --expected-archive-root-sha256 "$RECORDED_ARCHIVE_MERKLE_ROOT" \
+  < native-session-archive.json
+```
+
+Supply the root public key from independent enrollment. The optional expected
+Merkle root is a raw, lowercase, 64-character SHA-256 recorded separately from
+the candidate archive. It pins the ordered session population. It does not pin
+operator text or the archival timestamp, which may be re-attested over the
+same population. `artifact_sha256` and `facts.archive_sha256` identify the exact
+transported bytes.
+
+Rust callers use `native_session::verify_native_session_cold_archive(bytes,
+&trusted_root)` or
+`native_session::verify_native_session_cold_archive_with_expected_root(bytes,
+&trusted_root, expected_merkle_root)`.
+
+The language clients use the same explicit product root and optional population
+pin. Keep the input as original bytes so that full-width admission integers and
+the transport digest remain exact:
+
+```python
+verified = verify_artifact(
+    archive_bytes,
+    enrolled_product_root_hex,
+    verifier="/trusted/bin/franken-verifier",
+    format="native-session-cold-archive",
+    expected_archive_root_sha256=retained_population_root,
+)
+assert verified["facts"]["original_receipt_signatures_verified"] is False
+```
+
+```typescript
+const verified = await verifyArtifact(archiveBytes, enrolledProductRootHex, {
+  verifier: "/trusted/bin/franken-verifier",
+  format: "native-session-cold-archive",
+  expectedArchiveRootSha256: retainedPopulationRoot,
+});
+if (verified.format === "native-session-cold-archive") {
+  const replayCertified: false = verified.facts.replay_certified;
+  console.log(verified.facts.session_count, verified.facts.merkle_root_sha256);
+}
+```
+
+Both clients reject malformed or misapplied root pins before launching the
+verifier. They require the returned scope, root identity, digest encodings,
+population bounds and false proof flags to match the archive contract. Returned
+archive facts must bind to the exact supplied bytes, and a requested population
+root must match even if a faulty verifier ignores the command-line option.
+
+Verification rejects duplicate JSON members, unknown fields, duplicate session
+nonces, entry/root identity disagreement, invalid admission paths and metadata,
+and outcomes that are not completed, worker-reaped, non-panic observations with
+a consistent final-ledger summary and zero denied/failed effects. It recomputes
+each leaf from the producer's ordered typed JSON, including UTC timestamp
+normalization and historical optional-field omission. Leaf components use
+eight-byte big-endian UTF-8 byte lengths. Merkle nodes hash the lowercase hex
+children separated by `:`, duplicating the final child at each odd level.
+The strict Ed25519 signature authenticates the domain-prefixed ordered archive
+metadata; this signature protocol has no length prefix.
+
+Success uses scope `authenticated_archived_supervisor_observations`. Returned
+facts contain the trusted root identity, archive timestamp, session count,
+source-bound session count, Merkle root, and exact archive digest. They omit
+operator text, project paths, dependency names, and individual session records.
+Captured paths are never opened.
+
+The archive contains a compaction-time statement, not the original signed
+admission/outcome receipts, source capsule bytes, final effect ledger, or durable
+effect journal. Therefore `original_receipt_signatures_verified`,
+`replay_certified`, `quiescence_certified`, and `historical_completeness` remain
+false. A source-binding count only describes retained commitments. An archived
+clean supervisor outcome does not independently prove external-effect cleanup,
+historical completeness, current freshness, or current revocation status.
+
+The SDK accepts at most 64 MiB of archive JSON and 16,384 sessions, with canonical
+admission/outcome limits of 4 MiB and 5 MiB per entry. The 64 MiB outer limit is
+an explicit standalone-verifier bound; the producer can create larger archives.
+Use smaller `--max-sessions-to-archive` compaction batches for those populations.
+Oversized input fails with `INPUT_TOO_LARGE`; wrong population pins fail with
+`EXPECTED_ARCHIVE_ROOT_MISMATCH`. Signature, session, leaf, and Merkle failures
+have distinct stable codes without captured values in diagnostics.
+
+`tests/fixtures/native_session_cold_archives.json` contains synthetic protocol
+vectors generated independently with Python `hashlib` and `cryptography` using
+the public RFC 8032 test key. It covers singleton and odd-sized trees, alternate
+timestamp spellings, full-width integers, Windows paths, historical option
+omission, and validly signed semantic failures. It establishes wire-protocol
+compatibility, not live compaction or recovery qualification.

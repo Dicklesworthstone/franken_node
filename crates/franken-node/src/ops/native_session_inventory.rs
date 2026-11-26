@@ -44,6 +44,9 @@ use super::engine_dispatcher::{
     runtime_evidence_user_state_home, validate_runtime_evidence_private_file_metadata,
 };
 
+#[path = "native_session_lease.rs"]
+mod supervisor_lease;
+
 const INVENTORY_SCHEMA: &str = "franken-node/native-session-inventory/v1";
 const FORENSIC_INVENTORY_SCHEMA: &str = "franken-node/native-session-forensic-inventory/v1";
 const MAX_FORENSIC_DIAGNOSTIC_BYTES: usize = 4096;
@@ -2488,6 +2491,7 @@ pub(crate) struct NativeSessionInventoryGuard {
     process: NativeSessionProcessObservation,
     containment_empty_observed: bool,
     finished: bool,
+    supervisor_lease: Option<supervisor_lease::SupervisorLease>,
 }
 
 /// Deferred completion handle for an already-reaped native session. Allows the
@@ -2710,7 +2714,10 @@ impl NativeSessionInventoryGuard {
             deferred_capture.map(|(_, bytes)| bytes),
             deferred_capture.is_some(),
         )?;
-        drop(product_root);
+        let admission_sha256 = admission_digest(&admission)?;
+        // Keep an acquired descriptor across transaction retries. Refused
+        // uniqueness/capacity checks must not create extra ownership objects.
+        let mut supervisor_lease = None;
         // A refused attempt keeps the same decision and timestamp through
         // transaction retries. Its receipt is issued only after this unique
         // insertion commits, so a duplicate/losing admission cannot create a
@@ -2785,11 +2792,26 @@ impl NativeSessionInventoryGuard {
             } else {
                 check_reservation_usage(count, bytes, MAX_STORED_SESSIONS, MAX_RESERVED_BYTES)?;
             }
+            // The row is still private to this transaction and the inventory
+            // writer lock excludes compaction. Acquire before publishing the
+            // admission, after its immutable retention and reservation checks.
+            if supervisor_lease.is_none() {
+                supervisor_lease = supervisor_lease::acquire(
+                    protected_root,
+                    &supervisor_lease::Binding {
+                        session_nonce: &admission.session_nonce,
+                        product_root_key_id: &admission.product_root_key_id,
+                        admission_sha256: &admission_sha256,
+                    },
+                    &product_root,
+                )?;
+            }
             tx.commit()?;
             protect_sidecars(protected_root)?;
             Ok((admitted, recovered_sessions))
         })
         .context("persist native-session admission before worker spawn")?;
+        drop(product_root);
         drop(write_lock);
         if recovered_sessions > 0 {
             tracing::info!(
@@ -2825,6 +2847,7 @@ impl NativeSessionInventoryGuard {
             process: NativeSessionProcessObservation::NotSpawned,
             containment_empty_observed: false,
             finished: false,
+            supervisor_lease,
         };
         let journal = staged_journal
             .map(|staged| staged.publish(protected_root))
@@ -2897,6 +2920,9 @@ impl NativeSessionInventoryGuard {
                 "native-session outcome could not be persisted; admission remains unresolved");
         }
         self.finished = true;
+        // Reaping the worker alone is insufficient: deferred finalization keeps
+        // ownership until the exact outcome persistence attempt has finished.
+        self.supervisor_lease = None;
     }
 
     /// Retain details from an already validated Panicked response without
@@ -2929,6 +2955,7 @@ impl NativeSessionInventoryGuard {
         }
         let persisted = self.persist_outcome(&outcome);
         self.finished = true;
+        self.supervisor_lease = None;
         persisted.context("failed persisting the authenticated native panic outcome")?;
         if let Some(error) = detail_error {
             return Err(error.context(
@@ -3245,6 +3272,47 @@ fn latest_drain_unchecked_table(
     }
     drain.actions.validate()?;
     Ok(Some(drain))
+}
+
+/// Preserve each project's latest unresolved census while compacting. Older
+/// generations can remain marked held after a later generation supersedes them;
+/// retaining all historical held rows would permanently prevent reclamation.
+fn compaction_protected_sessions(
+    tx: &Transaction<'_>,
+    trusted_root: &ed25519_dalek::VerifyingKey,
+) -> Result<BTreeSet<String>> {
+    let mut protected = BTreeSet::new();
+    if !drains_table_has_rows(tx)? {
+        return Ok(protected);
+    }
+    check_retained_drain_byte_budget(tx)?;
+    let projects = tx.query(&format!(
+        "SELECT DISTINCT project_root FROM native_session_drains
+         ORDER BY project_root LIMIT {};",
+        MAX_RETAINED_DRAINS + 1,
+    ))?;
+    if projects.len() > MAX_RETAINED_DRAINS {
+        bail!("native-session compaction drain census exceeds its project bound");
+    }
+    for row in projects {
+        let [SqliteValue::Text(project)] = row.values() else {
+            bail!("native-session compaction drain project is invalid");
+        };
+        let project: &str = project.as_ref();
+        let project_root = Path::new(project);
+        project_key(project_root)?;
+        let drain = latest_drain_unchecked_table(tx, project_root, project)?
+            .context("native-session drain disappeared during compaction snapshot")?;
+        if drain.census_signature_hex.is_some() {
+            drain.verify_census(trusted_root)?;
+        }
+        // Historical unsigned fences still retain obligations. An absent
+        // signature cannot authorize removing their last supporting evidence.
+        if drain.fence_held || !drain.actions_applied {
+            protected.extend(drain.session_nonces);
+        }
+    }
+    Ok(protected)
 }
 
 fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u64> {
@@ -6180,7 +6248,9 @@ pub fn inspect_native_session_inventory_status_at(
 /// incident, failed, panicked, denied-effect, or active session evidence:
 /// 1. Recovers any already-signed `session-outcomes/` receipts.
 /// 2. When `finalize_orphaned_pending` + `confirm` are explicitly requested by
-///    an operator, seals aged `outcome_json IS NULL` rows with honest signed
+///    an operator, seals aged `outcome_json IS NULL` rows only after acquiring
+///    their authenticated supervisor ownership lease. Live, missing-lease and
+///    unresolved-drain sessions remain retained. Eligible orphans receive signed
 ///    `SupervisionIncomplete` + `Unproven` + `Unknown` outcomes (preserving
 ///    unresolved-effect alarms while releasing ~5.35 MiB phantom reservations).
 /// 3. When `archive_dir` is supplied, seals authenticated clean completed exit-0
@@ -6253,6 +6323,12 @@ pub fn compact_native_session_inventory_at(
     )?;
     let verifying_key = root_key.verifying_key();
     let _write_lock = lock_inventory_file(protected_root, false)?;
+    let protected_sessions = retry_snapshot_conflict(|| {
+        let connection = open_inventory_unlocked(protected_root, false)?
+            .context("native-session inventory disappeared before compaction census")?;
+        let tx = connection.transaction()?;
+        compaction_protected_sessions(&tx, &verifying_key)
+    })?;
 
     let mut recovered_signed_outcomes = 0_usize;
     let mut finalized_orphaned_pending = 0_usize;
@@ -6286,9 +6362,6 @@ pub fn compact_native_session_inventory_at(
     // Phase 2: Explicit operator finalization of aged orphaned pending rows.
     if request.finalize_orphaned_pending {
         let now = Utc::now();
-        let min_age = chrono::Duration::seconds(
-            i64::try_from(request.min_pending_age_secs).unwrap_or(i64::MAX),
-        );
         let remaining_pending = retry_snapshot_conflict(|| {
             let connection = open_inventory_unlocked(protected_root, false)?
                 .context("native-session inventory disappeared before pending finalization")?;
@@ -6296,39 +6369,102 @@ pub fn compact_native_session_inventory_at(
             read_records_in_transaction_matching(&tx, true)
         })?;
         let mut to_finalize = Vec::new();
+        let mut retained_live = 0_usize;
+        let mut retained_unproven = 0_usize;
+        let mut retained_for_drain = 0_usize;
         for record in remaining_pending {
-            if now.signed_duration_since(record.admission.admitted_at) >= min_age {
-                let honest_outcome = NativeSessionOutcome {
+            let old_enough = now
+                .signed_duration_since(record.admission.admitted_at)
+                .to_std()
+                .is_ok_and(|age| age.as_secs() >= request.min_pending_age_secs);
+            if !old_enough {
+                continue;
+            }
+            if protected_sessions.contains(&record.admission.session_nonce) {
+                retained_for_drain += 1;
+                continue;
+            }
+            let Some(receipt) =
+                read_admission_receipt(protected_root, &record.admission, &verifying_key)?
+            else {
+                retained_unproven += 1;
+                continue;
+            };
+            let lease = match supervisor_lease::probe(
+                protected_root,
+                &supervisor_lease::Binding {
+                    session_nonce: &record.admission.session_nonce,
+                    product_root_key_id: &record.admission.product_root_key_id,
+                    admission_sha256: &receipt.admission_sha256,
+                },
+                &verifying_key,
+            )? {
+                supervisor_lease::Probe::Live => {
+                    retained_live += 1;
+                    continue;
+                }
+                supervisor_lease::Probe::Unproven => {
+                    retained_unproven += 1;
+                    continue;
+                }
+                supervisor_lease::Probe::Orphaned(lease) => lease,
+            };
+            // A supervisor can publish its real receipt and die after phase
+            // one's snapshot. Recover that exact observation before considering
+            // an operator's weaker unknown outcome.
+            let retained = read_outcome_receipt(protected_root, &record.admission, &verifying_key)?;
+            let recovered = retained.is_some();
+            let outcome = match retained {
+                Some(receipt) => receipt.outcome,
+                None => NativeSessionOutcome {
                     observed_at: now,
                     kind: NativeSessionOutcomeKind::SupervisionIncomplete,
                     process: NativeSessionProcessObservation::Unproven,
                     containment_empty_observed: false,
                     effects: NativeSessionEffectObservation::Unknown,
                     panic_evidence: None,
-                };
-                validate_outcome(&record.admission, &honest_outcome)?;
-                retain_outcome_receipt(protected_root, &record.admission, &honest_outcome)?;
-                to_finalize.push((record.admission, honest_outcome));
+                },
+            };
+            validate_outcome(&record.admission, &outcome)?;
+            if !recovered {
+                retain_outcome_receipt(protected_root, &record.admission, &outcome)?;
             }
+            // Keep every acquired descriptor until the projection commit;
+            // timestamp or PID state never substitutes for this ownership.
+            to_finalize.push((record.admission, outcome, lease, recovered));
         }
         if !to_finalize.is_empty() {
             retry_snapshot_conflict(|| {
                 let connection = open_inventory_unlocked(protected_root, false)?
                     .context("native-session inventory disappeared during pending finalization")?;
                 let mut tx = connection.transaction()?;
-                for (admission, outcome) in &to_finalize {
+                for (admission, outcome, _lease, _recovered) in &to_finalize {
                     write_observed_outcome(&mut tx, admission, outcome)?;
                 }
                 tx.commit()?;
                 protect_sidecars(protected_root)?;
                 Ok(())
             })?;
-            finalized_orphaned_pending = to_finalize.len();
+            let recovered_after_snapshot = to_finalize
+                .iter()
+                .filter(|(_, _, _, recovered)| *recovered)
+                .count();
+            recovered_signed_outcomes += recovered_after_snapshot;
+            finalized_orphaned_pending = to_finalize.len() - recovered_after_snapshot;
             tracing::info!(
                 event_code = "NSI_PENDING_FINALIZED",
                 finalized_orphaned_pending,
                 operator_id = %operator_id,
                 "sealed orphaned pending native sessions with honest SupervisionIncomplete/Unknown outcomes"
+            );
+        }
+        if retained_live + retained_unproven + retained_for_drain > 0 {
+            tracing::info!(
+                event_code = "NSI_PENDING_RETAINED",
+                retained_live,
+                retained_unproven,
+                retained_for_drain,
+                "preserved live, ownership-unproven and fleet-owned pending sessions"
             );
         }
     }
@@ -6365,6 +6501,9 @@ pub fn compact_native_session_inventory_at(
             if entries.len() >= max_archive {
                 break;
             }
+            if protected_sessions.contains(&record.admission.session_nonce) {
+                continue;
+            }
             if authority
                 .unproven_admissions
                 .contains(&record.admission.session_nonce)
@@ -6379,6 +6518,27 @@ pub fn compact_native_session_inventory_at(
             };
             if !is_clean_completed_outcome(&outcome) {
                 continue;
+            }
+            let admission_sha256 = admission_digest(&record.admission)?;
+            match supervisor_lease::probe(
+                protected_root,
+                &supervisor_lease::Binding {
+                    session_nonce: &record.admission.session_nonce,
+                    product_root_key_id: &record.admission.product_root_key_id,
+                    admission_sha256: &admission_sha256,
+                },
+                &verifying_key,
+            )? {
+                // Phase one may have recovered a real receipt while its live
+                // supervisor is still waiting to finish the database update.
+                supervisor_lease::Probe::Live => continue,
+                // Admission cannot reacquire this immutable marker, and the
+                // writer lock excludes another admission or compaction. Avoid
+                // retaining a descriptor for every archived row.
+                supervisor_lease::Probe::Orphaned(lease) => drop(lease),
+                // Original authenticated clean outcomes remain archivable for
+                // historical admissions; no synthetic outcome is inferred here.
+                supervisor_lease::Probe::Unproven => {}
             }
             let leaf_sha256 = cold_archive_leaf_sha256(&record.admission, &outcome)?;
             leaves.push(leaf_sha256.clone());
@@ -6508,6 +6668,7 @@ pub fn compact_native_session_inventory_at(
                 retire_private_file(&admission_record_path(protected_root, nonce))?;
                 retire_private_file(&admission_receipt_path(protected_root, nonce))?;
                 retire_private_file(&outcome_receipt_path(protected_root, nonce))?;
+                retire_private_file(&supervisor_lease::path(protected_root, nonce))?;
                 retire_private_file(
                     &super::native_session_journal::native_session_effect_journal_path(
                         protected_root,
@@ -12567,14 +12728,378 @@ mod tests {
         assert!(!empty.admission_blocked);
     }
 
+    fn compaction_request(
+        archive_dir: Option<PathBuf>,
+        finalize_orphaned_pending: bool,
+    ) -> NativeSessionInventoryCompactRequest {
+        NativeSessionInventoryCompactRequest {
+            archive_dir,
+            max_sessions_to_archive: None,
+            finalize_orphaned_pending,
+            min_pending_age_secs: 0,
+            confirm: finalize_orphaned_pending,
+            operator_id: Some("compaction-regression".to_owned()),
+            reason: Some("preserve supervisor and fleet ownership".to_owned()),
+        }
+    }
+
+    fn clean_compaction_ledger_observation() -> NativeSessionEffectObservation {
+        NativeSessionEffectObservation::FinalLedgerObserved {
+            effect_count: 1,
+            allowed_count: 1,
+            denied_count: 0,
+            failed_count: 0,
+            chain_head_hash: format!("sha256:{}", "a".repeat(64)),
+            ledger_sha256: "b".repeat(64),
+        }
+    }
+
+    #[cfg(unix)]
+    struct PendingSupervisorProcess(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for PendingSupervisorProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compaction_pending_supervisor_child() {
+        use std::io::Read as _;
+
+        let Some(root) = std::env::var_os("FRANKEN_NODE_COMPACTION_CHILD_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let admission = fixture(&root, 41);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let ready = root.join("compaction-child-ready");
+        let pending = ready.with_extension("pending");
+        std::fs::write(&pending, nonce.as_bytes()).unwrap();
+        std::fs::rename(&pending, &ready).unwrap();
+        let mut byte = [0_u8];
+        std::io::stdin().read_exact(&mut byte).unwrap();
+        panic!("supervisor test child must be killed without running guard cleanup");
+    }
+
+    #[cfg(unix)]
+    fn spawn_pending_supervisor(root: &Path) -> (PendingSupervisorProcess, String) {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let module = module_path!().split_once("::").unwrap().1;
+        let test = format!("{module}::compaction_pending_supervisor_child");
+        let mut child = PendingSupervisorProcess(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env("FRANKEN_NODE_COMPACTION_CHILD_ROOT", root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let ready = root.join("compaction-child-ready");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "supervisor child exited without retaining its admission and lease"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "supervisor child did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let nonce = std::fs::read_to_string(&ready).unwrap();
+        assert_eq!(uuid::Uuid::parse_str(&nonce).unwrap().to_string(), nonce);
+        (child, nonce)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_preserves_live_and_deferred_supervisors_until_real_outcome_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 81);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        let record_path = admission_record_path(&root, &nonce);
+        let lease_path = supervisor_lease::path(&root, &nonce);
+        let original_admission = std::fs::read(&record_path).unwrap();
+        let original_lease = std::fs::read(&lease_path).unwrap();
+        let request = compaction_request(None, true);
+        let before = inspect_native_session_inventory_status_at(&root).unwrap();
+        let live = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(live.finalized_orphaned_pending, 0);
+        assert_eq!(live.after.pending_null_outcomes, 1);
+        assert_eq!(live.after.reserved_bytes, before.reserved_bytes);
+        assert!(!outcome_receipt_path(&root, &nonce).exists());
+        assert_eq!(std::fs::read(&record_path).unwrap(), original_admission);
+        assert_eq!(std::fs::read(&lease_path).unwrap(), original_lease);
+
+        guard.worker_reaped();
+        let finalizer = DeferredNativeSessionFinalizer::new(
+            guard,
+            NativeSessionOutcomeKind::Completed,
+            clean_compaction_ledger_observation(),
+        );
+        let deferred = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(deferred.finalized_orphaned_pending, 0);
+        assert_eq!(deferred.after.reserved_bytes, before.reserved_bytes);
+        finalizer.finalize();
+        let inventory = read_inventory_at(&root, None).unwrap();
+        let outcome = inventory.records[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome.kind, NativeSessionOutcomeKind::Completed);
+        assert_eq!(
+            outcome.process,
+            NativeSessionProcessObservation::WorkerReaped
+        );
+        assert_eq!(
+            export_native_session_forensics_at(&root, &nonce)
+                .unwrap()
+                .verification
+                .outcome_kind,
+            "completed",
+        );
+        let archived = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(temp.path().join("archive")), false),
+        )
+        .unwrap();
+        assert_eq!(archived.archived_clean_sessions, 1);
+        assert!(
+            !lease_path.exists(),
+            "retirement must also reclaim the ownership sidecar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_recovers_a_live_supervisors_receipt_without_archiving_its_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 87);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_reaped();
+        let outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Completed,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: false,
+            effects: clean_compaction_ledger_observation(),
+            panic_evidence: None,
+        };
+        // Stage the real publication boundary: the signed observation exists,
+        // while its actual guard has not yet committed the database projection.
+        retain_outcome_receipt(&root, &admission, &outcome).unwrap();
+        let receipt_path = outcome_receipt_path(&root, &nonce);
+        let original_receipt = std::fs::read(&receipt_path).unwrap();
+        let request = compaction_request(Some(temp.path().join("archive")), true);
+        let live = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(live.recovered_signed_outcomes, 1);
+        assert_eq!(live.finalized_orphaned_pending, 0);
+        assert_eq!(live.archived_clean_sessions, 0);
+        assert_eq!(live.after.retained_sessions, 1);
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), original_receipt);
+        assert!(admission_record_path(&root, &nonce).exists());
+        assert_eq!(
+            read_inventory_at(&root, None).unwrap().records[0].outcome,
+            Some(outcome.clone()),
+        );
+
+        // Complete that same observation through the production persistence
+        // method. Do not synthesize a newer timestamp or claim a process crash.
+        guard.persist_outcome(&outcome).unwrap();
+        guard.finished = true;
+        drop(guard);
+        let archived = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(archived.archived_clean_sessions, 1);
+        assert!(!supervisor_lease::path(&root, &nonce).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_preserves_pending_admissions_without_valid_ownership_evidence() {
+        for mutation in ["missing", "malformed", "replacement"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("runtime-evidence");
+            let admission = fixture(&root, 82);
+            let nonce = admission.session_nonce.clone();
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            // Model a lost projection owner without publishing an outcome.
+            // Real abrupt-process lock release is exercised by the child test.
+            guard.finished = true;
+            drop(guard);
+            let lease_path = supervisor_lease::path(&root, &nonce);
+            let original = std::fs::read(&lease_path).unwrap();
+            match mutation {
+                "missing" => {
+                    std::fs::rename(&lease_path, lease_path.with_extension("retained")).unwrap();
+                }
+                "malformed" => std::fs::write(&lease_path, b"{}").unwrap(),
+                "replacement" => {
+                    std::fs::rename(&lease_path, lease_path.with_extension("retained")).unwrap();
+                    create_new_runtime_evidence_private_file(&lease_path, &original).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result =
+                compact_native_session_inventory_at(&root, &compaction_request(None, true));
+            if mutation == "missing" {
+                assert_eq!(result.unwrap().finalized_orphaned_pending, 0);
+                assert!(
+                    !lease_path.exists(),
+                    "compaction must not mint missing ownership evidence"
+                );
+            } else {
+                assert!(result.is_err(), "{mutation} ownership must fail closed");
+            }
+            let retained = read_inventory_at(&root, None).unwrap();
+            assert_eq!(retained.records[0].admission, admission);
+            assert!(retained.records[0].outcome.is_none());
+            assert!(!outcome_receipt_path(&root, &nonce).exists());
+            assert_eq!(
+                inspect_native_session_inventory_status_at(&root)
+                    .unwrap()
+                    .pending_phantom_reserved_bytes,
+                MAX_OUTCOME_BYTES,
+            );
+        }
+    }
+
+    #[test]
+    fn compact_preserves_held_census_evidence_and_reclaims_after_explicit_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let held_admission = fixture(&root, 83);
+        let project = held_admission.project_root.clone();
+        let nonce = held_admission.session_nonce.clone();
+        let mut owner = NativeSessionInventoryGuard::admit(&root, held_admission, 0).unwrap();
+        owner.worker_reaped();
+        owner.finish(
+            NativeSessionOutcomeKind::Completed,
+            clean_compaction_ledger_observation(),
+        );
+        let original_receipt = std::fs::read(outcome_receipt_path(&root, &nonce)).unwrap();
+        let mut history = vec![maintenance_action("archive-hold", None)];
+        let held_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &held_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &held_checkpoint).unwrap();
+        assert!(held.checkpoint.fence_held);
+        assert_eq!(held.checkpoint.terminal_sessions, 1);
+
+        let mut unrelated = fixture(&root, 84);
+        unrelated.project_root = temp.path().join("unrelated-project");
+        unrelated.entrypoint = unrelated.project_root.join("index.js");
+        let unrelated_nonce = unrelated.session_nonce.clone();
+        let mut other = NativeSessionInventoryGuard::admit(&root, unrelated, 0).unwrap();
+        other.worker_reaped();
+        other.finish(
+            NativeSessionOutcomeKind::Completed,
+            clean_compaction_ledger_observation(),
+        );
+        let request = compaction_request(Some(temp.path().join("archive")), false);
+        let compacted = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(compacted.archived_clean_sessions, 1);
+        let archive: NativeSessionColdArchiveBundle =
+            serde_json::from_slice(&std::fs::read(compacted.archive_path.unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(archive.entries[0].session_nonce, unrelated_nonce);
+        let remaining = read_inventory_at(&root, None).unwrap();
+        assert_eq!(remaining.records.len(), 1);
+        assert_eq!(remaining.records[0].admission.session_nonce, nonce);
+        assert_eq!(
+            std::fs::read(outcome_receipt_path(&root, &nonce)).unwrap(),
+            original_receipt,
+        );
+        let still_held =
+            finish_drain_at(&root, &project, "node-a", "prod", &held_checkpoint).unwrap();
+        assert_eq!(still_held, held);
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &held_checkpoint)
+                .unwrap()
+                .checkpoint
+                .terminal_sessions,
+            1,
+        );
+
+        history.push(maintenance_action("archive-resume", Some("archive-hold")));
+        let resumed_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &resumed_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let resumed =
+            finish_drain_at(&root, &project, "node-a", "prod", &resumed_checkpoint).unwrap();
+        assert!(resumed.checkpoint.is_complete());
+        assert!(resumed.generation > held.generation);
+        // The older generation still records its original hold; it must not
+        // permanently pin rows once the latest census has explicitly resumed.
+        let reclaimed = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(reclaimed.archived_clean_sessions, 1);
+        assert_eq!(reclaimed.after.retained_sessions, 0);
+        let fresh = fixture(&root, 85);
+        drop(NativeSessionInventoryGuard::admit(&root, fresh, resumed.generation).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_does_not_finalize_an_orphan_still_owned_by_a_fleet_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 86);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let held = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(held.checkpoint.fence_held);
+        // Release this fixture's owner without inventing a terminal observation.
+        guard.finished = true;
+        drop(guard);
+        let report =
+            compact_native_session_inventory_at(&root, &compaction_request(None, true)).unwrap();
+        assert_eq!(report.finalized_orphaned_pending, 0);
+        assert_eq!(report.after.pending_null_outcomes, 1);
+        assert_eq!(
+            report.after.pending_phantom_reserved_bytes,
+            MAX_OUTCOME_BYTES
+        );
+        assert!(!outcome_receipt_path(&root, &nonce).exists());
+        let retained = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(retained.checkpoint.fence_held);
+        assert_eq!(retained.checkpoint.pending_sessions, 1);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn compact_finalize_orphaned_pending_requires_confirm_and_preserves_unknown_effects() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
-        let admission = fixture(&root, 41);
-        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
-        // Simulate a SIGKILL'd supervisor by forgetting the guard without recording an outcome.
-        std::mem::forget(guard);
+        let (mut child, nonce) = spawn_pending_supervisor(&root);
 
         let before = inspect_native_session_inventory_status_at(&root).unwrap();
         assert_eq!(before.retained_sessions, 1);
@@ -12595,6 +13120,16 @@ mod tests {
             },
         );
         assert!(denied.is_err());
+
+        // Even explicit zero-age finalization cannot replace a live owner's
+        // eventual outcome or release its reserved outcome budget.
+        let live =
+            compact_native_session_inventory_at(&root, &compaction_request(None, true)).unwrap();
+        assert_eq!(live.finalized_orphaned_pending, 0);
+        assert_eq!(live.after.reserved_bytes, before.reserved_bytes);
+        assert!(!outcome_receipt_path(&root, &nonce).exists());
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
 
         // With explicit --confirm, orphaned pending session receives an honest
         // SupervisionIncomplete + Unproven + Unknown signed outcome, releasing the

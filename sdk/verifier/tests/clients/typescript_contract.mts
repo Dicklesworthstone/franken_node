@@ -7,6 +7,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     const verified: Verification = await verifyArtifact(data, anchor, { verifier: executable });
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
     if (verified.format === "native-session-forensics") return verified.facts.session_nonce;
+    if (verified.format === "native-session-cold-archive") return verified.facts.merkle_root_sha256;
     if (verified.format === "fleet-quiescence-observations") return verified.facts.evidence_sha256;
     if (verified.format === "fleet-epoch-commit") return verified.facts.statement_sha256;
     if (verified.format === "capsule") return verified.facts.capsule_id;
@@ -106,6 +107,24 @@ export async function auditOriginalRun(
   });
   if (verified.scope !== "authenticated_run_incident") throw new Error("original-run proof required");
   return `${verified.facts.run_origin.receipt_id}:${verified.facts.run_origin.record_sha256}`;
+}
+
+export async function auditIncidentGraph(
+  data: Uint8Array, exporterAnchor: string, runAnchor: string, runtimeAnchor: string,
+  reportPath: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, exporterAnchor, {
+    verifier: executable, format: "incident-bundle", graphReport: reportPath,
+    trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor,
+  });
+  if (verified.format !== "incident-bundle" || verified.scope !== "authenticated_runtime_incident"
+      || verified.facts.graph_report === undefined) {
+    throw new Error("requested incident graph and runtime origin required");
+  }
+  const recomputed: true = verified.facts.graph_report.graph_hash_recomputed;
+  const semantics: false = verified.facts.graph_report.graph_semantics_reconstructed;
+  if (!recomputed || semantics) throw new Error("graph commitment cannot certify resolver execution");
+  return verified.facts.graph_report.report_sha256;
 }
 
 export async function auditCounterfactualIncident(
@@ -272,6 +291,25 @@ export async function auditPublisherSourceTrust(
   }
   const linkCount: number = verified.facts.provenance_link_count;
   return verified.facts.provenance_chain_sha256 + ":" + exactWindow + ":" + linkCount;
+}
+
+export async function auditColdArchive(
+  data: Uint8Array, productRootAnchor: string, expectedRoot: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, productRootAnchor, {
+    verifier: executable, format: "native-session-cold-archive", expectedArchiveRootSha256: expectedRoot,
+  });
+  if (verified.format !== "native-session-cold-archive"
+      || verified.scope !== "authenticated_archived_supervisor_observations") throw new Error("archive observation required");
+  const originals: false = verified.facts.original_receipt_signatures_verified;
+  const replay: false = verified.facts.replay_certified;
+  const cleanup: false = verified.facts.quiescence_certified;
+  const history: false = verified.facts.historical_completeness;
+  const population: number = verified.facts.session_count;
+  if (originals || replay || cleanup || history || population < 1) throw new Error("archive claim exceeds its scope");
+  // @ts-expect-error A cold archive does not expose a per-session original receipt.
+  verified.facts.admission_sha256;
+  return `${verified.facts.merkle_root_sha256}:${verified.facts.archive_sha256}:${population}`;
 }
 
 export async function auditNativeSession(

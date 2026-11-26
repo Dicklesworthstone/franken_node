@@ -991,7 +991,7 @@ fn verify_frame<'a>(
     })
 }
 
-fn decode_sources(value: &Value) -> Result<(Vec<u8>, &str)> {
+pub(super) fn decode_sources(value: &Value) -> Result<(Vec<u8>, &str)> {
     let sources = exact(
         value,
         FIELD,

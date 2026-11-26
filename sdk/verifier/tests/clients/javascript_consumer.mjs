@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
+import { closeSync, existsSync, ftruncateSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
 
 for (const path of JSON.parse(process.env.ABSENT_CHECKOUTS ?? "[]")) assert.equal(existsSync(path), false, `product checkout visible: ${path}`);
 assert.equal(existsSync("Cargo.toml"), false);
@@ -27,10 +28,17 @@ for (const test of cases) {
       expectedGraphInputHash: test.expected_graph_input_hash,
       graphReport: test.graph_report_path,
       expectedSessionNonce: test.expected_session_nonce,
-      expectedAdmissionSha256: test.expected_admission_sha256 });
+      expectedAdmissionSha256: test.expected_admission_sha256,
+      expectedArchiveRootSha256: test.expected_archive_root_sha256 });
     assert.equal(test.expected, "verified", test.name);
     assert.equal(result.artifact_sha256, createHash("sha256").update(data).digest("hex"));
     if (test.format === "incident-bundle") {
+      if (test.incident_graph_report !== undefined) {
+        assert.deepEqual(result.facts.graph_report, test.incident_graph_report, test.name);
+        assert.notEqual(result.facts.native_capture, null);
+      } else {
+        assert.equal(Object.hasOwn(result.facts, "graph_report"), false);
+      }
       if (test.run_anchor !== undefined) {
         assert.equal(result.scope, test.runtime_anchor === undefined ? "authenticated_run_incident" : "authenticated_runtime_incident");
         assert.equal(result.facts.run_origin.signer_public_key_hex, test.run_anchor.toLowerCase());
@@ -53,6 +61,13 @@ for (const test of cases) {
       assert.equal(result.facts.quiescence_certified, false);
       assert.equal(result.facts.historical_completeness, false);
       assert.equal(typeof result.facts.security_epoch, "string");
+    } else if (test.format === "native-session-cold-archive") {
+      assert.equal(result.scope, "authenticated_archived_supervisor_observations");
+      assert.deepEqual(result.facts, test.archive_facts, test.name);
+      assert.equal(result.facts.archive_sha256, result.artifact_sha256);
+      for (const field of ["original_receipt_signatures_verified", "replay_certified",
+        "quiescence_certified", "historical_completeness"]) assert.equal(result.facts[field], false);
+      assert.equal(JSON.stringify(result.facts).includes("PRIVATE-"), false);
     } else if (test.format === "resolution-receipt") {
       assert.equal(result.scope, "authenticated_resolution_decision");
       assert.equal(result.facts.decision, test.decision);
@@ -162,7 +177,7 @@ for (const test of cases) {
   } catch (error) {
     assert(error instanceof VerifierError, `${test.name}: ${error}`);
     assert.equal(error.code, test.expected, test.name);
-    if (["publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
+    if (["publisher-source", "publisher-source-trust", "native-session-forensics", "native-session-cold-archive", "signed-session"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
@@ -492,6 +507,77 @@ for (const [field, value] of [["expectedSessionNonce", "0199abcd-1234-7000-8000-
     && !error.message.includes(value));
   console.log(JSON.stringify({ case: `native_ignored_${field}`, result: "EXPECTED_NATIVE_IDENTITY_MISMATCH" }));
 }
+// BEGIN cold archive protocol controls (fake child; no signature claims).
+let archiveClientCases = 0;
+let archiveProtocolCases = 0;
+const archiveRootPin = "a".repeat(64);
+for (const pin of ["", null, false, 7, [], {}, "a".repeat(63), "A".repeat(64), "sha256:" + "a".repeat(64), "a".repeat(64) + "\n"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive", expectedArchiveRootSha256: pin }),
+  (error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const format of ["incident-bundle", "native-session-forensics", "capsule", "signed-session"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format, expectedArchiveRootSha256: archiveRootPin }),
+  (error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const untrusted of [null, "", "aa", false]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), untrusted,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive" }),
+  (error) => error instanceof VerifierError && error.code === "ANCHOR_INVALID" && error.exitCode === null);
+  archiveClientCases += 1;
+}
+for (const [options, expected] of [
+  [{ graphReport: "PRIVATE-missing-report" }, "INPUT_INVALID"],
+  [{ signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
+  [{ expectedSessionNonce: "0199abcd-1234-7000-8000-123456789abc", expectedAdmissionSha256: "a".repeat(64) }, "EXPECTED_NATIVE_IDENTITY_INVALID"],
+  [{ expectedManifestSha256: "sha256:" + "a".repeat(64) }, "EXPECTED_IDENTITY_INVALID"],
+]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format: "native-session-cold-archive", ...options }),
+  (error) => error instanceof VerifierError && error.code === expected && error.exitCode === null
+    && !error.message.includes("PRIVATE-"));
+  archiveClientCases += 1;
+}
+const archiveControls = [
+  "wrong_schema", "wrong_scope", "wrong_nested_scope", "wrong_signer", "wrong_root_key", "substituted_bytes",
+  "bad_archive_digest", "uppercase_merkle", "prefixed_merkle", "newline_merkle", "short_merkle",
+  "invalid_time", "empty_population", "excess_population", "boolean_population", "fractional_population",
+  "string_population", "excess_sources", "negative_sources", "boolean_sources", "original_signatures_claim",
+  "replay_claim", "quiescence_claim", "history_claim", "numeric_proof_flag", "missing_root",
+  "missing_proof_flag", "unknown_field",
+];
+for (const control of archiveControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_" + control })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: archiveRootPin }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID" && !error.message.includes("PRIVATE-"), control);
+  archiveProtocolCases += 1;
+}
+for (const control of ["valid", "maximum_population", "forwarded"]) {
+  const data = Buffer.from(JSON.stringify({ protocol_control: "archive_" + control }));
+  const options = control === "forwarded" ? { expectedArchiveRootSha256: archiveRootPin } : {};
+  const verified = await verifyArtifact(data, cases[0].anchor.toUpperCase(),
+    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", ...options });
+  assert.equal(verified.scope, "authenticated_archived_supervisor_observations");
+  assert.equal(verified.facts.archive_sha256, createHash("sha256").update(data).digest("hex"));
+  assert.equal(verified.facts.original_receipt_signatures_verified, false);
+  assert.equal(verified.facts.session_count, control === "maximum_population" ? 16_384 : 3);
+  archiveProtocolCases += 1;
+}
+await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_ignored_pin" })), cases[0].anchor,
+  { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: "b".repeat(64) }),
+(error) => error instanceof VerifierError && error.code === "EXPECTED_ARCHIVE_ROOT_MISMATCH"
+  && !error.message.includes("b".repeat(64)));
+archiveProtocolCases += 1;
+assert.equal(MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, 64 * 1024 * 1024);
+await assert.rejects(verifyArtifact(new Uint8Array(MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES + 1), cases[0].anchor,
+  { verifier: resolve("does-not-exist"), format: "native-session-cold-archive" }),
+(error) => error instanceof VerifierError && error.code === "INPUT_TOO_LARGE" && error.exitCode === null);
+archiveClientCases += 1;
+// END cold archive protocol controls.
+
 // Check exact transport limits without launching a process or retaining a huge
 // serialized fixture. Oversized inputs in every other format still fail above.
 assert.equal(MAX_NATIVE_SESSION_INPUT_BYTES, 96 * 1024 * 1024);
@@ -572,11 +658,14 @@ const publisherTrustInputs = [
   ["trust_missing_source_signature", { signatureHex: undefined }, "SIGNATURE_MALFORMED"],
 ];
 // BEGIN publisher identity protocol controls (no cryptographic proof claims).
-const graphWitnessPath = "private graph; $(ignored).json";
+const graphWitnessPath = join(mkdtempSync(join(tmpdir(), "franken-graph-witness-")), "private graph; $(ignored).json");
+const graphWitnessBytes = Buffer.from("{}\n");
+writeFileSync(graphWitnessPath, graphWitnessBytes);
 const graphWitnessControls = ["ignored", "null", "wrong_schema", "not_recomputed", "semantic_claim",
-  "wrong_graph", "wrong_capsule", "prefixed_report_hash", "uppercase_report_hash", "newline_report_hash", "observation_mismatch",
+  "wrong_graph", "wrong_capsule", "wrong_report_hash", "prefixed_report_hash", "uppercase_report_hash",
+  "newline_report_hash", "observation_mismatch", "zero_observations", "too_many_observations",
   "boolean_count", "unsafe_count", "zero_modules", "too_many_targets", "negative_count",
-  "nonboolean_resolution", "inconsistent_resolution", "unknown_field", "missing_field"];
+  "nonboolean_resolution", "inconsistent_resolution", "unknown_field", "missing_field", "replaced_file"];
 let graphClientCases = 0;
 let graphProtocolCases = 0;
 for (const trusted of [false, true]) {
@@ -588,14 +677,17 @@ for (const trusted of [false, true]) {
     (error) => error instanceof VerifierError && error.code === "GRAPH_REPORT_INVALID" && error.exitCode === null);
     graphClientCases += 1;
   }
-  const forwarded = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + "forwarded" })),
+  const forwarded = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + "forwarded",
+    expected_graph_report_path: graphWitnessPath })),
     cases[0].anchor, { verifier: resolve("fake_verifier"), ...options, graphReport: graphWitnessPath });
   const source = trusted ? forwarded.facts.source : forwarded.facts;
   assert.equal(source.graph_report.graph_hash_recomputed, true);
   assert.equal(source.graph_report.graph_semantics_reconstructed, false);
+  assert.equal(source.graph_report.report_sha256, createHash("sha256").update(graphWitnessBytes).digest("hex"));
   assert(source.graph_report.module_count > source.capsule.file_count, "URL identities may share a file");
   graphProtocolCases += 1;
   for (const control of graphWitnessControls) {
+    writeFileSync(graphWitnessPath, graphWitnessBytes);
     await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + control })),
       cases[0].anchor, { verifier: resolve("fake_verifier"), ...options, graphReport: graphWitnessPath }),
     (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID"
@@ -603,11 +695,121 @@ for (const trusted of [false, true]) {
     graphProtocolCases += 1;
     console.log(JSON.stringify({ case: prefix + control, result: "PROTOCOL_INVALID" }));
   }
+  writeFileSync(graphWitnessPath, graphWitnessBytes);
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: prefix + "unsolicited" })),
+    cases[0].anchor, { verifier: resolve("fake_verifier"), ...options }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
 }
 await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
-  { verifier: resolve("does-not-exist"), format: "incident-bundle", graphReport: graphWitnessPath }),
+  { verifier: resolve("does-not-exist"), format: "capsule", graphReport: graphWitnessPath }),
 (error) => error instanceof VerifierError && error.code === "INPUT_INVALID" && error.exitCode === null);
 graphClientCases += 1;
+
+// These fake-child controls exercise the client contract, never signatures.
+const incidentGraphPayload = {
+  module_sources: { capsule_base64: "Y2Fwc3VsZQ==", capsule_digest: "sha256:" + "c".repeat(64),
+    graph_input_hash: "sha256:" + "d".repeat(64) },
+  expected: { terminal_state: "completed" }, host_effect_transcript: [],
+};
+const incidentGraphRaw = JSON.stringify(incidentGraphPayload);
+function incidentGraphInput(action, raw = incidentGraphRaw) {
+  return Buffer.from(JSON.stringify({
+    protocol_control: "incident_graph_witness_" + action,
+    expected_graph_report_path: graphWitnessPath,
+    initial_state_snapshot: { native_replay: {
+      schema_version: "franken-node/native-replay-capture/v3", payload_json: raw,
+      payload_sha256: createHash("sha256").update(raw).digest("hex"),
+    } },
+  }));
+}
+const incidentGraphControls = graphWitnessControls.filter((control) => control !== "observation_mismatch");
+incidentGraphControls.push("missing_capture", "wrong_capture_hash", "wrong_capture_bytes",
+  "wrong_capture_state", "wrong_capture_count", "wrong_scope");
+for (const [origins, expectedScope] of [
+  [{}, "authenticated_recorded_incident"],
+  [{ trustedRunPublicKeyHex: runAnchor }, "authenticated_run_incident"],
+  [{ trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor }, "authenticated_runtime_incident"],
+]) {
+  writeFileSync(graphWitnessPath, graphWitnessBytes);
+  const verified = await verifyArtifact(incidentGraphInput("forwarded"), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), graphReport: graphWitnessPath, ...origins });
+  assert.equal(verified.scope, expectedScope);
+  assert.equal(verified.facts.graph_report.report_sha256, createHash("sha256").update(graphWitnessBytes).digest("hex"));
+  assert.equal(verified.facts.native_capture.captured_terminal_state, "completed");
+  assert.equal(Object.hasOwn(verified.facts, "run_origin"), origins.trustedRunPublicKeyHex !== undefined);
+  assert.equal(Object.hasOwn(verified.facts, "runtime_origin"), origins.trustedRuntimePublicKeyHex !== undefined);
+  graphProtocolCases += 1;
+  const controlsForScope = [...incidentGraphControls];
+  if (origins.trustedRunPublicKeyHex !== undefined) controlsForScope.push("scope_downgrade", "missing_run_origin", "wrong_run_anchor");
+  if (origins.trustedRuntimePublicKeyHex !== undefined) controlsForScope.push("missing_runtime_origin", "wrong_runtime_anchor");
+  for (const control of controlsForScope) {
+    writeFileSync(graphWitnessPath, graphWitnessBytes);
+    await assert.rejects(verifyArtifact(incidentGraphInput(control), cases[0].anchor,
+      { verifier: resolve("fake_verifier"), graphReport: graphWitnessPath, ...origins }),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID"
+      && !error.message.includes(graphWitnessPath), control);
+    graphProtocolCases += 1;
+  }
+  await assert.rejects(verifyArtifact(incidentGraphInput("unsolicited"), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), ...origins }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
+}
+writeFileSync(graphWitnessPath, graphWitnessBytes);
+for (const raw of [
+  "{}",
+  incidentGraphRaw.replace('"module_sources":', '"module_sources":{},"module_sources":'),
+  incidentGraphRaw.replace('"module_sources":', '"module_sources":{},"module_\\u0073ources":'),
+  incidentGraphRaw.replace('"capsule_base64":', '"unsigned_claim":true,"capsule_base64":'),
+]) {
+  await assert.rejects(verifyArtifact(incidentGraphInput("valid", raw), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), graphReport: graphWitnessPath }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
+}
+for (const input of [
+  Buffer.from(JSON.stringify({ protocol_control: "incident_graph_witness_valid" })),
+  Buffer.from(incidentGraphInput("valid").toString().replace('"initial_state_snapshot":',
+    '"initial_state_snapshot":{},"initial_state_snapshot":')),
+]) {
+  await assert.rejects(verifyArtifact(input, cases[0].anchor,
+    { verifier: resolve("fake_verifier"), graphReport: graphWitnessPath }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
+}
+const mutableGraphInput = incidentGraphInput("valid");
+const graphInvocationHash = createHash("sha256").update(mutableGraphInput).digest("hex");
+const pendingGraphVerification = verifyArtifact(mutableGraphInput, cases[0].anchor,
+  { verifier: resolve("fake_verifier"), graphReport: graphWitnessPath });
+mutableGraphInput.fill(0);
+assert.equal((await pendingGraphVerification).artifact_sha256, graphInvocationHash);
+graphProtocolCases += 1;
+for (const path of ["", null, false, 7, [], {}, "private\0report", "\ud800"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), graphReport: path }),
+  (error) => error instanceof VerifierError && error.code === "GRAPH_REPORT_INVALID" && error.exitCode === null);
+  graphClientCases += 1;
+}
+const graphFiles = mkdtempSync(join(tmpdir(), "franken-graph-input-"));
+const oversizedGraph = join(graphFiles, "PRIVATE-oversized-report.json");
+const graphDescriptor = openSync(oversizedGraph, "w");
+try {
+  ftruncateSync(graphDescriptor, MAX_SOURCE_GRAPH_REPORT_BYTES + 1);
+} finally {
+  closeSync(graphDescriptor);
+}
+for (const [path, expected] of [
+  [join(graphFiles, "PRIVATE-absent-report.json"), "GRAPH_REPORT_IO"],
+  [graphFiles, "GRAPH_REPORT_IO"],
+  [oversizedGraph, "INPUT_TOO_LARGE"],
+]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), graphReport: path }),
+  (error) => error instanceof VerifierError && error.code === expected && error.exitCode === null
+    && !error.message.includes("PRIVATE-"));
+  graphClientCases += 1;
+}
 
 const identityPins = {
   expectedManifestSha256: "sha256:" + "a".repeat(64),
@@ -727,8 +929,8 @@ for (const mode of ltvControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
-  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + graphClientCases + promotionInputs.length,
+  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases + graphClientCases + archiveClientCases + promotionInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
     + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases + graphProtocolCases
     + counterfactualControls.length + ltvControls.length + promotionControls.length + 2
-    + nativeControls.length + nativePositives.length + 1, passed: true }));
+    + nativeControls.length + nativePositives.length + archiveProtocolCases + 1, passed: true }));

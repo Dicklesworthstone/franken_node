@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts, CounterfactualPromotionFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, NativeSessionColdArchiveFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts, CounterfactualPromotionFacts, SourceGraphCommitment } from "./franken_verifier.mjs";
 
 type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
@@ -13,6 +13,8 @@ type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclud
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
   expected_session_nonce?: string; expected_admission_sha256?: string; graph_report_path?: string;
+  expected_archive_root_sha256?: string; archive_facts?: NativeSessionColdArchiveFacts;
+  incident_graph_report?: SourceGraphCommitment;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
   ltv_facts?: LtvEvidenceFacts;
@@ -71,13 +73,16 @@ for (const name of ["resolution_signed_admission", "resolution_signed_rejection"
 }
 let graphPositive = 0;
 let graphNegative = 0;
+let incidentGraphPositive = 0;
+let incidentGraphNegative = 0;
 for (const source of cases.filter((item) => item.graph_report_path !== undefined)) {
-  if (source.format !== "publisher-source" && source.format !== "publisher-source-trust") {
+  if (source.format !== "incident-bundle" && source.format !== "publisher-source" && source.format !== "publisher-source-trust") {
     throw new Error("graph witness matrix has an unsupported format");
   }
   try {
     const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor, {
       verifier: resolve("verifier"), format: source.format, signatureHex: source.signature_hex,
+      trustedRunPublicKeyHex: source.run_anchor, trustedRuntimePublicKeyHex: source.runtime_anchor,
       trustedRevocationPublicKeyHex: source.revocation_anchor,
       trustedProvenancePublicKeyHex: source.provenance_anchor ?? undefined,
       evaluationTime: source.evaluation_time, maxRevocationAgeSecs: source.max_revocation_age_secs,
@@ -87,7 +92,7 @@ for (const source of cases.filter((item) => item.graph_report_path !== undefined
       graphReport: source.graph_report_path,
     });
     if (source.expected !== "verified"
-        || (verified.format !== "publisher-source" && verified.format !== "publisher-source-trust")) {
+        || (verified.format !== "incident-bundle" && verified.format !== "publisher-source" && verified.format !== "publisher-source-trust")) {
       throw new Error("TypeScript graph witness scope mismatch: " + source.name);
     }
     const facts = verified.format === "publisher-source-trust" ? verified.facts.source : verified.facts;
@@ -97,17 +102,33 @@ for (const source of cases.filter((item) => item.graph_report_path !== undefined
     const semantics: false = graph.graph_semantics_reconstructed;
     assert.equal(recomputed, true);
     assert.equal(semantics, false);
-    assert.equal(graph.graph_input_hash, facts.capsule.graph_input_hash);
-    assert.equal(graph.capsule_digest, facts.capsule_digest);
-    assert.equal(graph.observation_count, facts.capsule.input_count);
-    assert.equal(facts.capsule.graph_hash_recomputed, false);
-    graphPositive += 1;
+    assert.equal(graph.report_sha256, createHash("sha256").update(readFileSync(source.graph_report_path!)).digest("hex"));
+    if (verified.format === "incident-bundle") {
+      assert.deepEqual(graph, source.incident_graph_report);
+      assert.notEqual(verified.facts.native_capture, null);
+      assert.equal(verified.scope, source.runtime_anchor !== undefined ? "authenticated_runtime_incident"
+        : source.run_anchor !== undefined ? "authenticated_run_incident" : "authenticated_recorded_incident");
+      if (verified.scope === "authenticated_runtime_incident") {
+        const epoch: string = verified.facts.runtime_origin.signed_epoch;
+        assert.equal(epoch, "18446744073709551615");
+      }
+      incidentGraphPositive += 1;
+    } else {
+      const publisher = verified.format === "publisher-source-trust" ? verified.facts.source : verified.facts;
+      assert.equal(graph.graph_input_hash, publisher.capsule.graph_input_hash);
+      assert.equal(graph.capsule_digest, publisher.capsule_digest);
+      assert.equal(graph.observation_count, publisher.capsule.input_count);
+      assert.equal(publisher.capsule.graph_hash_recomputed, false);
+      graphPositive += 1;
+    }
   } catch (error: unknown) {
     if (source.expected === "verified" || !(error instanceof VerifierError) || error.code !== source.expected) throw error;
-    graphNegative += 1;
+    if (source.format === "incident-bundle") incidentGraphNegative += 1;
+    else graphNegative += 1;
   }
 }
 assert(graphPositive === 3 && graphNegative === 10, "graph witness acceptance/refusal matrix must execute");
+assert(incidentGraphPositive === 5 && incidentGraphNegative === 12, "incident graph and authority matrix must execute");
 for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixture_2"]) {
   const source = cases.find((item) => item.name === name)!;
   const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor,
@@ -350,6 +371,39 @@ for (const observation of cases.filter((item) => item.format === "native-session
   }
 }
 if (nativePositive === 0 || nativeNegative === 0) throw new Error("native-session matrix is missing");
+let archivePositive = 0;
+let archiveNegative = 0;
+for (const archive of cases.filter((item) => item.format === "native-session-cold-archive")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(archive.input_hex, "hex"), archive.anchor, {
+      verifier: resolve("verifier"), format: "native-session-cold-archive",
+      expectedArchiveRootSha256: archive.expected_archive_root_sha256,
+    });
+    if (archive.expected !== "verified" || verified.format !== "native-session-cold-archive"
+        || verified.scope !== "authenticated_archived_supervisor_observations") throw new Error("archive scope mismatch");
+    const facts: NativeSessionColdArchiveFacts = verified.facts;
+    assert.deepEqual(facts, archive.archive_facts, archive.name);
+    assert.equal(facts.archive_sha256, archive.artifact_sha256);
+    const originals: false = facts.original_receipt_signatures_verified;
+    const replay: false = facts.replay_certified;
+    const cleanup: false = facts.quiescence_certified;
+    const history: false = facts.historical_completeness;
+    assert.equal(originals || replay || cleanup || history, false);
+    const population: number = facts.session_count;
+    const sourceBound: number = facts.source_bound_sessions;
+    assert(population >= 1 && population <= 16_384 && sourceBound >= 0 && sourceBound <= population);
+    if (archive.expected_archive_root_sha256 !== undefined) {
+      assert.equal(facts.merkle_root_sha256, archive.expected_archive_root_sha256);
+    }
+    assert.equal(JSON.stringify(facts).includes("PRIVATE-"), false);
+    archivePositive += 1;
+  } catch (error: unknown) {
+    if (archive.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== archive.expected) throw error;
+    archiveNegative += 1;
+  }
+}
+assert(archivePositive === 7 && archiveNegative === 15, "archive population and authority matrix must execute");
 let sessionPositive = 0;
 let sessionNegative = 0;
 const sessionVerdicts = new Set<string>();
@@ -442,11 +496,13 @@ for (const candidate of allCases.filter((item): item is EpochCase => item.format
   }
 }
 assert(epochPositive >= 6 && epochNegative >= 30, "independent epoch commit and authority controls must execute");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + graphPositive + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
-  negative: 2 + graphNegative + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + graphPositive + incidentGraphPositive + trustPositive + nativePositive + archivePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
+  negative: 2 + graphNegative + incidentGraphNegative + trustNegative + nativeNegative + archiveNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
   publisher_graph_cases: graphPositive + graphNegative,
+  incident_graph_cases: incidentGraphPositive + incidentGraphNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
+  cold_archive_cases: archivePositive + archiveNegative,
   ltv_policy_cases: ltvPositive + ltvNegative,
   fleet_observation_cases: fleetPositive + fleetNegative,
   fleet_epoch_commit_cases: epochPositive + epochNegative,

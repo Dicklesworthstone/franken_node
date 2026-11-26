@@ -15,9 +15,20 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::incident_bundle::decode_evidence_json;
+use crate::incident_bundle::decode_evidence_json_with_limit;
 use crate::incident_bundle::native_capture::module_capsule;
-pub use module_capsule::SourceCapsuleSummary;
+pub use module_capsule::{
+    MAX_SOURCE_GRAPH_REPORT_BYTES, SourceCapsuleSummary, SourceGraphCommitment,
+};
+
+#[path = "native_session_archive.rs"]
+mod archive;
+pub use archive::{
+    MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_SESSIONS,
+    NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, NativeSessionColdArchiveError,
+    VerifiedNativeSessionColdArchive, verify_native_session_cold_archive,
+    verify_native_session_cold_archive_with_expected_root,
+};
 
 pub const NATIVE_SESSION_FORENSICS_SCHEMA: &str = "franken-node/native-session-forensics/v1";
 pub const NATIVE_SESSION_FORENSICS_V2_SCHEMA: &str = "franken-node/native-session-forensics/v2";
@@ -198,6 +209,11 @@ pub struct VerifiedNativeSessionForensics {
     /// Presence does not establish execution or source-graph completeness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_capsule: Option<SourceCapsuleSummary>,
+    /// Present only when the caller supplied a graph report and its complete
+    /// commitment was recomputed against the authenticated pre-entry sources.
+    /// This does not reconstruct resolver semantics or certify guest execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_report: Option<SourceGraphCommitment>,
     pub replay_certified: bool,
     pub quiescence_certified: bool,
     pub historical_completeness: bool,
@@ -205,8 +221,7 @@ pub struct VerifiedNativeSessionForensics {
 
 /// Stable failures do not include private or attacker-controlled evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeSessionForensicError {
-    ExpectedIdentityInvalid,
+pub enum NativeSessionForensicError {    ExpectedIdentityInvalid,
     ExpectedIdentityMismatch,
     InputTooLarge,
     JsonInvalid,
@@ -220,6 +235,8 @@ pub enum NativeSessionForensicError {
     JournalSignatureInvalid,
     JournalInvalid,
     SourceCapsuleInvalid,
+    SourceGraphMissing,
+    SourceGraphInvalid,
     ObservationInvalid,
 }
 
@@ -245,6 +262,12 @@ impl fmt::Display for NativeSessionForensicError {
             Self::JournalInvalid => "native-session effect journal prefix is inconsistent",
             Self::SourceCapsuleInvalid => {
                 "native-session sources do not match the authenticated admission"
+            }
+            Self::SourceGraphMissing => {
+                "native-session graph verification requires authenticated retained sources"
+            }
+            Self::SourceGraphInvalid => {
+                "native-session graph report does not match the authenticated sources"
             }
             Self::ObservationInvalid => "native-session supervisor observation is inconsistent",
         })
@@ -703,7 +726,8 @@ fn decode<T: serde::de::DeserializeOwned>(
     if bytes.len() > limit {
         return Err(NativeSessionForensicError::InputTooLarge);
     }
-    let value = decode_evidence_json(bytes).map_err(|_| NativeSessionForensicError::JsonInvalid)?;
+    let value = decode_evidence_json_with_limit(bytes, limit)
+        .map_err(|_| NativeSessionForensicError::JsonInvalid)?;
     serde_json::from_value(value).map_err(|_| NativeSessionForensicError::JsonInvalid)
 }
 
@@ -825,7 +849,7 @@ fn verify_retained_sources(
     encoded: &str,
     binding: &SourceCapsuleBinding,
     admission: &Admission,
-) -> Result<SourceCapsuleSummary, NativeSessionForensicError> {
+) -> Result<(SourceCapsuleSummary, Vec<u8>), NativeSessionForensicError> {
     let invalid = NativeSessionForensicError::SourceCapsuleInvalid;
     if encoded.len() > MAX_SOURCE_CAPSULE_BASE64_BYTES {
         return Err(NativeSessionForensicError::InputTooLarge);
@@ -846,8 +870,10 @@ fn verify_retained_sources(
     let project = absolute_path_parts(&admission.project_root).ok_or(invalid)?;
     let entry = absolute_path_parts(&admission.entrypoint).ok_or(invalid)?;
     let relative_entry = entry.get(project.len()..).ok_or(invalid)?.join("/");
-    module_capsule::inspect_admitted(&bytes, &binding.graph_input_hash, &relative_entry)
-        .map_err(|_| invalid)
+    let summary =
+        module_capsule::inspect_admitted(&bytes, &binding.graph_input_hash, &relative_entry)
+            .map_err(|_| invalid)?;
+    Ok((summary, bytes))
 }
 
 fn signing_bytes(domain: &[u8], bytes: &[u8]) -> Vec<u8> {
@@ -1075,6 +1101,23 @@ pub fn verify_native_session_forensics(
     input: &[u8],
     trusted_root: &VerifyingKey,
 ) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
+    verify_native_session_forensics_inner(input, trusted_root, None, None)
+}
+
+fn verify_native_session_forensics_inner(
+    input: &[u8],
+    trusted_root: &VerifyingKey,
+    expected: Option<&NativeSessionExpectedIdentity>,
+    graph_report_bytes: Option<&[u8]>,
+) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
+    if let Some(expected) = expected {
+        expected.validate()?;
+    }
+    if graph_report_bytes
+        .is_some_and(|report| report.is_empty() || report.len() > MAX_SOURCE_GRAPH_REPORT_BYTES)
+    {
+        return Err(NativeSessionForensicError::SourceGraphInvalid);
+    }
     let bundle: NativeSessionForensicBundle = decode(input, MAX_NATIVE_SESSION_FORENSICS_V3_BYTES)?;
     let schema_version = match bundle.schema_version.as_str() {
         NATIVE_SESSION_FORENSICS_SCHEMA => {
@@ -1143,13 +1186,18 @@ pub fn verify_native_session_forensics(
         )
         .map_err(|_| NativeSessionForensicError::AdmissionSignatureInvalid)?;
 
-    let source_capsule = match (&admission.source_capsule, &bundle.source_capsule_base64) {
-        (Some(binding), Some(encoded)) => {
-            Some(verify_retained_sources(encoded, binding, &admission)?)
-        }
-        (None, None) => None,
-        _ => return Err(NativeSessionForensicError::SourceCapsuleInvalid),
-    };
+    let (source_capsule, retained_source_bytes) =
+        match (&admission.source_capsule, &bundle.source_capsule_base64) {
+            (Some(binding), Some(encoded)) => {
+                let (summary, bytes) = verify_retained_sources(encoded, binding, &admission)?;
+                // Reuse the same decoded bytes for an optional graph witness after
+                // authenticating the entire observation and caller-selected run.
+                // Byte-only callers release the source payload at this point.
+                (Some(summary), graph_report_bytes.is_some().then_some(bytes))
+            }
+            (None, None) => (None, None),
+            _ => return Err(NativeSessionForensicError::SourceCapsuleInvalid),
+        };
 
     let durable_journal = bundle
         .journal_jsonl
@@ -1188,6 +1236,7 @@ pub fn verify_native_session_forensics(
             .as_ref()
             .map(|prefix| prefix.summary.clone()),
         source_capsule,
+        graph_report: None,
         replay_certified: false,
         quiescence_certified: false,
         historical_completeness: false,
@@ -1249,6 +1298,21 @@ pub fn verify_native_session_forensics(
             verified.journal_complete = Some(true);
         }
     }
+    if let Some(expected) = expected
+        && (verified.session_nonce != expected.session_nonce
+            || verified.admission_sha256 != expected.admission_sha256)
+    {
+        return Err(NativeSessionForensicError::ExpectedIdentityMismatch);
+    }
+    if let Some(report) = graph_report_bytes {
+        let source_bytes = retained_source_bytes
+            .as_deref()
+            .ok_or(NativeSessionForensicError::SourceGraphMissing)?;
+        verified.graph_report = Some(
+            module_capsule::inspect_graph_report(source_bytes, report)
+                .map_err(|_| NativeSessionForensicError::SourceGraphInvalid)?,
+        );
+    }
     Ok(verified)
 }
 
@@ -1261,14 +1325,32 @@ pub fn verify_native_session_forensics_with_expected_identity(
     trusted_root: &VerifyingKey,
     expected: &NativeSessionExpectedIdentity,
 ) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
-    expected.validate()?;
-    let verified = verify_native_session_forensics(input, trusted_root)?;
-    if verified.session_nonce != expected.session_nonce
-        || verified.admission_sha256 != expected.admission_sha256
-    {
-        return Err(NativeSessionForensicError::ExpectedIdentityMismatch);
-    }
-    Ok(verified)
+    verify_native_session_forensics_inner(input, trusted_root, Some(expected), None)
+}
+
+/// Authenticate retained supervisor evidence and independently rehash a
+/// separately supplied source-graph report against its v3 pre-entry capsule.
+///
+/// All original admission, journal and outcome checks still apply. Optional
+/// caller-owned identity pins select the expected admission before the graph
+/// report is interpreted. The capsule is decoded once, and neither input's
+/// paths are opened. Pending and interrupted observations retain their original
+/// proof scope; graph integrity cannot certify execution, resolver semantics,
+/// process cleanup or complete history.
+///
+/// # Errors
+/// Returns any forensic authentication or expected-identity error. An otherwise
+/// valid v1/v2 observation without retained sources returns
+/// [`NativeSessionForensicError::SourceGraphMissing`]. Empty, oversized,
+/// malformed, ambiguous or mismatched reports return
+/// [`NativeSessionForensicError::SourceGraphInvalid`], never byte-only success.
+pub fn verify_native_session_forensics_with_graph_report(
+    input: &[u8],
+    trusted_root: &VerifyingKey,
+    expected: Option<&NativeSessionExpectedIdentity>,
+    graph_report_bytes: &[u8],
+) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
+    verify_native_session_forensics_inner(input, trusted_root, expected, Some(graph_report_bytes))
 }
 
 #[cfg(test)]
@@ -1278,6 +1360,8 @@ mod tests {
     use serde_json::{Value, json};
 
     const NONCE: &str = "019a7f53-c180-7001-8001-000000000001";
+    const SOURCE_GRAPH_REPORT: &[u8] =
+        include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json");
 
     // Build producer-shaped signing bytes independently of the verifier's
     // signing helper; cross-repository producer tests exercise real receipts.
@@ -1433,13 +1517,19 @@ mod tests {
     }
 
     fn retained_source_fixture() -> (SigningKey, NativeSessionForensicBundle, Vec<u8>) {
+        retained_source_fixture_vector(0)
+    }
+
+    fn retained_source_fixture_vector(
+        vector: usize,
+    ) -> (SigningKey, NativeSessionForensicBundle, Vec<u8>) {
         // Real production graph-builder output, not a second implementation
         // of graph capture inside the independent verifier's tests.
         let vectors: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/module_source_capsules.json"
         ))
         .unwrap();
-        let sources = &vectors["vectors"][0]["module_sources"];
+        let sources = &vectors["vectors"][vector]["module_sources"];
         let bytes = STANDARD
             .decode(sources["capsule_base64"].as_str().unwrap())
             .unwrap();
@@ -1454,6 +1544,309 @@ mod tests {
             sources["graph_input_hash"].as_str().unwrap(),
         );
         (key, bundle, bytes)
+    }
+
+    #[test]
+    fn source_graph_verification_preserves_pending_and_interrupted_observations() {
+        for interrupted_run in [false, true] {
+            let (key, mut bundle, _) = retained_source_fixture_vector(2);
+            let admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+            let binding = bundle.admission_receipt.admission_sha256.clone();
+            let mut journal = journal_header(&key, &binding);
+            append_journal_event(&mut journal, &key, &binding, journal_admission(0));
+            append_journal_event(
+                &mut journal,
+                &key,
+                &binding,
+                json!({"kind":"provider_returned","sequence":0}),
+            );
+            append_journal_event(&mut journal, &key, &binding, journal_admission(1));
+            bundle.journal_jsonl = Some(journal);
+            if interrupted_run {
+                issue_outcome(&mut bundle, &key, interrupted());
+            }
+            let expected = NativeSessionExpectedIdentity {
+                session_nonce: NONCE.into(),
+                admission_sha256: binding,
+            };
+            let bytes = serde_json::to_vec(&bundle).unwrap();
+            let original = verify_bundle(&bundle, &key).unwrap();
+            assert!(original.graph_report.is_none());
+            assert!(
+                serde_json::to_value(&original)
+                    .unwrap()
+                    .get("graph_report")
+                    .is_none()
+            );
+            for identity in [None, Some(&expected)] {
+                let mut verified = verify_native_session_forensics_with_graph_report(
+                    &bytes,
+                    &key.verifying_key(),
+                    identity,
+                    SOURCE_GRAPH_REPORT,
+                )
+                .unwrap();
+                let summary = serde_json::to_string(&verified).unwrap();
+                for private in [
+                    "packages/workspace",
+                    "node_modules",
+                    "import 'workspace'",
+                    "private-dependency-name",
+                ] {
+                    assert!(!summary.contains(private));
+                    assert!(!format!("{verified:?}").contains(private));
+                }
+                let graph = verified.graph_report.take().unwrap();
+                let source = verified.source_capsule.as_ref().unwrap();
+                assert!(graph.graph_hash_recomputed);
+                assert!(!graph.graph_semantics_reconstructed);
+                assert_eq!(graph.graph_input_hash, source.graph_input_hash);
+                assert_eq!(
+                    graph.capsule_digest,
+                    admission["source_capsule"]["capsule_digest"]
+                        .as_str()
+                        .unwrap(),
+                );
+                assert_eq!(graph.module_count, 3);
+                assert_eq!(
+                    graph.report_sha256,
+                    hex::encode(Sha256::digest(SOURCE_GRAPH_REPORT))
+                );
+                assert!(!source.graph_hash_recomputed);
+                // Graph evidence cannot replace or strengthen the retained
+                // supervisor outcome, effect journal, or execution proof scope.
+                assert_eq!(verified, original);
+                assert_eq!(
+                    verified.outcome_kind,
+                    if interrupted_run {
+                        "interrupted"
+                    } else {
+                        "pending"
+                    }
+                );
+                assert_eq!(
+                    verified
+                        .durable_journal
+                        .as_ref()
+                        .unwrap()
+                        .indeterminate_provider_calls,
+                    1
+                );
+                assert!(
+                    !verified.replay_certified
+                        && !verified.quiescence_certified
+                        && !verified.historical_completeness
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_graph_requirement_refuses_missing_foreign_and_corrupted_sources() {
+        let (key, pending) = pending_fixture();
+        let mut journal = pending.clone();
+        journal.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        journal.journal_jsonl = Some(journal_header(
+            &key,
+            &journal.admission_receipt.admission_sha256,
+        ));
+        for bundle in [pending, journal] {
+            assert_eq!(
+                verify_native_session_forensics_with_graph_report(
+                    &serde_json::to_vec(&bundle).unwrap(),
+                    &key.verifying_key(),
+                    None,
+                    SOURCE_GRAPH_REPORT,
+                )
+                .unwrap_err(),
+                NativeSessionForensicError::SourceGraphMissing,
+            );
+        }
+        let (_, foreign, _) = retained_source_fixture();
+        assert_eq!(
+            verify_native_session_forensics_with_graph_report(
+                &serde_json::to_vec(&foreign).unwrap(),
+                &key.verifying_key(),
+                None,
+                SOURCE_GRAPH_REPORT,
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::SourceGraphInvalid,
+        );
+        let (_, bundle, mut sources) = retained_source_fixture_vector(2);
+        let mut corrupted = bundle.clone();
+        *sources.last_mut().unwrap() ^= 1;
+        corrupted.source_capsule_base64 = Some(STANDARD.encode(sources));
+        let mut stripped = bundle.clone();
+        stripped.source_capsule_base64 = None;
+        let mut downgraded = stripped.clone();
+        downgraded.schema_version = NATIVE_SESSION_FORENSICS_SCHEMA.into();
+        for (candidate, error) in [
+            (corrupted, NativeSessionForensicError::SourceCapsuleInvalid),
+            (stripped, NativeSessionForensicError::SchemaUnsupported),
+            (downgraded, NativeSessionForensicError::SourceCapsuleInvalid),
+        ] {
+            assert_eq!(
+                verify_native_session_forensics_with_graph_report(
+                    &serde_json::to_vec(&candidate).unwrap(),
+                    &key.verifying_key(),
+                    None,
+                    SOURCE_GRAPH_REPORT,
+                )
+                .unwrap_err(),
+                error,
+            );
+        }
+    }
+
+    #[test]
+    fn source_graph_verification_rejects_ambiguous_modified_and_oversized_reports() {
+        let (key, bundle, _) = retained_source_fixture_vector(2);
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let report: Value = serde_json::from_slice(SOURCE_GRAPH_REPORT).unwrap();
+        let mut changed = report.clone();
+        changed["modules"][0]["content_sha256"] = json!("0".repeat(64));
+        let mut foreign = report.clone();
+        foreign["graph_input_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        let mut execution = report.clone();
+        execution["execution_performed"] = json!(true);
+        let mut extra = report;
+        extra["private-graph-marker"] = json!("private-graph-marker");
+        let ambiguous = format!(
+            "{{\"scope\":\"static-and-literal-module-requests\",{}",
+            &std::str::from_utf8(SOURCE_GRAPH_REPORT).unwrap()[1..]
+        );
+        for witness in [
+            Vec::new(),
+            b"{".to_vec(),
+            b"{}".to_vec(),
+            ambiguous.into_bytes(),
+            serde_json::to_vec(&changed).unwrap(),
+            serde_json::to_vec(&foreign).unwrap(),
+            serde_json::to_vec(&execution).unwrap(),
+            serde_json::to_vec(&extra).unwrap(),
+            vec![b' '; MAX_SOURCE_GRAPH_REPORT_BYTES + 1],
+        ] {
+            let error = verify_native_session_forensics_with_graph_report(
+                &bytes,
+                &key.verifying_key(),
+                None,
+                &witness,
+            )
+            .unwrap_err();
+            assert_eq!(error, NativeSessionForensicError::SourceGraphInvalid);
+            assert!(!error.to_string().contains("private-graph-marker"));
+        }
+    }
+
+    #[test]
+    fn source_graph_verification_preserves_authority_and_expected_admission() {
+        let (key, mut bundle, _) = retained_source_fixture_vector(2);
+        issue_outcome(&mut bundle, &key, interrupted());
+        let expected = NativeSessionExpectedIdentity {
+            session_nonce: NONCE.into(),
+            admission_sha256: bundle.admission_receipt.admission_sha256.clone(),
+        };
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let stranger = SigningKey::from_bytes(&[99; 32]);
+        assert_eq!(
+            verify_native_session_forensics_with_graph_report(
+                &bytes,
+                &stranger.verifying_key(),
+                Some(&expected),
+                SOURCE_GRAPH_REPORT,
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::SignerUntrusted,
+        );
+        let mut wrong_nonce = expected.clone();
+        wrong_nonce.session_nonce = "019a7f53-c180-7001-8001-000000000002".into();
+        let mut wrong_admission = expected.clone();
+        wrong_admission.admission_sha256 = "0".repeat(64);
+        let mut malformed = expected.clone();
+        malformed.admission_sha256 = "bad".into();
+        for (identity, error) in [
+            (
+                &wrong_nonce,
+                NativeSessionForensicError::ExpectedIdentityMismatch,
+            ),
+            (
+                &wrong_admission,
+                NativeSessionForensicError::ExpectedIdentityMismatch,
+            ),
+            (
+                &malformed,
+                NativeSessionForensicError::ExpectedIdentityInvalid,
+            ),
+        ] {
+            assert_eq!(
+                verify_native_session_forensics_with_graph_report(
+                    &bytes,
+                    &key.verifying_key(),
+                    Some(identity),
+                    SOURCE_GRAPH_REPORT,
+                )
+                .unwrap_err(),
+                error,
+            );
+        }
+        let mut bad_admission = bundle.clone();
+        bad_admission.admission_receipt.signature_hex = "00".repeat(64);
+        let mut bad_outcome = bundle.clone();
+        bad_outcome.outcome.as_mut().unwrap().signature_hex = "00".repeat(64);
+        let mut bad_journal = bundle;
+        let mut header: Value =
+            serde_json::from_str(journal_header(&key, &expected.admission_sha256).trim_end())
+                .unwrap();
+        header["signature_hex"] = json!("00".repeat(64));
+        bad_journal.journal_jsonl = Some(format!("{header}\n"));
+        for (candidate, error) in [
+            (
+                bad_admission,
+                NativeSessionForensicError::AdmissionSignatureInvalid,
+            ),
+            (
+                bad_outcome,
+                NativeSessionForensicError::OutcomeSignatureInvalid,
+            ),
+            (
+                bad_journal,
+                NativeSessionForensicError::JournalSignatureInvalid,
+            ),
+        ] {
+            assert_eq!(
+                verify_native_session_forensics_with_graph_report(
+                    &serde_json::to_vec(&candidate).unwrap(),
+                    &key.verifying_key(),
+                    Some(&wrong_admission),
+                    SOURCE_GRAPH_REPORT,
+                )
+                .unwrap_err(),
+                error,
+                "graph evidence and identity mismatch must not bypass original authentication",
+            );
+        }
+    }
+
+    #[test]
+    fn v3_transport_uses_its_96_mib_bound_without_widening_incident_inputs() {
+        let (key, bundle, _) = retained_source_fixture();
+        let mut bytes = serde_json::to_vec(&bundle).unwrap();
+        // Legal trailing whitespace exercises the actual outer decoder at the
+        // transport boundary without constructing an enormous JSON object.
+        bytes.resize(crate::incident_bundle::MAX_INCIDENT_BUNDLE_BYTES + 1, b' ');
+        let verified = verify_native_session_forensics(&bytes, &key.verifying_key()).unwrap();
+        assert_eq!(verified.schema_version, NATIVE_SESSION_FORENSICS_V3_SCHEMA);
+        assert!(verified.source_capsule.is_some());
+        assert!(matches!(
+            crate::incident_bundle::decode_evidence_json(&bytes),
+            Err(crate::incident_bundle::IncidentBundleError::TooLarge { .. }),
+        ));
+        bytes.resize(MAX_NATIVE_SESSION_FORENSICS_V3_BYTES + 1, b' ');
+        assert_eq!(
+            verify_native_session_forensics(&bytes, &key.verifying_key()).unwrap_err(),
+            NativeSessionForensicError::InputTooLarge,
+        );
     }
 
     #[test]

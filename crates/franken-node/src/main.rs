@@ -7551,6 +7551,7 @@ struct DeployReleaseChild {
 #[serde(rename_all = "snake_case")]
 enum DeployNativeOutcome {
     Completed,
+    ControlStopped,
     Panicked,
     Other,
 }
@@ -7562,6 +7563,9 @@ struct DeployNativeObservation {
     observed_at_epoch_secs: u64,
     outcome: DeployNativeOutcome,
     no_admitted_host_effects: bool,
+    /// A cooperative stop with a validated, nonfailed final ledger and
+    /// authenticated descendant cleanup, never inferred from process reap.
+    activation_retirement_safe: bool,
 }
 
 impl DeployChildRun {
@@ -7750,6 +7754,7 @@ fn authenticate_deploy_native_observation(
             observed_at_epoch_secs,
             outcome: match outcome.kind {
                 NativeSessionOutcomeKind::Completed => DeployNativeOutcome::Completed,
+                NativeSessionOutcomeKind::ControlStopped => DeployNativeOutcome::ControlStopped,
                 NativeSessionOutcomeKind::Panicked => DeployNativeOutcome::Panicked,
                 _ => DeployNativeOutcome::Other,
             },
@@ -7757,14 +7762,41 @@ fn authenticate_deploy_native_observation(
                 outcome.effects,
                 NativeSessionEffectObservation::NoAdmittedHostEffects
             ),
+            activation_retirement_safe: deploy_control_stop_is_followable(
+                record.admission.process_spawn_authority_granted,
+                &outcome,
+            ),
         })
     }
+}
+
+#[cfg(feature = "engine")]
+fn deploy_control_stop_is_followable(
+    process_spawn_authority_granted: Option<bool>,
+    outcome: &ops::native_session_inventory::NativeSessionOutcome,
+) -> bool {
+    use ops::native_session_inventory::{
+        NativeSessionEffectObservation, NativeSessionOutcomeKind, NativeSessionProcessObservation,
+    };
+    // The caller has authenticated both the admission and outcome. A reaped
+    // worker alone says nothing about an interrupted provider or descendants.
+    outcome.kind == NativeSessionOutcomeKind::ControlStopped
+        && outcome.process == NativeSessionProcessObservation::WorkerReaped
+        && matches!(
+            outcome.effects,
+            NativeSessionEffectObservation::FinalLedgerObserved {
+                failed_count: 0,
+                ..
+            }
+        )
+        && (process_spawn_authority_granted == Some(false) || outcome.containment_empty_observed)
 }
 
 /// How the supervisor reads one child run.
 enum DeployRunVerdict {
     Healthy { receipt_id: String },
     ActivationInterrupted,
+    ActivationRetired { receipt_id: String },
     NativePanic(runtime::deployment::NativePanicEvidence),
     CrashLoop(runtime::deployment::CrashLoopEvidence),
     Crashed,
@@ -7773,20 +7805,31 @@ enum DeployRunVerdict {
 
 fn classify_deploy_run(run: &DeployChildRun) -> DeployRunVerdict {
     let report = &run.report;
+    let reported_nonce = report["session_nonce"].as_str().or_else(|| {
+        report["dispatch"]["runtime_evidence_identity_capture"]["session_nonce"].as_str()
+    });
     if run.exit_code != 0
         && (report["control_trigger"]["kind"] == "activation_interrupted"
             || (report["outcome"] == "activation_interrupted" && report["admission_only"] == true))
     {
         // This reports invalidation of a restrictive admission, not proof of a
         // successfully activated replacement or a completed external effect.
+        if let Some(observation) = &run.native_observation
+            && reported_nonce == Some(observation.session_nonce.as_str())
+            && report["control_trigger"]["kind"] == "activation_interrupted"
+            && report["admission_only"] != true
+            && observation.outcome == DeployNativeOutcome::ControlStopped
+            && observation.activation_retirement_safe
+        {
+            return DeployRunVerdict::ActivationRetired {
+                receipt_id: format!("native-session:{}", observation.session_nonce),
+            };
+        }
         return DeployRunVerdict::ActivationInterrupted;
     }
     let Some(observation) = &run.native_observation else {
         return DeployRunVerdict::Failed;
     };
-    let reported_nonce = report["session_nonce"].as_str().or_else(|| {
-        report["dispatch"]["runtime_evidence_identity_capture"]["session_nonce"].as_str()
-    });
     if reported_nonce != Some(observation.session_nonce.as_str()) {
         return DeployRunVerdict::Failed;
     }
@@ -7935,7 +7978,9 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
             )?;
             ("healthy", 0)
         }
-        DeployRunVerdict::ActivationInterrupted => ("activation_interrupted", run.exit_code.max(1)),
+        DeployRunVerdict::ActivationInterrupted | DeployRunVerdict::ActivationRetired { .. } => {
+            ("activation_interrupted", run.exit_code.max(1))
+        }
         DeployRunVerdict::Failed => ("failed", run.exit_code.max(1)),
         DeployRunVerdict::Crashed | DeployRunVerdict::NativePanic(_) => {
             ("crashed", run.exit_code.max(1))
@@ -8046,7 +8091,8 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                             )?;
                             ("resumed_healthy", 0)
                         }
-                        DeployRunVerdict::ActivationInterrupted => {
+                        DeployRunVerdict::ActivationInterrupted
+                        | DeployRunVerdict::ActivationRetired { .. } => {
                             ("activation_interrupted", resumed.exit_code.max(1))
                         }
                         DeployRunVerdict::CrashLoop(evidence) => {
@@ -8091,6 +8137,24 @@ type DeploySuperviseAttemptFn<'a> = dyn FnMut(
         &runtime::deployment::ReleaseRecord,
     ) -> Result<(DeployRunVerdict, i32, serde_json::Value)>
     + 'a;
+
+fn deploy_rollback_refusal_phase(
+    store: &runtime::deployment::DeploymentStore,
+    authority: &runtime::deployment::DeploymentAuthority,
+    expected: &runtime::deployment::ActivationRecord,
+) -> &'static str {
+    let active = (|| -> Result<_> {
+        let _lock = store.lock()?;
+        store.active(authority)
+    })();
+    if active.is_ok_and(|current| current.as_ref() != Some(expected)) {
+        "post_rollback_activation_changed"
+    } else {
+        // An unreadable or pending activation is a refusal, not proof that a
+        // different committed activation exists.
+        "post_rollback_restart_refused"
+    }
+}
 
 fn supervise_deploy_runs_with(
     store: &runtime::deployment::DeploymentStore,
@@ -8137,6 +8201,9 @@ fn supervise_deploy_runs_with(
     let mut recovery_json: Option<serde_json::Value> = None;
     let mut detector_decision_json: Option<serde_json::Value> = None;
     let mut e_process_monitor: Option<EProcessHealthMonitor> = None;
+    let mut recovery_activation_pin: Option<runtime::deployment::ActivationRecord> = None;
+    let mut follow_activation_from: Option<runtime::deployment::ActivationRecord> = None;
+    let mut continuation_error: Option<String> = None;
     let mut final_phase = "max_runs_completed";
     let mut final_exit_code = 0_i32;
     let mut last_release_id = String::new();
@@ -8145,7 +8212,7 @@ fn supervise_deploy_runs_with(
         if run_index > 0 && args.cooldown_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(args.cooldown_ms));
         }
-        let (activation, release) = {
+        let admission = (|| -> Result<_> {
             let _lock = store.lock()?;
             let activation = store.active(authority)?.ok_or_else(|| {
                 ActionableError::new(
@@ -8153,6 +8220,13 @@ fn supervise_deploy_runs_with(
                     "franken-node deploy activate <name> --release <id> --operator-id <operator>",
                 )
             })?;
+            if let Some(previous) = &follow_activation_from {
+                anyhow::ensure!(
+                    activation.sequence > previous.sequence,
+                    "activation following requires a newer committed activation than {}",
+                    previous.sequence
+                );
+            }
             let release = store.release(authority, &activation.release_id)?;
             store.enforce_release_execution_health(authority, &release.release_id)?;
             enforce_deploy_safe_mode(store)?;
@@ -8162,18 +8236,108 @@ fn supervise_deploy_runs_with(
                     release.release_id
                 )
             })?;
-            (activation, release)
+            Ok((activation, release))
+        })();
+        let (activation, release) = match admission {
+            Ok(admitted) => admitted,
+            Err(error) if follow_activation_from.is_some() => {
+                final_phase = "activation_follow_refused";
+                final_exit_code = 1;
+                continuation_error = Some(format!("{error:#}"));
+                break;
+            }
+            Err(error) if recovery_activation_pin.is_some() => {
+                final_phase = deploy_rollback_refusal_phase(
+                    store,
+                    authority,
+                    recovery_activation_pin.as_ref().expect("recovery pin"),
+                );
+                final_exit_code = 1;
+                continuation_error = Some(format!("{error:#}"));
+                break;
+            }
+            Err(error) => return Err(error),
         };
+        if recovery_activation_pin
+            .as_ref()
+            .is_some_and(|pin| pin != &activation)
+        {
+            final_phase = "post_rollback_activation_changed";
+            final_exit_code = 1;
+            continuation_error = Some(
+                "operator activation changed before the next rollback probe; no new run was started"
+                    .to_owned(),
+            );
+            break;
+        }
         last_release_id = release.release_id.clone();
 
-        let (verdict, child_exit_code, child_report) = execute_attempt(&activation, &release)?;
+        let execution = execute_attempt(&activation, &release);
+        if follow_activation_from.is_some()
+            && let Some(previous_attempt) = attempts.last_mut()
+        {
+            previous_attempt["successor_attempt"] = serde_json::json!({
+                "attempt": run_index + 1,
+                "release_id": release.release_id,
+                "activation_sequence": activation.sequence,
+            });
+        }
+        let (verdict, child_exit_code, child_report) = match execution {
+            Ok(observed) => observed,
+            Err(error) if follow_activation_from.is_some() => {
+                final_phase = "activation_follow_refused";
+                final_exit_code = 1;
+                let detail =
+                    format!("successor attempt could not be completed or authenticated: {error:#}");
+                if let Some(previous_attempt) = attempts.last_mut() {
+                    previous_attempt["successor_attempt"]["supervision_error"] =
+                        serde_json::json!(detail);
+                }
+                continuation_error = Some(detail);
+                break;
+            }
+            Err(error) if recovery_activation_pin.is_some() => {
+                final_phase = deploy_rollback_refusal_phase(
+                    store,
+                    authority,
+                    recovery_activation_pin.as_ref().expect("recovery pin"),
+                );
+                final_exit_code = 1;
+                continuation_error = Some(format!(
+                    "rollback probe could not be completed or authenticated: {error:#}"
+                ));
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        follow_activation_from = None;
         let now_secs = current_unix_secs();
         let now_rfc3339 = Utc::now().to_rfc3339();
 
         match verdict {
             DeployRunVerdict::Healthy { receipt_id } => {
-                {
+                let e_obs = {
                     let lock = store.lock()?;
+                    if let Some(pin) = &recovery_activation_pin
+                        && store.active(authority)?.as_ref() != Some(pin)
+                    {
+                        attempts.push(serde_json::json!({
+                            "attempt": run_index + 1,
+                            "release_id": release.release_id,
+                            "activation_sequence": activation.sequence,
+                            "verdict": "post_rollback_activation_changed",
+                            "receipt_id": receipt_id,
+                            "exit_code": child_exit_code,
+                            "run": child_report,
+                        }));
+                        final_phase = "post_rollback_activation_changed";
+                        final_exit_code = 1;
+                        continuation_error = Some(
+                            "operator activation changed during the rollback probe; its result was not counted toward certification"
+                                .to_owned(),
+                        );
+                        break;
+                    }
                     store.record_health(
                         &lock,
                         authority,
@@ -8183,10 +8347,10 @@ fn supervise_deploy_runs_with(
                             observed_at_epoch_secs: now_secs,
                         },
                     )?;
-                }
-                let e_obs = e_process_monitor
-                    .as_mut()
-                    .map(|monitor| monitor.observe_run(false));
+                    e_process_monitor
+                        .as_mut()
+                        .map(|monitor| monitor.observe_run(false))
+                };
                 attempts.push(serde_json::json!({
                     "attempt": run_index + 1,
                     "release_id": release.release_id,
@@ -8359,6 +8523,24 @@ fn supervise_deploy_runs_with(
                             final_exit_code = child_exit_code.max(1);
                             break;
                         }
+                        {
+                            let _lock = store.lock()?;
+                            let current = store.active(authority)?;
+                            if !current.as_ref().is_some_and(|active| {
+                                Some(active.sequence) == recovery.activation_sequence
+                                    && active.release_id == *selected
+                                    && active.recovery_sequence == Some(recovery.sequence)
+                            }) {
+                                final_phase = "post_rollback_activation_changed";
+                                final_exit_code = 1;
+                                continuation_error = Some(
+                                    "operator activation changed before rollback supervision began"
+                                        .to_owned(),
+                                );
+                                break;
+                            }
+                            recovery_activation_pin = current;
+                        }
                         e_process_monitor = Some(
                             EProcessHealthMonitor::new(selected.clone(), e_process_cfg)
                                 .map_err(|err| anyhow::anyhow!(err))?,
@@ -8389,6 +8571,36 @@ fn supervise_deploy_runs_with(
                     }
                 }
             }
+            DeployRunVerdict::ActivationRetired { receipt_id } => {
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "activation_retired",
+                    "retirement_receipt_id": receipt_id,
+                    "exit_code": child_exit_code.max(1),
+                    "run": child_report,
+                }));
+                final_exit_code = child_exit_code.max(1);
+                if !args.follow_activation {
+                    final_phase = "activation_interrupted";
+                    break;
+                }
+                if recovery_activation_pin.is_some() {
+                    final_phase = "post_rollback_activation_changed";
+                    continuation_error = Some(
+                        "activation retirement interrupted the pinned rollback observation; start a new supervision invocation for the operator's replacement"
+                            .to_owned(),
+                    );
+                    break;
+                }
+                if run_index + 1 == args.max_runs {
+                    final_phase = "activation_follow_budget_exhausted";
+                    break;
+                }
+                follow_activation_from = Some(activation);
+                final_phase = "activation_follow_pending";
+            }
             DeployRunVerdict::ActivationInterrupted => {
                 attempts.push(serde_json::json!({
                     "attempt": run_index + 1,
@@ -8398,7 +8610,15 @@ fn supervise_deploy_runs_with(
                     "exit_code": child_exit_code.max(1),
                     "run": child_report,
                 }));
-                final_phase = "activation_interrupted";
+                final_phase = if args.follow_activation {
+                    continuation_error = Some(
+                        "retirement lacks an authenticated cooperative stop, complete nonfailed effect ledger, or proven descendant cleanup; replacement was not started"
+                            .to_owned(),
+                    );
+                    "activation_follow_refused"
+                } else {
+                    "activation_interrupted"
+                };
                 final_exit_code = child_exit_code.max(1);
                 break;
             }
@@ -8434,6 +8654,9 @@ fn supervise_deploy_runs_with(
         "phase": final_phase,
         "ok": final_exit_code == 0,
         "max_runs": args.max_runs,
+        "retire_on_activation": args.retire_on_activation || args.follow_activation,
+        "follow_activation": args.follow_activation,
+        "continuation_error": continuation_error,
         "post_rollback_probes": args.post_rollback_probes,
         "attempts_executed": attempts.len(),
         "attempts": attempts,
@@ -8454,8 +8677,11 @@ fn handle_deploy_supervise(args: &cli::DeploySuperviseArgs) -> Result<(serde_jso
         &mut |activation, release| {
             let child = {
                 let lock = store.lock()?;
-                let restriction = args
-                    .retire_on_activation
+                anyhow::ensure!(
+                    store.active(&authority)?.as_ref() == Some(activation),
+                    "deployment activation changed before the supervised child spawn"
+                );
+                let restriction = (args.retire_on_activation || args.follow_activation)
                     .then(|| store.capture_activation_restriction(&lock, &authority, activation))
                     .transpose()?;
                 spawn_deploy_release_child(
@@ -8468,7 +8694,10 @@ fn handle_deploy_supervise(args: &cli::DeploySuperviseArgs) -> Result<(serde_jso
             };
             let run = finish_deploy_release_child(child, release)?;
             let verdict = classify_and_record_deploy_run(&store, &authority, release, &run)?;
-            Ok((verdict, run.exit_code, run.report))
+            let authentication = run.authentication_report();
+            let mut report = run.report;
+            report["observation_authentication"] = authentication;
+            Ok((verdict, run.exit_code, report))
         },
     )
 }
@@ -52301,6 +52530,7 @@ mod run_trust_gate_tests {
             observed_at_epoch_secs: 42,
             outcome: DeployNativeOutcome::Panicked,
             no_admitted_host_effects: true,
+            activation_retirement_safe: false,
         });
         run.authentication_error = None;
         let DeployRunVerdict::NativePanic(evidence) = classify_deploy_run(&run) else {
@@ -52378,6 +52608,550 @@ mod run_trust_gate_tests {
                 classify_deploy_run(&deployment_report(1, report)),
                 DeployRunVerdict::Failed
             ));
+        }
+    }
+
+    #[test]
+    fn deployment_activation_follow_requires_authenticated_exact_launch_retirement() {
+        let nonce = "00000000-0000-4000-8000-000000000001";
+        let mut run = deployment_report(
+            1,
+            serde_json::json!({
+                "session_nonce": nonce,
+                "control_trigger": {"kind": "activation_interrupted"},
+            }),
+        );
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::ActivationInterrupted
+        ));
+        run.native_observation = Some(DeployNativeObservation {
+            session_nonce: nonce.to_owned(),
+            entrypoint: "/release/app.js".to_owned(),
+            observed_at_epoch_secs: 42,
+            outcome: DeployNativeOutcome::ControlStopped,
+            no_admitted_host_effects: false,
+            activation_retirement_safe: true,
+        });
+        run.authentication_error = None;
+        let DeployRunVerdict::ActivationRetired { receipt_id } = classify_deploy_run(&run) else {
+            panic!("authenticated clean cooperative retirement should permit following");
+        };
+        assert_eq!(receipt_id, format!("native-session:{nonce}"));
+
+        run.report["session_nonce"] = serde_json::json!(uuid::Uuid::from_u128(2).to_string());
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::ActivationInterrupted
+        ));
+        run.report["session_nonce"] = serde_json::json!(nonce);
+        run.native_observation
+            .as_mut()
+            .unwrap()
+            .activation_retirement_safe = false;
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::ActivationInterrupted
+        ));
+        run.native_observation
+            .as_mut()
+            .unwrap()
+            .activation_retirement_safe = true;
+        run.native_observation.as_mut().unwrap().outcome = DeployNativeOutcome::Completed;
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::ActivationInterrupted
+        ));
+        run.native_observation.as_mut().unwrap().outcome = DeployNativeOutcome::ControlStopped;
+        run.report["admission_only"] = serde_json::json!(true);
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::ActivationInterrupted
+        ));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn deployment_activation_follow_requires_final_effects_and_descendant_cleanup() {
+        use ops::native_session_inventory::{
+            NativeSessionEffectObservation as Effects, NativeSessionOutcome,
+            NativeSessionOutcomeKind as Kind, NativeSessionProcessObservation as Process,
+        };
+        let mut outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: Kind::ControlStopped,
+            process: Process::WorkerReaped,
+            containment_empty_observed: false,
+            effects: Effects::FinalLedgerObserved {
+                effect_count: 2,
+                allowed_count: 1,
+                denied_count: 1,
+                failed_count: 0,
+                chain_head_hash: format!("sha256:{}", "1".repeat(64)),
+                ledger_sha256: "2".repeat(64),
+            },
+            panic_evidence: None,
+        };
+        assert!(deploy_control_stop_is_followable(Some(false), &outcome));
+        assert!(!deploy_control_stop_is_followable(None, &outcome));
+        assert!(!deploy_control_stop_is_followable(Some(true), &outcome));
+        outcome.containment_empty_observed = true;
+        assert!(deploy_control_stop_is_followable(Some(true), &outcome));
+        outcome.process = Process::Unproven;
+        assert!(!deploy_control_stop_is_followable(Some(true), &outcome));
+        outcome.process = Process::WorkerReaped;
+        for kind in [
+            Kind::Completed,
+            Kind::ExecutionFailed,
+            Kind::Interrupted,
+            Kind::Panicked,
+        ] {
+            outcome.kind = kind;
+            assert!(!deploy_control_stop_is_followable(Some(false), &outcome));
+        }
+        outcome.kind = Kind::ControlStopped;
+        if let Effects::FinalLedgerObserved {
+            denied_count,
+            failed_count,
+            ..
+        } = &mut outcome.effects
+        {
+            *denied_count = 0;
+            *failed_count = 1;
+        }
+        assert!(!deploy_control_stop_is_followable(Some(false), &outcome));
+        for effects in [
+            Effects::Unknown,
+            Effects::NotStarted,
+            Effects::NoAdmittedHostEffects,
+        ] {
+            outcome.effects = effects;
+            assert!(!deploy_control_stop_is_followable(Some(false), &outcome));
+        }
+    }
+
+    struct DeploymentContinuationFixture {
+        root: tempfile::TempDir,
+        store: runtime::deployment::DeploymentStore,
+        authority: runtime::deployment::DeploymentAuthority,
+    }
+
+    impl DeploymentContinuationFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = runtime::deployment::DeploymentStore::open(root.path(), "follow").unwrap();
+            let authority = runtime::deployment::DeploymentAuthority::new(
+                ed25519_dalek::SigningKey::from_bytes(&[19; 32]),
+            );
+            Self {
+                root,
+                store,
+                authority,
+            }
+        }
+
+        fn install(&self, id: &str) {
+            let directory = self.root.path().join(id);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("app.js"), b"console.log('ready');\n").unwrap();
+            let release = serde_json::from_value(serde_json::json!({
+                "schema_version": runtime::deployment::RELEASE_SCHEMA,
+                "deployment": "follow",
+                "release_id": id,
+                "release_dir": directory.canonicalize().unwrap(),
+                "entrypoint": "app.js",
+                "config_sha256": format!("sha256:{}", "1".repeat(64)),
+                "registry_manifest": "/registry/artifact.manifest.json",
+                "publisher_public_key_path": "/keys/publisher.pub",
+                "approval": {
+                    "manifest_path": "/registry/artifact.manifest.json",
+                    "manifest_sha256": format!("sha256:{}", "2".repeat(64)),
+                    "publisher_public_key_hex": "3".repeat(64),
+                    "identity": {
+                        "publisher_key_id": "key",
+                        "publisher_id": "publisher",
+                        "name": "app",
+                        "version": id,
+                        "artifact_sha256": format!("sha256:{}", "4".repeat(64)),
+                    },
+                    "capsule_digest": format!("sha256:{}", "5".repeat(64)),
+                    "graph_input_hash": format!("sha256:{}", "6".repeat(64)),
+                    "entrypoint": "app.js",
+                    "additional_conditions": [],
+                    "contained_symlinks": false,
+                },
+                "engine_compatibility": "franken-node/test",
+                "installed_at_epoch_secs": 10,
+            }))
+            .unwrap();
+            let lock = self.store.lock().unwrap();
+            self.store
+                .install_release(&lock, &self.authority, release)
+                .unwrap();
+        }
+
+        fn activate(&self, id: &str) {
+            let lock = self.store.lock().unwrap();
+            self.store
+                .activate(
+                    &lock,
+                    &self.authority,
+                    id,
+                    runtime::deployment::ActivationReason::Operator,
+                    Some("operator"),
+                    None,
+                    current_unix_secs(),
+                )
+                .unwrap();
+        }
+
+        fn args(&self, follow: bool, max_runs: u32) -> cli::DeploySuperviseArgs {
+            cli::DeploySuperviseArgs {
+                name: "follow".to_owned(),
+                max_runs,
+                post_rollback_probes: 1,
+                e_process_alpha: 0.05,
+                cooldown_ms: 0,
+                retire_on_activation: false,
+                follow_activation: follow,
+                json: true,
+                app_args: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn deploy_supervise_follows_committed_activation_with_fresh_admission() {
+        let fixture = DeploymentContinuationFixture::new();
+        fixture.install("old");
+        fixture.install("new");
+        fixture.activate("old");
+        let verified = std::cell::RefCell::new(Vec::new());
+        let mut started = Vec::new();
+        let (report, code) = supervise_deploy_runs_with(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.args(true, 2),
+            &|release| {
+                verified.borrow_mut().push(release.release_id.clone());
+                Ok(())
+            },
+            &mut |_, release| {
+                started.push(release.release_id.clone());
+                if release.release_id == "old" {
+                    fixture.activate("new");
+                    Ok((
+                        DeployRunVerdict::ActivationRetired {
+                            receipt_id: "native-session:retired".to_owned(),
+                        },
+                        1,
+                        serde_json::json!({}),
+                    ))
+                } else {
+                    Ok((
+                        DeployRunVerdict::Healthy {
+                            receipt_id: "native-session:replacement".to_owned(),
+                        },
+                        0,
+                        serde_json::json!({}),
+                    ))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{report}");
+        assert_eq!(started, ["old", "new"]);
+        assert_eq!(*verified.borrow(), ["old", "new"]);
+        assert_eq!(report["phase"], "healthy");
+        assert_eq!(report["follow_activation"], true);
+        assert_eq!(report["retire_on_activation"], true);
+        assert_eq!(report["attempts_executed"], 2);
+        assert_eq!(report["attempts"][0]["verdict"], "activation_retired");
+        assert_eq!(
+            report["attempts"][0]["successor_attempt"]["release_id"],
+            "new"
+        );
+        assert_eq!(
+            report["attempts"][0]["successor_attempt"]["activation_sequence"],
+            2
+        );
+        assert!(report["recovery"].is_null());
+        assert!(report["e_process_monitor"].is_null());
+    }
+
+    #[test]
+    fn deploy_supervise_follow_refuses_new_release_when_current_admission_fails() {
+        let fixture = DeploymentContinuationFixture::new();
+        fixture.install("old");
+        fixture.install("revoked");
+        fixture.activate("old");
+        let mut starts = 0;
+        let (report, code) = supervise_deploy_runs_with(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.args(true, 2),
+            &|release| {
+                anyhow::ensure!(
+                    release.release_id != "revoked",
+                    "current publisher trust revoked"
+                );
+                Ok(())
+            },
+            &mut |_, release| {
+                starts += 1;
+                assert_eq!(release.release_id, "old");
+                fixture.activate("revoked");
+                Ok((
+                    DeployRunVerdict::ActivationRetired {
+                        receipt_id: "native-session:retired".to_owned(),
+                    },
+                    1,
+                    serde_json::json!({}),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(starts, 1);
+        assert_eq!(code, 1);
+        assert_eq!(report["phase"], "activation_follow_refused");
+        assert_eq!(report["attempts_executed"], 1);
+        assert!(
+            report["continuation_error"]
+                .as_str()
+                .unwrap()
+                .contains("current publisher trust revoked")
+        );
+        assert!(report["attempts"][0].get("successor_attempt").is_none());
+    }
+
+    #[test]
+    fn deploy_supervise_follow_retains_retirement_when_successor_spawn_is_refused() {
+        let fixture = DeploymentContinuationFixture::new();
+        fixture.install("old");
+        fixture.install("new");
+        fixture.activate("old");
+        let mut starts = 0;
+        let (report, code) = supervise_deploy_runs_with(
+            &fixture.store,
+            &fixture.authority,
+            &fixture.args(true, 2),
+            &|_| Ok(()),
+            &mut |_, release| {
+                starts += 1;
+                if release.release_id == "old" {
+                    fixture.activate("new");
+                    return Ok((
+                        DeployRunVerdict::ActivationRetired {
+                            receipt_id: "native-session:retired".to_owned(),
+                        },
+                        1,
+                        serde_json::json!({}),
+                    ));
+                }
+                anyhow::bail!("activation changed at final child spawn")
+            },
+        )
+        .unwrap();
+        assert_eq!(starts, 2);
+        assert_eq!(code, 1);
+        assert_eq!(report["phase"], "activation_follow_refused");
+        assert_eq!(report["attempts_executed"], 1);
+        assert_eq!(
+            report["attempts"][0]["retirement_receipt_id"],
+            "native-session:retired"
+        );
+        let successor = &report["attempts"][0]["successor_attempt"];
+        assert_eq!(successor["release_id"], "new");
+        assert_eq!(successor["activation_sequence"], 2);
+        assert!(
+            successor["supervision_error"]
+                .as_str()
+                .unwrap()
+                .contains("activation changed at final child spawn")
+        );
+        assert!(
+            report["continuation_error"]
+                .as_str()
+                .unwrap()
+                .contains("activation changed at final child spawn")
+        );
+    }
+
+    #[test]
+    fn deploy_supervise_rollback_refusal_distinguishes_changed_signed_activation() {
+        let fixture = DeploymentContinuationFixture::new();
+        fixture.install("old");
+        fixture.install("new");
+        fixture.activate("old");
+        let pin = fixture.store.active(&fixture.authority).unwrap().unwrap();
+        assert_eq!(
+            deploy_rollback_refusal_phase(&fixture.store, &fixture.authority, &pin),
+            "post_rollback_restart_refused"
+        );
+        fixture.activate("new");
+        assert_eq!(
+            deploy_rollback_refusal_phase(&fixture.store, &fixture.authority, &pin),
+            "post_rollback_activation_changed"
+        );
+    }
+
+    #[test]
+    fn deploy_supervise_follow_preserves_opt_in_budget_and_retirement_boundaries() {
+        for (follow, max_runs, retired, change_activation, expected_phase) in [
+            (false, 2, true, true, "activation_interrupted"),
+            (true, 1, true, true, "activation_follow_budget_exhausted"),
+            (true, 2, false, true, "activation_follow_refused"),
+            (true, 2, true, false, "activation_follow_refused"),
+        ] {
+            let fixture = DeploymentContinuationFixture::new();
+            fixture.install("old");
+            fixture.install("new");
+            fixture.activate("old");
+            let mut starts = 0;
+            let (report, code) = supervise_deploy_runs_with(
+                &fixture.store,
+                &fixture.authority,
+                &fixture.args(follow, max_runs),
+                &|_| Ok(()),
+                &mut |_, release| {
+                    starts += 1;
+                    assert_eq!(release.release_id, "old");
+                    if change_activation {
+                        fixture.activate("new");
+                    }
+                    let verdict = if retired {
+                        DeployRunVerdict::ActivationRetired {
+                            receipt_id: "native-session:retired".to_owned(),
+                        }
+                    } else {
+                        DeployRunVerdict::ActivationInterrupted
+                    };
+                    Ok((verdict, 1, serde_json::json!({})))
+                },
+            )
+            .unwrap();
+            assert_eq!(starts, 1, "{report}");
+            assert_eq!(code, 1, "{report}");
+            assert_eq!(report["phase"], expected_phase, "{report}");
+            assert_eq!(report["attempts_executed"], 1);
+            assert!(report["attempts"][0].get("successor_attempt").is_none());
+        }
+    }
+
+    #[test]
+    fn deploy_supervise_rollback_probes_cannot_certify_changed_or_reactivated_release() {
+        use runtime::deployment::{
+            CrashLoopAction, CrashLoopEvidence, DeploymentPolicy, HealthEvent, POLICY_SCHEMA,
+            RestartPolicy,
+        };
+        for same_release in [false, true] {
+            let fixture = DeploymentContinuationFixture::new();
+            for id in ["good", "bad", "operator-release"] {
+                fixture.install(id);
+            }
+            fixture.activate("good");
+            {
+                let lock = fixture.store.lock().unwrap();
+                fixture
+                    .store
+                    .record_health(
+                        &lock,
+                        &fixture.authority,
+                        "good",
+                        HealthEvent::HealthyRun {
+                            receipt_id: "previous-healthy".to_owned(),
+                            observed_at_epoch_secs: current_unix_secs(),
+                        },
+                    )
+                    .unwrap();
+                fixture
+                    .store
+                    .set_policy(
+                        &lock,
+                        &fixture.authority,
+                        DeploymentPolicy {
+                            schema_version: POLICY_SCHEMA.to_owned(),
+                            deployment: "follow".to_owned(),
+                            on_crash_loop: CrashLoopAction::Rollback,
+                            restart: RestartPolicy::Automatic,
+                            operator_id: "operator".to_owned(),
+                            set_at_epoch_secs: current_unix_secs(),
+                        },
+                    )
+                    .unwrap();
+            }
+            fixture.activate("bad");
+            let mut args = fixture.args(true, 4);
+            args.post_rollback_probes = 2;
+            let mut healthy_probes = 0;
+            let (report, code) = supervise_deploy_runs_with(
+                &fixture.store,
+                &fixture.authority,
+                &args,
+                &|_| Ok(()),
+                &mut |_, release| {
+                    if release.release_id == "bad" {
+                        return Ok((
+                            DeployRunVerdict::CrashLoop(CrashLoopEvidence {
+                                session_nonce: uuid::Uuid::now_v7().to_string(),
+                                entrypoint: release
+                                    .release_dir
+                                    .join(&release.entrypoint)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                observed_at_epoch_secs: current_unix_secs(),
+                                crashes_in_window: 3,
+                                threshold: 3,
+                                window_secs: 300,
+                                safe_mode_state_path: release
+                                    .release_dir
+                                    .join(".franken-node/safe-mode/state.json")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            }),
+                            1,
+                            serde_json::json!({}),
+                        ));
+                    }
+                    assert_eq!(release.release_id, "good");
+                    healthy_probes += 1;
+                    if healthy_probes == 2 {
+                        fixture.activate(if same_release {
+                            "good"
+                        } else {
+                            "operator-release"
+                        });
+                    }
+                    Ok((
+                        DeployRunVerdict::Healthy {
+                            receipt_id: format!("native-session:probe-{healthy_probes}"),
+                        },
+                        0,
+                        serde_json::json!({}),
+                    ))
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 1, "{report}");
+            assert_eq!(
+                report["phase"], "post_rollback_activation_changed",
+                "{report}"
+            );
+            assert_eq!(report["attempts_executed"], 3);
+            assert_eq!(report["e_process_monitor"]["release_id"], "good");
+            assert_eq!(report["e_process_monitor"]["healthy_runs"], 1);
+            assert_eq!(report["e_process_monitor"]["state"], "observing");
+            let active = fixture.store.active(&fixture.authority).unwrap().unwrap();
+            assert_eq!(active.sequence, 4);
+            assert_eq!(
+                active.release_id,
+                if same_release {
+                    "good"
+                } else {
+                    "operator-release"
+                }
+            );
+            assert_eq!(active.recovery_sequence, None);
         }
     }
 
@@ -56208,6 +56982,7 @@ mod time_math_wraparound_tests {
             "--cooldown-ms",
             "25",
             "--retire-on-activation",
+            "--follow-activation",
             "--json",
             "--",
             "--port=8080",
@@ -56221,6 +56996,7 @@ mod time_math_wraparound_tests {
                 assert!((args.e_process_alpha - 0.05).abs() < f64::EPSILON);
                 assert_eq!(args.cooldown_ms, 25);
                 assert!(args.retire_on_activation);
+                assert!(args.follow_activation);
                 assert!(args.json);
                 assert_eq!(args.app_args, vec!["--port=8080".to_string()]);
             }
@@ -56358,6 +57134,7 @@ mod time_math_wraparound_tests {
             e_process_alpha: 0.05,
             cooldown_ms: 0,
             retire_on_activation: false,
+            follow_activation: false,
             json: true,
             app_args: Vec::new(),
         };

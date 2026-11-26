@@ -3426,8 +3426,54 @@ mod external_release_live_control {
         })
     }
 
+    fn finish_deployment_output(
+        process: &mut DeploymentProcess,
+        stdout: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+        stderr: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    ) -> (Option<i32>, Value) {
+        let stopped_at = Instant::now();
+        let status = loop {
+            match process.child.try_wait().expect("poll deployment") {
+                Some(status) => break status,
+                None => {
+                    assert!(
+                        stopped_at.elapsed() < Duration::from_secs(15),
+                        "deployment did not finish within its live-control deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        assert!(
+            process.descendants.iter().all(|(pid, start)| {
+                process_start_time(*pid).as_deref() != Some(start.as_str())
+            }),
+            "the run child and native worker must be reaped before completion"
+        );
+        let stdout = stdout
+            .join()
+            .expect("join deployment stdout reader")
+            .expect("deployment report");
+        let stderr = stderr
+            .join()
+            .expect("join deployment stderr reader")
+            .expect("deployment diagnostics");
+        let report = serde_json::from_slice(&stdout).unwrap_or_else(|error| {
+            panic!(
+                "invalid deployment report: {error}; {}; {}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            )
+        });
+        (status.code(), report)
+    }
+
     impl BlockedActivationRun {
         fn start(drill: &Drill, retire_on_activation: bool) -> Self {
+            Self::start_with_follow(drill, retire_on_activation, false)
+        }
+
+        fn start_with_follow(drill: &Drill, retire_on_activation: bool, follow: bool) -> Self {
             const ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
             let release = tempfile::tempdir().expect("external retiring release");
             let listener = TcpListener::bind("127.0.0.1:0").expect("activation HTTP sink");
@@ -3503,7 +3549,21 @@ mod external_release_live_control {
                 )?;
                 stream.flush()
             });
-            let mut args = vec!["deploy", "run", "app", "--json"];
+            let mut args = if follow {
+                vec![
+                    "deploy",
+                    "supervise",
+                    "app",
+                    "--max-runs",
+                    "2",
+                    "--post-rollback-probes",
+                    "1",
+                    "--follow-activation",
+                    "--json",
+                ]
+            } else {
+                vec!["deploy", "run", "app", "--json"]
+            };
             if retire_on_activation {
                 args.push("--retire-on-activation");
             }
@@ -3546,47 +3606,11 @@ mod external_release_live_control {
         }
 
         fn finish(&mut self) -> (Option<i32>, Value) {
-            let stopped_at = Instant::now();
-            let status = loop {
-                match self.process.child.try_wait().expect("poll deployment") {
-                    Some(status) => break status,
-                    None => {
-                        assert!(
-                            stopped_at.elapsed() < Duration::from_secs(15),
-                            "deployment did not finish within its live-control deadline"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                }
-            };
-            assert!(
-                self.process.descendants.iter().all(|(pid, start)| {
-                    process_start_time(*pid).as_deref() != Some(start.as_str())
-                }),
-                "the run child and native worker must be reaped before completion"
-            );
-            let stdout = self
-                .stdout
-                .take()
-                .expect("deployment stdout reader")
-                .join()
-                .expect("join deployment stdout reader")
-                .expect("deployment report");
-            let stderr = self
-                .stderr
-                .take()
-                .expect("deployment stderr reader")
-                .join()
-                .expect("join deployment stderr reader")
-                .expect("deployment diagnostics");
-            let report = serde_json::from_slice(&stdout).unwrap_or_else(|error| {
-                panic!(
-                    "invalid deployment report: {error}; {}; {}",
-                    String::from_utf8_lossy(&stdout),
-                    String::from_utf8_lossy(&stderr)
-                )
-            });
-            (status.code(), report)
+            finish_deployment_output(
+                &mut self.process,
+                self.stdout.take().expect("deployment stdout reader"),
+                self.stderr.take().expect("deployment stderr reader"),
+            )
         }
 
         fn release_http_response(&mut self) -> std::io::Result<()> {
@@ -3934,6 +3958,183 @@ mod external_release_live_control {
             };
             run_replacement_explicitly(&drill, &blocked, sequence);
         }
+    }
+
+    #[test]
+    fn deployment_follow_activation_starts_clean_successor_and_refuses_pending_transition() {
+        for pending in [false, true] {
+            let drill = Drill::new();
+            let external = tempfile::tempdir().expect("external old release");
+            let (old, manifest) = drill.publish_release_with_config(
+                "1.0.0",
+                "require('fs').writeFileSync('entered.marker', 'entered');\nsetInterval(() => {}, 1000);\n",
+                external.path(),
+                Some("profile = \"legacy-risky\"\n"),
+            );
+            drill.install_published("1.0.0", &old, &manifest);
+            let replacement = drill.root.path().join("releases/2.0.0");
+            let (_, manifest) = drill.publish_release_with_config(
+                "2.0.0",
+                "require('fs').writeFileSync('replacement.marker', 'started');\nconsole.log('FOLLOWED_RELEASE');\n",
+                &replacement,
+                Some("profile = \"legacy-risky\"\n"),
+            );
+            drill.install_published("2.0.0", &replacement, &manifest);
+            drill.activate("1.0.0");
+
+            let mut child = drill
+                .command(
+                    drill.root.path(),
+                    &[
+                        "deploy",
+                        "supervise",
+                        "app",
+                        "--max-runs",
+                        "2",
+                        "--post-rollback-probes",
+                        "1",
+                        "--follow-activation",
+                        "--json",
+                    ],
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("real activation-following supervisor");
+            let stdout = drain_deployment_output(child.stdout.take().unwrap());
+            let stderr = drain_deployment_output(child.stderr.take().unwrap());
+            let mut process = DeploymentProcess {
+                child,
+                descendants: BTreeMap::new(),
+            };
+            let admitted_at = Instant::now();
+            while !old.join("entered.marker").is_file() {
+                assert!(
+                    matches!(process.child.try_wait(), Ok(None)),
+                    "old release exited before its admitted effect"
+                );
+                assert!(
+                    admitted_at.elapsed() < Duration::from_secs(30),
+                    "old release did not start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            process.remember_descendants();
+            assert!(
+                process.descendants.len() >= 2,
+                "real run child and native worker must exist"
+            );
+            if pending {
+                drill.interrupt(
+                    &[
+                        "deploy",
+                        "activate",
+                        "app",
+                        "--release",
+                        "2.0.0",
+                        "--operator-id",
+                        "interrupted-rollout",
+                        "--json",
+                    ],
+                    "intent",
+                );
+            } else {
+                drill.activate("2.0.0");
+            }
+
+            let (code, report) = finish_deployment_output(&mut process, stdout, stderr);
+            assert_eq!(report["follow_activation"], true, "{report}");
+            assert_eq!(report["retire_on_activation"], true, "{report}");
+            let retired = &report["attempts"][0];
+            assert_eq!(retired["release_id"], "1.0.0", "{report}");
+            assert_eq!(retired["verdict"], "activation_retired", "{report}");
+            let authentication = &retired["run"]["observation_authentication"];
+            assert_eq!(authentication["verified"], true, "{report}");
+            assert_eq!(
+                authentication["observation"]["activation_retirement_safe"], true,
+                "{report}"
+            );
+            assert!(report["recovery"].is_null(), "{report}");
+            assert!(report["e_process_monitor"].is_null(), "{report}");
+            let sessions = drill.sessions(&old);
+            let old_session = &sessions["records"][0];
+            assert_eq!(
+                old_session["outcome"]["kind"], "control_stopped",
+                "{sessions}"
+            );
+            assert_eq!(
+                old_session["outcome"]["process"], "worker_reaped",
+                "{sessions}"
+            );
+            assert_eq!(
+                old_session["admission"]["process_spawn_authority_granted"], false,
+                "{sessions}"
+            );
+            let effects = &old_session["outcome"]["effects"];
+            assert_eq!(effects["kind"], "final_ledger_observed", "{sessions}");
+            assert_eq!(effects["failed_count"], 0, "{sessions}");
+            assert!(
+                effects["allowed_count"].as_u64().unwrap() >= 1,
+                "{sessions}"
+            );
+            if pending {
+                assert_ne!(code, Some(0), "{report}");
+                assert_eq!(report["phase"], "activation_follow_refused", "{report}");
+                assert_eq!(report["attempts_executed"], 1);
+                assert!(
+                    report["continuation_error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("pending signed activation"),
+                    "{report}"
+                );
+                assert!(!replacement.join("replacement.marker").exists());
+                assert_no_health_or_recovery(&drill);
+            } else {
+                assert_eq!(code, Some(0), "{report}");
+                assert_eq!(report["phase"], "healthy", "{report}");
+                assert_eq!(report["attempts_executed"], 2);
+                assert_eq!(retired["successor_attempt"]["release_id"], "2.0.0");
+                assert_eq!(report["attempts"][1]["activation_sequence"], 2);
+                assert_eq!(report["attempts"][1]["verdict"], "healthy");
+                assert_eq!(
+                    guest_stdout(&report["attempts"][1]["run"]),
+                    "FOLLOWED_RELEASE\n"
+                );
+                assert!(replacement.join("replacement.marker").is_file());
+            }
+        }
+    }
+
+    #[test]
+    fn deployment_follow_activation_does_not_retry_indeterminate_external_effects() {
+        let drill = Drill::new();
+        let mut blocked = BlockedActivationRun::start_with_follow(&drill, false, true);
+        drill.activate("2.0.0");
+        let (code, report) = blocked.finish();
+        assert_ne!(code, Some(0), "{report}");
+        assert_eq!(report["phase"], "activation_follow_refused", "{report}");
+        assert_eq!(report["attempts_executed"], 1);
+        assert_eq!(report["attempts"][0]["verdict"], "activation_interrupted");
+        let evidence = &report["attempts"][0]["run"];
+        assert_eq!(
+            evidence["control_trigger"]["kind"],
+            "activation_interrupted"
+        );
+        let authentication = &evidence["observation_authentication"];
+        assert_eq!(authentication["verified"], true);
+        assert_eq!(
+            authentication["observation"]["activation_retirement_safe"],
+            false
+        );
+        assert_admitted_network_effect_remained_indeterminate(evidence);
+        assert_eq!(evidence["replay_certified"], false);
+        assert!(!blocked.replacement.join("replacement.marker").exists());
+        let _ = blocked.release_http_response();
+        assert!(!blocked.release.path().join("after.marker").exists());
+        assert!(!blocked.replacement.join("replacement.marker").exists());
+        assert_no_health_or_recovery(&drill);
     }
 
     #[test]

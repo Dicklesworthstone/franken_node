@@ -23,13 +23,15 @@ use frankenengine_verifier_sdk::fleet_quiescence::{
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
     VerifiedIncidentBundle, VerifiedRunOrigin, VerifiedRuntimeOrigin, decode_evidence_json,
-    verify_incident_bundle, verify_incident_bundle_with_run_key,
-    verify_incident_bundle_with_runtime_keys,
+    verify_incident_bundle, verify_incident_bundle_with_graph_report,
+    verify_incident_bundle_with_run_key, verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
-    MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionExpectedIdentity,
-    NativeSessionForensicError, verify_native_session_forensics,
+    MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
+    NativeSessionExpectedIdentity, NativeSessionForensicError, verify_native_session_cold_archive,
+    verify_native_session_cold_archive_with_expected_root, verify_native_session_forensics,
     verify_native_session_forensics_with_expected_identity,
+    verify_native_session_forensics_with_graph_report,
 };
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
@@ -63,7 +65,7 @@ const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] [--graph-report FILE] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|native-session-cold-archive|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] [--expected-session-nonce UUID --expected-admission-sha256 HEX] [--expected-archive-root-sha256 HEX] [--graph-report FILE] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -84,6 +86,7 @@ struct Request {
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
     expected_native_identity: Option<NativeSessionExpectedIdentity>,
+    expected_archive_root: Option<String>,
     graph_report: Option<GraphReportRequest>,
     session_policy: Option<SessionPolicyRequest>,
     fleet_policy: Option<FleetPolicyRequest>,
@@ -322,6 +325,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None);
     let (mut incident_anchor, mut expected_baseline) = (None, None);
     let (mut expected_native_nonce, mut expected_admission) = (None, None);
+    let mut expected_archive_root = None;
     let mut fleet_policy_path = None;
     let mut session_policy_path = None;
     let mut graph_report_path = None;
@@ -345,6 +349,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-graph-input-hash" => &mut expected_graph,
             "--expected-session-nonce" => &mut expected_native_nonce,
             "--expected-admission-sha256" => &mut expected_admission,
+            "--expected-archive-root-sha256" => &mut expected_archive_root,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
             "--trusted-session-policy" => &mut session_policy_path,
             "--graph-report" => &mut graph_report_path,
@@ -364,6 +369,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         format.as_str(),
         "incident-bundle"
             | "native-session-forensics"
+            | "native-session-cold-archive"
             | "capsule"
             | "signed-bundle"
             | "signed-session"
@@ -382,7 +388,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     if graph_report_path.is_some()
         && !matches!(
             format.as_str(),
-            "publisher-source" | "publisher-source-trust"
+            "incident-bundle"
+                | "native-session-forensics"
+                | "publisher-source"
+                | "publisher-source-trust"
         )
     {
         return Err(usage());
@@ -660,6 +669,18 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             ));
         }
     };
+    if let Some(root) = &expected_archive_root
+        && (format != "native-session-cold-archive"
+            || root.len() != 64
+            || !root
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    {
+        return Err(failure(
+            "EXPECTED_ARCHIVE_ROOT_INVALID",
+            "an archive root pin requires native-session-cold-archive and a lowercase SHA-256",
+        ));
+    }
     let graph_report = graph_report_path
         .as_deref()
         .map(read_graph_report)
@@ -674,6 +695,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         publisher_trust,
         expected_publisher_identity,
         expected_native_identity,
+        expected_archive_root,
         graph_report,
         session_policy,
         fleet_policy,
@@ -690,6 +712,8 @@ fn incident_failure(error: &IncidentBundleError) -> Failure {
         IncidentBundleError::SignatureInvalid => "SIGNATURE_INVALID",
         IncidentBundleError::IntegrityMismatch { .. } => "INTEGRITY_MISMATCH",
         IncidentBundleError::DecisionSequenceMismatch { .. } => "DECISION_SEQUENCE_MISMATCH",
+        IncidentBundleError::SourceGraphMissing => "GRAPH_REPORT_MISSING",
+        IncidentBundleError::SourceGraphInvalid => "GRAPH_REPORT_INVALID",
         IncidentBundleError::RunOriginMissing => "RUN_ORIGIN_MISSING",
         IncidentBundleError::RunOriginInvalid { .. } => "RUN_ORIGIN_INVALID",
         IncidentBundleError::RunOriginSignatureMalformed => "RUN_ORIGIN_SIGNATURE_MALFORMED",
@@ -772,6 +796,8 @@ fn native_session_failure(error: NativeSessionForensicError) -> Failure {
         | NativeSessionForensicError::JournalSignatureInvalid => "SIGNATURE_INVALID",
         NativeSessionForensicError::JournalInvalid => "JOURNAL_INVALID",
         NativeSessionForensicError::SourceCapsuleInvalid => "SOURCE_CAPSULE_INVALID",
+        NativeSessionForensicError::SourceGraphMissing => "GRAPH_REPORT_MISSING",
+        NativeSessionForensicError::SourceGraphInvalid => "GRAPH_REPORT_INVALID",
         NativeSessionForensicError::ObservationInvalid => "OBSERVATION_INVALID",
     };
     failure(
@@ -1008,14 +1034,40 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             }
             Ok(json!({"scope": "authenticated_verification_session", "facts": facts}))
         }
+        "native-session-cold-archive" => {
+            let verified = match request.expected_archive_root.as_deref() {
+                Some(root) => {
+                    verify_native_session_cold_archive_with_expected_root(bytes, trusted_key, root)
+                }
+                None => verify_native_session_cold_archive(bytes, trusted_key),
+            }
+            .map_err(|error| {
+                failure(
+                    error.code(),
+                    "native session cold archive verification failed",
+                )
+            })?;
+            Ok(
+                json!({"scope": "authenticated_archived_supervisor_observations", "facts": verified}),
+            )
+        }
         "native-session-forensics" => {
-            let verified = match request.expected_native_identity.as_ref() {
-                Some(expected) => verify_native_session_forensics_with_expected_identity(
+            let verified = if let Some(report) = &request.graph_report {
+                verify_native_session_forensics_with_graph_report(
                     bytes,
                     trusted_key,
-                    expected,
-                ),
-                None => verify_native_session_forensics(bytes, trusted_key),
+                    request.expected_native_identity.as_ref(),
+                    &report.bytes,
+                )
+            } else {
+                match request.expected_native_identity.as_ref() {
+                    Some(expected) => verify_native_session_forensics_with_expected_identity(
+                        bytes,
+                        trusted_key,
+                        expected,
+                    ),
+                    None => verify_native_session_forensics(bytes, trusted_key),
+                }
             }
             .map_err(native_session_failure)?;
             // The result authenticates original supervisor statements only.
@@ -1127,6 +1179,23 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             )
         }
         "incident-bundle" => {
+            if let Some(report) = &request.graph_report {
+                let verified = verify_incident_bundle_with_graph_report(
+                    bytes,
+                    trusted_key,
+                    request.run_anchor.as_ref(),
+                    request.runtime_anchor.as_ref(),
+                    &report.bytes,
+                )
+                .map_err(|error| incident_failure(&error))?;
+                let mut response = incident_verification_response(
+                    verified.bundle,
+                    verified.run_origin,
+                    verified.runtime_origin,
+                );
+                response["facts"]["graph_report"] = json!(verified.graph_report);
+                return Ok(response);
+            }
             let (verified, run_origin, runtime_origin) =
                 match (&request.run_anchor, &request.runtime_anchor) {
                     (Some(run_anchor), Some(runtime_anchor)) => {
@@ -1519,6 +1588,7 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
             MAX_FLEET_QUIESCENCE_RESPONSE_BYTES
         }
         "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
+        "native-session-cold-archive" => MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
         _ => MAX_INCIDENT_BUNDLE_BYTES,
@@ -1606,6 +1676,107 @@ mod tests {
     }
 
     #[test]
+    fn cold_archive_cli_authenticates_the_requested_population_without_promoting_scope() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native_session_cold_archives.json"
+        ))
+        .unwrap();
+        let case = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "triple")
+            .unwrap();
+        let bytes = serde_json::to_vec(&case["archive"]).unwrap();
+        let root = case["expected"]["merkle_root_sha256"].as_str().unwrap();
+        let mut arguments = args("native-session-cold-archive", ANCHOR);
+        arguments.extend(["--expected-archive-root-sha256".into(), root.into()]);
+        let verified = run(&arguments, &mut bytes.as_slice()).unwrap();
+        assert_eq!(verified["format"], "native-session-cold-archive");
+        assert_eq!(
+            verified["scope"],
+            "authenticated_archived_supervisor_observations"
+        );
+        assert_eq!(verified["facts"]["session_count"], 3);
+        assert_eq!(verified["facts"]["source_bound_sessions"], 1);
+        assert_eq!(verified["facts"]["merkle_root_sha256"], root);
+        for flag in [
+            "original_receipt_signatures_verified",
+            "replay_certified",
+            "quiescence_certified",
+            "historical_completeness",
+        ] {
+            assert_eq!(verified["facts"][flag], false, "{flag}");
+        }
+        arguments.pop();
+        arguments.push("0".repeat(64));
+        assert_eq!(
+            run(&arguments, &mut bytes.as_slice()).unwrap_err().code,
+            "EXPECTED_ARCHIVE_ROOT_MISMATCH"
+        );
+        let invalid = fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "foreign_entry_root")
+            .unwrap();
+        let bytes = serde_json::to_vec(&invalid["archive"]).unwrap();
+        assert_eq!(
+            run(
+                &args("native-session-cold-archive", ANCHOR),
+                &mut bytes.as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "ARCHIVE_SESSION_INVALID"
+        );
+    }
+
+    #[test]
+    fn cold_archive_cli_rejects_malformed_and_misapplied_pins_before_reading() {
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid archive options must not consume candidate evidence");
+            }
+        }
+        for (format, root) in [
+            ("native-session-cold-archive", "short".to_owned()),
+            ("native-session-cold-archive", "A".repeat(64)),
+            (
+                "native-session-cold-archive",
+                format!("sha256:{}", "a".repeat(64)),
+            ),
+            ("incident-bundle", "a".repeat(64)),
+            ("native-session-forensics", "a".repeat(64)),
+        ] {
+            let mut arguments = args(format, ANCHOR);
+            arguments.extend(["--expected-archive-root-sha256".into(), root]);
+            assert_eq!(
+                run(&arguments, &mut Unreadable).unwrap_err().code,
+                "EXPECTED_ARCHIVE_ROOT_INVALID"
+            );
+        }
+        let mut duplicate = args("native-session-cold-archive", ANCHOR);
+        duplicate.extend([
+            "--expected-archive-root-sha256".into(),
+            "a".repeat(64),
+            "--expected-archive-root-sha256".into(),
+            "a".repeat(64),
+        ]);
+        assert_eq!(run(&duplicate, &mut Unreadable).unwrap_err().code, "USAGE");
+        for option in [
+            "--trusted-run-key-hex",
+            "--trusted-runtime-key-hex",
+            "--signature-hex",
+        ] {
+            let mut arguments = args("native-session-cold-archive", ANCHOR);
+            arguments.extend([option.into(), ANCHOR.into()]);
+            assert_eq!(run(&arguments, &mut Unreadable).unwrap_err().code, "USAGE");
+        }
+    }
+
+    #[test]
     fn cli_session_policy_is_format_scoped_and_duplicate_options_are_refused() {
         struct Unreadable;
         impl Read for Unreadable {
@@ -1676,6 +1847,7 @@ mod tests {
             publisher_trust: None,
             expected_publisher_identity: None,
             expected_native_identity: None,
+            expected_archive_root: None,
             graph_report: None,
             session_policy: None,
             fleet_policy: Some(FleetPolicyRequest {
@@ -1781,6 +1953,249 @@ mod tests {
             source_capsule_base64: None,
         };
         (serde_json::to_vec(&bundle).unwrap(), public_key)
+    }
+
+    fn native_session_source_fixture(interrupted: bool, vector: usize) -> (Vec<u8>, String) {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use frankenengine_verifier_sdk::native_session::{
+            NATIVE_SESSION_FORENSICS_V3_SCHEMA, NativeSessionForensicBundle,
+            NativeSessionForensicOutcome,
+        };
+        let (bytes, public_key) = native_session_fixture(false);
+        let mut bundle: NativeSessionForensicBundle = serde_json::from_slice(&bytes).unwrap();
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/module_source_capsules.json"
+        ))
+        .unwrap();
+        let source = &vectors["vectors"][vector]["module_sources"];
+        let capsule = STANDARD
+            .decode(source["capsule_base64"].as_str().unwrap())
+            .unwrap();
+        let capsule_digest = hex::encode(Sha256::digest(
+            [
+                b"franken-node/module-source-capsule/v1\0".as_slice(),
+                &(capsule.len() as u64).to_le_bytes(),
+                &capsule,
+            ]
+            .concat(),
+        ));
+        let mut admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+        admission["entrypoint"] = json!("/removed/project/app.mjs");
+        admission["source_capsule"] = json!({
+            "capsule_digest":format!("sha256:{capsule_digest}"),
+            "graph_input_hash":source["graph_input_hash"],
+            "capsule_bytes":capsule.len(),
+        });
+        bundle.admission_json = admission.to_string();
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V3_SCHEMA.into();
+        bundle.source_capsule_base64 = Some(source["capsule_base64"].as_str().unwrap().into());
+        let signing_bytes = |domain: &[u8], raw: &str| {
+            [domain, &(raw.len() as u64).to_be_bytes(), raw.as_bytes()].concat()
+        };
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let receipt = &mut bundle.admission_receipt;
+        receipt.admission_sha256 = hex::encode(Sha256::digest(signing_bytes(
+            b"franken-node/native-session-admission/v1\0",
+            &bundle.admission_json,
+        )));
+        let payload = format!(
+            "{{\"schema_version\":\"{}\",\"session_nonce\":\"{}\",\"product_root_key_id\":\"{}\",\"admission_sha256\":\"{}\"}}",
+            receipt.schema_version,
+            receipt.session_nonce,
+            receipt.product_root_key_id,
+            receipt.admission_sha256,
+        );
+        receipt.signature_hex = hex::encode(
+            key.sign(&signing_bytes(
+                b"franken-node/native-session-admission-signature/v1\0",
+                &payload,
+            ))
+            .to_bytes(),
+        );
+        if interrupted {
+            let observation = json!({
+                "observed_at":"2026-11-14T12:00:01Z", "kind":"interrupted", "process":"worker_reaped",
+                "containment_empty_observed":false,
+                "effects":{"kind":"interrupted","evidence":{
+                    "schema_version":"franken-node/native-effect-interruption-evidence/v1",
+                    "session_nonce":receipt.session_nonce, "terminal_state":"worker_exit_indeterminate",
+                    "replay_certified":false, "journal_complete":true, "journal_event_cap":2048,
+                    "completed_effect_count":0, "interrupted_effect_count":1,
+                    "entries":[{"sequence":0,"effect_kind":"http","request_hash":format!("sha256:{}", "a".repeat(64)),"state":"interrupted_indeterminate"}],
+                }},
+            });
+            let payload_json = format!(
+                "{{\"schema_version\":\"franken-node/native-session-outcome-receipt/v1\",\"session_nonce\":\"{}\",\"product_root_key_id\":\"{}\",\"admission_sha256\":\"{}\",\"outcome\":{observation}}}",
+                receipt.session_nonce, receipt.product_root_key_id, receipt.admission_sha256,
+            );
+            bundle.outcome = Some(NativeSessionForensicOutcome {
+                signature_hex: hex::encode(
+                    key.sign(&signing_bytes(
+                        b"franken-node/native-session-outcome-signature/v1\0",
+                        &payload_json,
+                    ))
+                    .to_bytes(),
+                ),
+                payload_json,
+            });
+        }
+        (serde_json::to_vec(&bundle).unwrap(), public_key)
+    }
+
+    #[test]
+    fn cli_native_graph_report_verifies_pending_and_interrupted_sources_with_identity_pins() {
+        let report_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/module_source_graph_workspace_report.json"
+        );
+        for interrupted in [false, true] {
+            let (bytes, key) = native_session_source_fixture(interrupted, 2);
+            let original = run(
+                &args("native-session-forensics", &key),
+                &mut bytes.as_slice(),
+            )
+            .unwrap();
+            assert!(original["facts"].get("graph_report").is_none());
+            let mut request = args("native-session-forensics", &key);
+            request.extend([
+                "--graph-report".into(),
+                report_path.into(),
+                "--expected-session-nonce".into(),
+                original["facts"]["session_nonce"].as_str().unwrap().into(),
+                "--expected-admission-sha256".into(),
+                original["facts"]["admission_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            ]);
+            let mut verified = run(&request, &mut bytes.as_slice()).unwrap();
+            assert_eq!(verified["scope"], "authenticated_supervisor_observations");
+            assert_eq!(
+                verified["facts"]["outcome_kind"],
+                if interrupted {
+                    "interrupted"
+                } else {
+                    "pending"
+                }
+            );
+            let graph = &verified["facts"]["graph_report"];
+            assert_eq!(graph["graph_hash_recomputed"], true);
+            assert_eq!(graph["graph_semantics_reconstructed"], false);
+            assert_eq!(graph["module_count"], 3);
+            assert_eq!(
+                graph["graph_input_hash"],
+                verified["facts"]["source_capsule"]["graph_input_hash"]
+            );
+            assert_eq!(
+                graph["report_sha256"],
+                hex::encode(Sha256::digest(include_bytes!(
+                    "../tests/fixtures/module_source_graph_workspace_report.json"
+                )))
+            );
+            let summary = verified.to_string();
+            for private in [
+                "packages/workspace",
+                "node_modules",
+                "import 'workspace'",
+                "private dependency",
+            ] {
+                assert!(!summary.contains(private));
+            }
+            verified["facts"]
+                .as_object_mut()
+                .unwrap()
+                .remove("graph_report");
+            assert_eq!(verified, original);
+            *request.last_mut().unwrap() = "0".repeat(64);
+            assert_eq!(
+                run(&request, &mut bytes.as_slice()).unwrap_err().code,
+                "EXPECTED_NATIVE_IDENTITY_MISMATCH"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_native_graph_requirement_cannot_ignore_missing_or_foreign_witnesses() {
+        let report_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/module_source_graph_workspace_report.json"
+        );
+        let (source_bytes, key) = native_session_source_fixture(false, 2);
+        let mut request = args("native-session-forensics", &key);
+        request.extend(["--graph-report".into(), report_path.into()]);
+        let (missing, _) = native_session_fixture(false);
+        assert_eq!(
+            run(&request, &mut missing.as_slice()).unwrap_err().code,
+            "GRAPH_REPORT_MISSING"
+        );
+        let (foreign, _) = native_session_source_fixture(false, 0);
+        assert_eq!(
+            run(&request, &mut foreign.as_slice()).unwrap_err().code,
+            "GRAPH_REPORT_INVALID"
+        );
+        for (path, code) in [
+            (
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/module_source_capsules.json"
+                ),
+                "GRAPH_REPORT_INVALID",
+            ),
+            (
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/missing-native-graph-report.json"
+                ),
+                "GRAPH_REPORT_IO",
+            ),
+            (
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+                "GRAPH_REPORT_IO",
+            ),
+        ] {
+            *request.last_mut().unwrap() = path.into();
+            let error = run(&request, &mut source_bytes.as_slice()).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!error.message.contains(env!("CARGO_MANIFEST_DIR")));
+            assert!(!error.message.contains("node_modules"));
+        }
+    }
+
+    #[test]
+    fn cli_native_graph_requirement_preserves_original_product_root_authority() {
+        let (bytes, key) = native_session_source_fixture(true, 2);
+        let mut request = args("native-session-forensics", &key);
+        request.extend([
+            "--graph-report".into(),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/module_source_graph_workspace_report.json"
+            )
+            .into(),
+        ]);
+        let mut bad_signature: Value = serde_json::from_slice(&bytes).unwrap();
+        bad_signature["outcome"]["signature_hex"] = json!("00".repeat(64));
+        assert_eq!(
+            run(
+                &request,
+                &mut serde_json::to_vec(&bad_signature).unwrap().as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "SIGNATURE_INVALID"
+        );
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[99; 32]);
+        request[4] = hex::encode(stranger.verifying_key().as_bytes());
+        assert_eq!(
+            run(&request, &mut bytes.as_slice()).unwrap_err().code,
+            "SIGNER_UNTRUSTED"
+        );
+        request[4] = key.clone();
+        request.extend(["--trusted-run-key-hex".into(), key]);
+        assert_eq!(
+            run(&request, &mut bytes.as_slice()).unwrap_err().code,
+            "USAGE"
+        );
     }
 
     #[test]
@@ -2258,6 +2673,49 @@ mod tests {
         let error = run(&malformed, &mut input.as_slice()).unwrap_err();
         assert_eq!(error.code, "GRAPH_REPORT_INVALID");
         assert!(!error.message.contains("node_modules"));
+    }
+
+    #[test]
+    fn incident_graph_witness_cannot_be_ignored_or_weaken_requested_authority() {
+        let report_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/module_source_graph_workspace_report.json"
+        );
+        let mut arguments = args("incident-bundle", ANCHOR);
+        arguments.extend(["--graph-report".into(), report_path.into()]);
+
+        // This real historical CLI bundle remains verifiable without a graph
+        // requirement. Supplying a witness must not silently retain that weaker
+        // success when no native source capsule exists.
+        assert_eq!(
+            run(&args("incident-bundle", ANCHOR), &mut &*FIXTURE).unwrap()["verdict"],
+            "verified"
+        );
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "GRAPH_REPORT_MISSING"
+        );
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
+        let mut foreign = args(
+            "incident-bundle",
+            &hex::encode(stranger.verifying_key().as_bytes()),
+        );
+        foreign.extend(["--graph-report".into(), report_path.into()]);
+        assert_eq!(
+            run(&foreign, &mut &*FIXTURE).unwrap_err().code,
+            "SIGNER_UNTRUSTED"
+        );
+
+        arguments.extend(["--trusted-run-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "RUN_ORIGIN_MISSING"
+        );
+        arguments.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "RUN_ORIGIN_MISSING"
+        );
     }
 
     #[test]

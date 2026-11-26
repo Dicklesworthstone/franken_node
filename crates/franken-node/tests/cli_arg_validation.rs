@@ -16,6 +16,59 @@ fn cli_structure_passes_clap_debug_assertions() {
     Cli::command().debug_assert();
 }
 
+#[cfg(unix)]
+#[test]
+fn debug_artifact_readers_refuse_writerless_fifos_without_blocking() {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let project = tempfile::tempdir().expect("FIFO artifact project");
+    let fifo = project.path().join("artifact.fifo");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .expect("create writerless artifact FIFO");
+    std::os::unix::fs::symlink("artifact.fifo", project.path().join("linked.fifo"))
+        .expect("link to artifact FIFO");
+
+    for input in ["artifact.fifo", "linked.fifo"] {
+        // Exercise the production text policy and binary receipt readers
+        // before parsing, with no FIFO writer that could unblock a bad open.
+        for arguments in [
+            vec![
+                "debug",
+                "trace",
+                "--policy",
+                input,
+                "--input",
+                "unread.json",
+                "--json",
+            ],
+            vec!["debug", "explain", "--receipt", input, "--json"],
+        ] {
+            let mut command = assert_cmd::Command::new(env!("CARGO_BIN_EXE_franken-node"));
+            command
+                .current_dir(project.path())
+                .env_clear()
+                .args(&arguments)
+                .timeout(std::time::Duration::from_secs(5));
+            // A process killed by the timeout has no exit code and cannot
+            // satisfy this assertion as a successful refusal.
+            let assertion = command.assert().code(1);
+            let output = &assertion.get_output().stdout;
+            let report: serde_json::Value = serde_json::from_slice(output)
+                .unwrap_or_else(|error| panic!("expected JSON refusal: {error}; {output:?}"));
+            assert_eq!(report["ok"], false, "{arguments:?}: {report}");
+            assert!(
+                report.to_string().contains("regular file"),
+                "{arguments:?}: {report}"
+            );
+        }
+    }
+    assert!(std::fs::symlink_metadata(fifo).unwrap().file_type().is_fifo());
+}
+
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(args)
 }
