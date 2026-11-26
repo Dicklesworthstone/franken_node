@@ -1,0 +1,352 @@
+{
+  "schema_version": "franken-node/test262-language-slice/v1",
+  "owning_bead": "bd-reality-20260923-26n9r.6",
+  "generated_at_utc": "2026-11-26T11:00:09Z",
+  "proof_state": "measured_stratified_slice",
+  "full_suite_claim_allowed": false,
+  "host": {
+    "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "python_version": "3.14.4"
+  },
+  "provenance": {
+    "test262_repo": "tc39/test262",
+    "test262_commit": "d0c1b4555b03dd404873fd6422a4b5da00136500",
+    "node_version": "v26.3.0",
+    "profile": "balanced",
+    "runtime": "franken-engine",
+    "binary_path": "/data/projects/franken_node/target/release/franken-node",
+    "binary_sha256": "f1148f15d95228811ffd33790f081af587ac84960679ded2a1a377d34d77d9b9",
+    "binary_version": "franken-node 0.2.0",
+    "build_version": "0.2.0",
+    "health_check_pass": false,
+    "franken_node_git_sha": "5b697ecf163465ffe7e4a78e14f41ef85379cc8b",
+    "health_summary": {
+      "pass": false,
+      "git_sha": "5b697ecf163465ffe7e4a78e14f41ef85379cc8b",
+      "build_version": "0.2.0",
+      "pass_source": "compiled_git_sha_and_local_ledger_file"
+    },
+    "franken_engine_commit": "2e56da58e7a9ae7dbe44961870582815d40316e6"
+  },
+  "selection_policy": {
+    "scope": "test/language/**/*.js",
+    "stratification": "deterministic_uniform_stride_per_top_level_subdir_blind_to_outcome",
+    "target_cases": 1200,
+    "executed_cases": 1200,
+    "total_eligible_in_language": 21564,
+    "skipped_by_reason": {
+      "feature:SharedArrayBuffer": 2,
+      "feature:WeakRef": 2,
+      "feature:caller": 2,
+      "feature:cross-realm": 19,
+      "feature:decorators": 24,
+      "feature:explicit-resource-management": 178,
+      "feature:import-attributes": 65,
+      "feature:regexp-modifiers": 83,
+      "feature:resizable-arraybuffer": 7,
+      "feature:source-phase-imports": 217,
+      "feature:tail-call-optimization": 34,
+      "fixture_file": 264,
+      "flag:module": 806,
+      "requires_sibling_fixture": 629,
+      "uses_$262_host_api": 13
+    },
+    "harness_preloaded": [
+      "sta.js",
+      "assert.js",
+      "frontmatter includes",
+      "$DONE (async)"
+    ]
+  },
+  "totals": {
+    "executed": 1200,
+    "node_passed": 1186,
+    "node_pass_rate_pct": 98.83,
+    "franken_passed": 943,
+    "franken_failed": 257,
+    "franken_timed_out": 0,
+    "franken_panics": 0,
+    "franken_pass_rate_pct": 78.58,
+    "franken_pass_rate_on_node_passed_pct": 79.43,
+    "elapsed_seconds": 16.25
+  },
+  "failure_categories": {
+    "unexpected_error:frozen_module_registry_incomplete": 167,
+    "negative_mismatch:expected_SyntaxError_got_frozen_module_registry_incomplete": 70,
+    "unexpected_error:uncaught_exception": 9,
+    "unexpected_error:TypeError": 4,
+    "negative_mismatch:expected_SyntaxError_got_uncaught_exception": 3,
+    "negative_mismatch:expected_SyntaxError_got_other_error": 1,
+    "unexpected_error:SyntaxError": 1,
+    "negative_mismatch:expected_Test262Error_got_uncaught_exception": 1,
+    "negative_mismatch:expected_ReferenceError_got_other_error": 1
+  },
+  "by_directory": {
+    "arguments-object": {
+      "pool_eligible": 261,
+      "executed": 18,
+      "node_passed": 18,
+      "franken_passed": 15,
+      "franken_failed": 3,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 83.33,
+      "node_pass_rate_pct": 100.0
+    },
+    "asi": {
+      "pool_eligible": 102,
+      "executed": 10,
+      "node_passed": 10,
+      "franken_passed": 6,
+      "franken_failed": 4,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 60.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "block-scope": {
+      "pool_eligible": 145,
+      "executed": 12,
+      "node_passed": 12,
+      "franken_passed": 11,
+      "franken_failed": 1,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 91.67,
+      "node_pass_rate_pct": 100.0
+    },
+    "comments": {
+      "pool_eligible": 51,
+      "executed": 7,
+      "node_passed": 7,
+      "franken_passed": 2,
+      "franken_failed": 5,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 28.57,
+      "node_pass_rate_pct": 100.0
+    },
+    "computed-property-names": {
+      "pool_eligible": 48,
+      "executed": 7,
+      "node_passed": 7,
+      "franken_passed": 7,
+      "franken_failed": 0,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 100.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "destructuring": {
+      "pool_eligible": 18,
+      "executed": 6,
+      "node_passed": 5,
+      "franken_passed": 5,
+      "franken_failed": 1,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 83.33,
+      "node_pass_rate_pct": 83.33
+    },
+    "directive-prologue": {
+      "pool_eligible": 62,
+      "executed": 8,
+      "node_passed": 8,
+      "franken_passed": 7,
+      "franken_failed": 1,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 87.5,
+      "node_pass_rate_pct": 100.0
+    },
+    "eval-code": {
+      "pool_eligible": 342,
+      "executed": 22,
+      "node_passed": 15,
+      "franken_passed": 0,
+      "franken_failed": 22,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 0.0,
+      "node_pass_rate_pct": 68.18
+    },
+    "expressions": {
+      "pool_eligible": 10022,
+      "executed": 509,
+      "node_passed": 504,
+      "franken_passed": 422,
+      "franken_failed": 87,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 82.91,
+      "node_pass_rate_pct": 99.02
+    },
+    "function-code": {
+      "pool_eligible": 217,
+      "executed": 16,
+      "node_passed": 16,
+      "franken_passed": 11,
+      "franken_failed": 5,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 68.75,
+      "node_pass_rate_pct": 100.0
+    },
+    "future-reserved-words": {
+      "pool_eligible": 55,
+      "executed": 8,
+      "node_passed": 8,
+      "franken_passed": 6,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 75.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "global-code": {
+      "pool_eligible": 29,
+      "executed": 6,
+      "node_passed": 6,
+      "franken_passed": 5,
+      "franken_failed": 1,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 83.33,
+      "node_pass_rate_pct": 100.0
+    },
+    "identifier-resolution": {
+      "pool_eligible": 14,
+      "executed": 5,
+      "node_passed": 4,
+      "franken_passed": 3,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 60.0,
+      "node_pass_rate_pct": 80.0
+    },
+    "identifiers": {
+      "pool_eligible": 268,
+      "executed": 18,
+      "node_passed": 18,
+      "franken_passed": 16,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 88.89,
+      "node_pass_rate_pct": 100.0
+    },
+    "keywords": {
+      "pool_eligible": 25,
+      "executed": 6,
+      "node_passed": 6,
+      "franken_passed": 0,
+      "franken_failed": 6,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 0.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "line-terminators": {
+      "pool_eligible": 41,
+      "executed": 7,
+      "node_passed": 7,
+      "franken_passed": 2,
+      "franken_failed": 5,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 28.57,
+      "node_pass_rate_pct": 100.0
+    },
+    "literals": {
+      "pool_eligible": 451,
+      "executed": 27,
+      "node_passed": 27,
+      "franken_passed": 18,
+      "franken_failed": 9,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 66.67,
+      "node_pass_rate_pct": 100.0
+    },
+    "module-code": {
+      "pool_eligible": 1,
+      "executed": 1,
+      "node_passed": 1,
+      "franken_passed": 1,
+      "franken_failed": 0,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 100.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "punctuators": {
+      "pool_eligible": 11,
+      "executed": 5,
+      "node_passed": 5,
+      "franken_passed": 3,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 60.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "reserved-words": {
+      "pool_eligible": 26,
+      "executed": 6,
+      "node_passed": 6,
+      "franken_passed": 6,
+      "franken_failed": 0,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 100.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "rest-parameters": {
+      "pool_eligible": 11,
+      "executed": 5,
+      "node_passed": 5,
+      "franken_passed": 5,
+      "franken_failed": 0,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 100.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "source-text": {
+      "pool_eligible": 1,
+      "executed": 1,
+      "node_passed": 1,
+      "franken_passed": 1,
+      "franken_failed": 0,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 100.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "statementList": {
+      "pool_eligible": 80,
+      "executed": 9,
+      "node_passed": 9,
+      "franken_passed": 5,
+      "franken_failed": 4,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 55.56,
+      "node_pass_rate_pct": 100.0
+    },
+    "statements": {
+      "pool_eligible": 9105,
+      "executed": 463,
+      "node_passed": 463,
+      "franken_passed": 372,
+      "franken_failed": 91,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 80.35,
+      "node_pass_rate_pct": 100.0
+    },
+    "types": {
+      "pool_eligible": 111,
+      "executed": 10,
+      "node_passed": 10,
+      "franken_passed": 8,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 80.0,
+      "node_pass_rate_pct": 100.0
+    },
+    "white-space": {
+      "pool_eligible": 67,
+      "executed": 8,
+      "node_passed": 8,
+      "franken_passed": 6,
+      "franken_failed": 2,
+      "franken_timed_out": 0,
+      "pass_rate_pct": 75.0,
+      "node_pass_rate_pct": 100.0
+    }
+  },
+  "case_log_path": "artifacts/compat/test262_language_slice_cases.jsonl",
+  "limitations": [
+    "Stratified slice of test/language/* (non-module, non-$262-host-API script tests), not the full official Test262 suite.",
+    "full_suite_claim_allowed is strictly false; built-ins/*, annexB/*, intl402/*, and module-graph tests are outside this slice."
+  ]
+}

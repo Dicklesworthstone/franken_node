@@ -1,26 +1,53 @@
 {
   "$schema": "../../docs/DUAL_ORACLE_CLOSE_CONDITION.md#verdict-artifact-schema",
   "dimension": "l2_engine_boundary",
-  "verdict": "GREEN",
+  "verdict": "RED",
   "owner_track": "10.17",
-  "timestamp": "2026-05-21T00:00:00Z",
+  "timestamp": "2026-11-26T11:00:09Z",
+  "source_revision": {
+    "schema_version": "franken-node/source-revision/v1",
+    "franken_node_commit": "5b697ecf163465ffe7e4a78e14f41ef85379cc8b",
+    "franken_engine_commit": "2e56da58e7a9ae7dbe44961870582815d40316e6"
+  },
   "evidence": {
-    "tests_passed": 266,
-    "tests_failed": 0,
+    "tests_passed": 943,
+    "tests_failed": 257,
     "tests_skipped": 0,
-    "coverage_pct": null,
-    "details_ref": "sdk/verifier/ + tests/conformance/verifier_sdk_capsule_replay.rs"
+    "coverage_pct": 78.58,
+    "details_ref": "artifacts/compat/test262_language_slice.json",
+    "case_log_ref": "artifacts/compat/test262_language_slice_cases.jsonl",
+    "verifier_sdk_ref": "sdk/verifier/ + tests/conformance/verifier_sdk_capsule_replay.rs",
+    "test262_language_slice": {
+      "schema_version": "franken-node/test262-language-slice/v1",
+      "test262_repo": "tc39/test262",
+      "test262_commit": "d0c1b4555b03dd404873fd6422a4b5da00136500",
+      "profile": "balanced",
+      "runtime": "franken-engine",
+      "node_version": "v26.3.0",
+      "executed": 1200,
+      "node_passed": 1186,
+      "node_pass_rate_pct": 98.83,
+      "franken_passed": 943,
+      "franken_failed": 257,
+      "franken_pass_rate_pct": 78.58,
+      "franken_panics": 0,
+      "franken_timed_out": 0,
+      "full_suite_claim_allowed": false
+    }
   },
   "subjects": [
     "engine_split_contract_enforced",
     "no_local_engine_or_extension_host_crates",
     "verifier_sdk_capsule_replay_conformance",
-    "verifier_session_monotonic_conformance"
+    "verifier_session_monotonic_conformance",
+    "test262_language_conformance_slice"
   ],
-  "blocking_findings": [],
+  "blocking_findings": [
+    "Test262 test/language/* stratified slice (1,200 cases, tc39/test262@d0c1b4555b03) measured 943/1,200 (78.58%) under default balanced profile vs 1,186/1,200 (98.83%) on live Node v26.3.0: 237 frozen-module policy/static-graph refusals (167 dynamic eval + 70 parse-negative ERR_MODULE_REGISTRY_INCOMPLETE) and 20 engine language semantics divergences (0 panics, 0 timeouts)."
+  ],
   "notes": [
-    "Backfilled 2026-05-21 from the reality-check bridge plan.",
-    "tests_passed reflects the sdk/verifier crate's #[test] count (266 cases under sdk/verifier/) as of 2026-05-20.",
-    "The legacy schema/README references `artifacts/oracle/l2_engine_verdict.json`; both file names exist with identical content for backward compatibility (l2_engine_boundary_verdict.json is the canonical filename per docs/DUAL_ORACLE_CLOSE_CONDITION.md L12, l2_engine_verdict.json mirrors it for README L2623 compatibility)."
+    "Replaced the 2026-05-21 static backfill with live executed Test262 language conformance measurement on franken_node@5b697ecf1 + franken_engine@2e56da58e (bd-reality-20260923-26n9r.6).",
+    "Verdict is honestly RED until Test262 language conformance meets release criteria; full_suite_claim_allowed remains strictly false.",
+    "Mirrored in artifacts/oracle/l2_engine_verdict.json for README path compatibility."
   ]
 }
