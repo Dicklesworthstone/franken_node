@@ -8092,6 +8092,24 @@ type DeploySuperviseAttemptFn<'a> = dyn FnMut(
     ) -> Result<(DeployRunVerdict, i32, serde_json::Value)>
     + 'a;
 
+fn deploy_rollback_refusal_phase(
+    store: &runtime::deployment::DeploymentStore,
+    authority: &runtime::deployment::DeploymentAuthority,
+    expected: &runtime::deployment::ActivationRecord,
+) -> &'static str {
+    let active = (|| -> Result<_> {
+        let _lock = store.lock()?;
+        store.active(authority)
+    })();
+    if active.is_ok_and(|current| current.as_ref() != Some(expected)) {
+        "post_rollback_activation_changed"
+    } else {
+        // An unreadable or pending activation is a refusal, not proof that a
+        // different committed activation exists.
+        "post_rollback_restart_refused"
+    }
+}
+
 fn supervise_deploy_runs_with(
     store: &runtime::deployment::DeploymentStore,
     authority: &runtime::deployment::DeploymentAuthority,
@@ -8137,6 +8155,8 @@ fn supervise_deploy_runs_with(
     let mut recovery_json: Option<serde_json::Value> = None;
     let mut detector_decision_json: Option<serde_json::Value> = None;
     let mut e_process_monitor: Option<EProcessHealthMonitor> = None;
+    let mut recovery_activation_pin: Option<runtime::deployment::ActivationRecord> = None;
+    let mut continuation_error: Option<String> = None;
     let mut final_phase = "max_runs_completed";
     let mut final_exit_code = 0_i32;
     let mut last_release_id = String::new();
@@ -8145,7 +8165,7 @@ fn supervise_deploy_runs_with(
         if run_index > 0 && args.cooldown_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(args.cooldown_ms));
         }
-        let (activation, release) = {
+        let admission = (|| -> Result<_> {
             let _lock = store.lock()?;
             let activation = store.active(authority)?.ok_or_else(|| {
                 ActionableError::new(
@@ -8162,18 +8182,79 @@ fn supervise_deploy_runs_with(
                     release.release_id
                 )
             })?;
-            (activation, release)
+            Ok((activation, release))
+        })();
+        let (activation, release) = match admission {
+            Ok(admitted) => admitted,
+            Err(error) if recovery_activation_pin.is_some() => {
+                final_phase = deploy_rollback_refusal_phase(
+                    store,
+                    authority,
+                    recovery_activation_pin.as_ref().expect("recovery pin"),
+                );
+                final_exit_code = 1;
+                continuation_error = Some(format!("{error:#}"));
+                break;
+            }
+            Err(error) => return Err(error),
         };
+        if recovery_activation_pin
+            .as_ref()
+            .is_some_and(|pin| pin != &activation)
+        {
+            final_phase = "post_rollback_activation_changed";
+            final_exit_code = 1;
+            continuation_error = Some(
+                "operator activation changed before the next rollback probe; no new run was started"
+                    .to_owned(),
+            );
+            break;
+        }
         last_release_id = release.release_id.clone();
 
-        let (verdict, child_exit_code, child_report) = execute_attempt(&activation, &release)?;
+        let (verdict, child_exit_code, child_report) = match execute_attempt(&activation, &release) {
+            Ok(observed) => observed,
+            Err(error) if recovery_activation_pin.is_some() => {
+                final_phase = deploy_rollback_refusal_phase(
+                    store,
+                    authority,
+                    recovery_activation_pin.as_ref().expect("recovery pin"),
+                );
+                final_exit_code = 1;
+                continuation_error = Some(format!(
+                    "rollback probe could not be completed or authenticated: {error:#}"
+                ));
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         let now_secs = current_unix_secs();
         let now_rfc3339 = Utc::now().to_rfc3339();
 
         match verdict {
             DeployRunVerdict::Healthy { receipt_id } => {
-                {
+                let e_obs = {
                     let lock = store.lock()?;
+                    if let Some(pin) = &recovery_activation_pin
+                        && store.active(authority)?.as_ref() != Some(pin)
+                    {
+                        attempts.push(serde_json::json!({
+                            "attempt": run_index + 1,
+                            "release_id": release.release_id,
+                            "activation_sequence": activation.sequence,
+                            "verdict": "post_rollback_activation_changed",
+                            "receipt_id": receipt_id,
+                            "exit_code": child_exit_code,
+                            "run": child_report,
+                        }));
+                        final_phase = "post_rollback_activation_changed";
+                        final_exit_code = 1;
+                        continuation_error = Some(
+                            "operator activation changed during the rollback probe; its result was not counted toward certification"
+                                .to_owned(),
+                        );
+                        break;
+                    }
                     store.record_health(
                         &lock,
                         authority,
@@ -8183,10 +8264,10 @@ fn supervise_deploy_runs_with(
                             observed_at_epoch_secs: now_secs,
                         },
                     )?;
-                }
-                let e_obs = e_process_monitor
-                    .as_mut()
-                    .map(|monitor| monitor.observe_run(false));
+                    e_process_monitor
+                        .as_mut()
+                        .map(|monitor| monitor.observe_run(false))
+                };
                 attempts.push(serde_json::json!({
                     "attempt": run_index + 1,
                     "release_id": release.release_id,
@@ -8359,6 +8440,24 @@ fn supervise_deploy_runs_with(
                             final_exit_code = child_exit_code.max(1);
                             break;
                         }
+                        {
+                            let _lock = store.lock()?;
+                            let current = store.active(authority)?;
+                            if !current.as_ref().is_some_and(|active| {
+                                Some(active.sequence) == recovery.activation_sequence
+                                    && active.release_id == *selected
+                                    && active.recovery_sequence == Some(recovery.sequence)
+                            }) {
+                                final_phase = "post_rollback_activation_changed";
+                                final_exit_code = 1;
+                                continuation_error = Some(
+                                    "operator activation changed before rollback supervision began"
+                                        .to_owned(),
+                                );
+                                break;
+                            }
+                            recovery_activation_pin = current;
+                        }
                         e_process_monitor = Some(
                             EProcessHealthMonitor::new(selected.clone(), e_process_cfg)
                                 .map_err(|err| anyhow::anyhow!(err))?,
@@ -8434,6 +8533,7 @@ fn supervise_deploy_runs_with(
         "phase": final_phase,
         "ok": final_exit_code == 0,
         "max_runs": args.max_runs,
+        "continuation_error": continuation_error,
         "post_rollback_probes": args.post_rollback_probes,
         "attempts_executed": attempts.len(),
         "attempts": attempts,
@@ -8454,6 +8554,10 @@ fn handle_deploy_supervise(args: &cli::DeploySuperviseArgs) -> Result<(serde_jso
         &mut |activation, release| {
             let child = {
                 let lock = store.lock()?;
+                anyhow::ensure!(
+                    store.active(&authority)?.as_ref() == Some(activation),
+                    "deployment activation changed before the supervised child spawn"
+                );
                 let restriction = args
                     .retire_on_activation
                     .then(|| store.capture_activation_restriction(&lock, &authority, activation))
@@ -52189,6 +52293,230 @@ mod run_trust_gate_tests {
                 classify_deploy_run(&deployment_report(1, report)),
                 DeployRunVerdict::Failed
             ));
+        }
+    }
+
+    struct DeploymentContinuationFixture {
+        root: tempfile::TempDir,
+        store: runtime::deployment::DeploymentStore,
+        authority: runtime::deployment::DeploymentAuthority,
+    }
+
+    impl DeploymentContinuationFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = runtime::deployment::DeploymentStore::open(root.path(), "follow").unwrap();
+            let authority = runtime::deployment::DeploymentAuthority::new(
+                ed25519_dalek::SigningKey::from_bytes(&[19; 32]),
+            );
+            Self {
+                root,
+                store,
+                authority,
+            }
+        }
+
+        fn install(&self, id: &str) {
+            let directory = self.root.path().join(id);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("app.js"), b"console.log('ready');\n").unwrap();
+            let release = serde_json::from_value(serde_json::json!({
+                "schema_version": runtime::deployment::RELEASE_SCHEMA,
+                "deployment": "follow",
+                "release_id": id,
+                "release_dir": directory.canonicalize().unwrap(),
+                "entrypoint": "app.js",
+                "config_sha256": format!("sha256:{}", "1".repeat(64)),
+                "registry_manifest": "/registry/artifact.manifest.json",
+                "publisher_public_key_path": "/keys/publisher.pub",
+                "approval": {
+                    "manifest_path": "/registry/artifact.manifest.json",
+                    "manifest_sha256": format!("sha256:{}", "2".repeat(64)),
+                    "publisher_public_key_hex": "3".repeat(64),
+                    "identity": {
+                        "publisher_key_id": "key",
+                        "publisher_id": "publisher",
+                        "name": "app",
+                        "version": id,
+                        "artifact_sha256": format!("sha256:{}", "4".repeat(64)),
+                    },
+                    "capsule_digest": format!("sha256:{}", "5".repeat(64)),
+                    "graph_input_hash": format!("sha256:{}", "6".repeat(64)),
+                    "entrypoint": "app.js",
+                    "additional_conditions": [],
+                    "contained_symlinks": false,
+                },
+                "engine_compatibility": "franken-node/test",
+                "installed_at_epoch_secs": 10,
+            }))
+            .unwrap();
+            let lock = self.store.lock().unwrap();
+            self.store
+                .install_release(&lock, &self.authority, release)
+                .unwrap();
+        }
+
+        fn activate(&self, id: &str) {
+            let lock = self.store.lock().unwrap();
+            self.store
+                .activate(
+                    &lock,
+                    &self.authority,
+                    id,
+                    runtime::deployment::ActivationReason::Operator,
+                    Some("operator"),
+                    None,
+                    current_unix_secs(),
+                )
+                .unwrap();
+        }
+
+        fn args(&self, max_runs: u32) -> cli::DeploySuperviseArgs {
+            cli::DeploySuperviseArgs {
+                name: "follow".to_owned(),
+                max_runs,
+                post_rollback_probes: 1,
+                e_process_alpha: 0.05,
+                cooldown_ms: 0,
+                retire_on_activation: false,
+                json: true,
+                app_args: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn deploy_supervise_rollback_refusal_distinguishes_changed_signed_activation() {
+        let fixture = DeploymentContinuationFixture::new();
+        fixture.install("old");
+        fixture.install("new");
+        fixture.activate("old");
+        let pin = fixture.store.active(&fixture.authority).unwrap().unwrap();
+        assert_eq!(
+            deploy_rollback_refusal_phase(&fixture.store, &fixture.authority, &pin),
+            "post_rollback_restart_refused"
+        );
+        fixture.activate("new");
+        assert_eq!(
+            deploy_rollback_refusal_phase(&fixture.store, &fixture.authority, &pin),
+            "post_rollback_activation_changed"
+        );
+    }
+
+    #[test]
+    fn deploy_supervise_rollback_probes_cannot_certify_changed_or_reactivated_release() {
+        use runtime::deployment::{
+            CrashLoopAction, CrashLoopEvidence, DeploymentPolicy, HealthEvent, POLICY_SCHEMA,
+            RestartPolicy,
+        };
+        for same_release in [false, true] {
+            let fixture = DeploymentContinuationFixture::new();
+            for id in ["good", "bad", "operator-release"] {
+                fixture.install(id);
+            }
+            fixture.activate("good");
+            {
+                let lock = fixture.store.lock().unwrap();
+                fixture
+                    .store
+                    .record_health(
+                        &lock,
+                        &fixture.authority,
+                        "good",
+                        HealthEvent::HealthyRun {
+                            receipt_id: "previous-healthy".to_owned(),
+                            observed_at_epoch_secs: current_unix_secs(),
+                        },
+                    )
+                    .unwrap();
+                fixture
+                    .store
+                    .set_policy(
+                        &lock,
+                        &fixture.authority,
+                        DeploymentPolicy {
+                            schema_version: POLICY_SCHEMA.to_owned(),
+                            deployment: "follow".to_owned(),
+                            on_crash_loop: CrashLoopAction::Rollback,
+                            restart: RestartPolicy::Automatic,
+                            operator_id: "operator".to_owned(),
+                            set_at_epoch_secs: current_unix_secs(),
+                        },
+                    )
+                    .unwrap();
+            }
+            fixture.activate("bad");
+            let mut args = fixture.args(4);
+            args.post_rollback_probes = 2;
+            let mut healthy_probes = 0;
+            let (report, code) = supervise_deploy_runs_with(
+                &fixture.store,
+                &fixture.authority,
+                &args,
+                &|_| Ok(()),
+                &mut |_, release| {
+                    if release.release_id == "bad" {
+                        return Ok((
+                            DeployRunVerdict::CrashLoop(CrashLoopEvidence {
+                                session_nonce: uuid::Uuid::now_v7().to_string(),
+                                entrypoint: release
+                                    .release_dir
+                                    .join(&release.entrypoint)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                observed_at_epoch_secs: current_unix_secs(),
+                                crashes_in_window: 3,
+                                threshold: 3,
+                                window_secs: 300,
+                                safe_mode_state_path: release
+                                    .release_dir
+                                    .join(".franken-node/safe-mode/state.json")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            }),
+                            1,
+                            serde_json::json!({}),
+                        ));
+                    }
+                    assert_eq!(release.release_id, "good");
+                    healthy_probes += 1;
+                    if healthy_probes == 2 {
+                        fixture.activate(if same_release {
+                            "good"
+                        } else {
+                            "operator-release"
+                        });
+                    }
+                    Ok((
+                        DeployRunVerdict::Healthy {
+                            receipt_id: format!("native-session:probe-{healthy_probes}"),
+                        },
+                        0,
+                        serde_json::json!({}),
+                    ))
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 1, "{report}");
+            assert_eq!(
+                report["phase"], "post_rollback_activation_changed",
+                "{report}"
+            );
+            assert_eq!(report["attempts_executed"], 3);
+            assert_eq!(report["e_process_monitor"]["release_id"], "good");
+            assert_eq!(report["e_process_monitor"]["healthy_runs"], 1);
+            assert_eq!(report["e_process_monitor"]["state"], "observing");
+            let active = fixture.store.active(&fixture.authority).unwrap().unwrap();
+            assert_eq!(active.sequence, 4);
+            assert_eq!(
+                active.release_id,
+                if same_release {
+                    "good"
+                } else {
+                    "operator-release"
+                }
+            );
+            assert_eq!(active.recovery_sequence, None);
         }
     }
 
