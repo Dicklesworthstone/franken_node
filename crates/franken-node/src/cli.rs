@@ -820,6 +820,11 @@ pub struct DeploySuperviseArgs {
     #[arg(long)]
     pub retire_on_activation: bool,
 
+    /// Follow a newer committed activation after an authenticated clean retirement.
+    /// Implies --retire-on-activation; each successor consumes a --max-runs slot.
+    #[arg(long)]
+    pub follow_activation: bool,
+
     /// Emit `franken-node/deploy-supervise-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,

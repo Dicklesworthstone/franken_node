@@ -1563,7 +1563,7 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node deploy status <name>` | Show the policy, committed activations and recoveries, pending transaction digest, superseded attempts, and per-release readiness and crash-loop marks. |
 | `franken-node deploy reconcile <name>` | Finish a retained, signed activation transaction after an interrupted write. Required: `--operator-id`. Rechecks the release and, for rollback, the current recovery policy and readiness. Never starts a workload. |
 | `franken-node deploy supersede <name>` | Replace an exact pending transaction with a freshly verified admitted release. Required: `--expected-pending-digest` (from status), `--release`, `--operator-id`, `--reason`. Retains abandoned attempts and their evidence; never starts a workload. |
-| `franken-node deploy supervise <name>` | Supervise the active release across crash-only microreboots with e-process post-rollback verification. Flags: `--max-runs`, `--post-rollback-probes`, `--e-process-alpha`, `--cooldown-ms`, `--retire-on-activation`, `--json`. |
+| `franken-node deploy supervise <name>` | Supervise the active release across crash-only microreboots with e-process post-rollback verification. Optional `--follow-activation` starts a newer committed activation after an authenticated clean retirement, within `--max-runs`. Other flags: `--post-rollback-probes`, `--e-process-alpha`, `--cooldown-ms`, `--retire-on-activation`, `--json`. |
 
 ### Ops and diagnostics
 
@@ -5722,6 +5722,46 @@ release. An independently authorized single crash-loop restart captures a fresh
 restriction when this option is enabled. Without the flag, `deploy run` retains
 its ordinary run-once behavior. `deploy activate` does not wait for running
 workers to retire.
+
+To let an existing supervisor follow an operator's newly activated release, opt
+in explicitly:
+
+```bash
+franken-node deploy supervise my-service --follow-activation --max-runs 6 --json
+```
+
+This implies retirement on activation changes. Every retired run and every
+replacement consumes one run from the same bounded budget. Following requires
+the exact old launch's authenticated native admission and outcome: a
+cooperatively stopped, reaped worker; a validated final effect ledger with no
+failed effects; and either an explicit absence of process-spawn authority or
+the existing containment-empty observation. A process reap alone, an interrupted
+effect journal, unknown effects, missing receipts, and unproven descendant
+cleanup refuse the replacement. This does not certify replay, exactly-once
+external effects, or fleet quiescence.
+
+The successor must be a strictly newer committed activation, including an
+explicit reactivation of the same release. It passes the ordinary current
+source, configuration, publisher, dependency trust, signed release-health and
+operator containment gates again. A pending activation requires operator
+reconciliation and a new supervisor invocation. The final locked spawn check
+binds the exact selected activation. Refusals return
+`phase: "activation_follow_refused"`; exhausting the run budget immediately
+after retirement returns `phase: "activation_follow_budget_exhausted"`. Both
+exit nonzero without starting any further attempt. The completed retirement
+is retained in
+`attempts`, and `successor_attempt` identifies a later attempted release when
+following proceeds. A replacement still has to finish healthy to produce the
+ordinary successful report. A final spawn or supervision error preserves the
+retirement and the attempted successor's `supervision_error`; it does not
+assert whether an unobserved worker began execution, and never retries it.
+
+Post-rollback health probes remain bound to the exact recovery activation and
+release. An operator replacement or same-release reactivation stops that
+observation with `phase: "post_rollback_activation_changed"`, even when
+`--follow-activation` is enabled. It cannot count the replacement's runs toward
+the previous rollback's sustained-health certificate; start a new supervision
+invocation for the operator's selected activation.
 
 Recovery switches only the activation pointer. Release directories, the
 failed release, its crash records and the activation/recovery history are
