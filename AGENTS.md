@@ -10,19 +10,29 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
-## RULE 0.5 - SUITE-WIDE RULES LIVE IN /data/projects/AGENTS.md
+## RULE 0.5 - SUITE-WIDE RULES & ANTI-REWARD-HACKING DISCIPLINE
 
-The suite-wide rules in **`/data/projects/AGENTS.md`** bind you here too. Read it. Two sections
-are load-bearing for perf work and are NOT duplicated below, so they cannot drift out of sync:
+The suite-wide rules in **`/data/projects/AGENTS.md`** bind you here too. Read it. Note that the
+two sections below are enforced here directly (do not rely on `/data/projects/AGENTS.md` alone
+while those headings are being synchronized upstream):
 
-- **`## Named Reward-Hacking Patterns (ALL FORBIDDEN)`** — 12 named patterns, several already
-  observed in this suite: gate self-weakening (and the exact price of a legitimate gate fix),
-  proof-class inflation, golden regeneration reflex, commit-stream pumping, tautological tests,
-  easy-lever cherry-picking, close-pump abuse, scope-splitting, spec-editing as progress,
-  conformance metastasis, dependency smuggling, bench-path hardcoding.
-- **`### Work-Graph Discipline`** — JSONL is truth and `beads.db` is disposable, `br sync
-  --import-only` after every pull, single-writer on graph structure, closure on cited evidence
-  with blocker beads gated on their named probe, `br dep cycles` stays empty.
+- **Named Reward-Hacking Patterns (ALL 12 FORBIDDEN):**
+  1. *Gate self-weakening* (lowering thresholds, dropping assertions, or skipping checks to pass; any legitimate gate defect fix must publish the exact win/lose split of what the fix admits);
+  2. *Proof-class inflation* (presenting syntax/unit/fixture checks as live runtime or release qualification);
+  3. *Golden regeneration reflex* (blindly overwriting failing snapshots/goldens without diagnosing root cause);
+  4. *Commit-stream pumping* (ceremonial micro-commits without measurable engineering value);
+  5. *Tautological tests* (assertions that compare an implementation to itself or hardcoded mock outputs);
+  6. *Easy-lever cherry-picking* (claiming wins only on trivial micro-probes while ignoring headline failures);
+  7. *Close-pump abuse* (closing beads without cited command evidence or before producer-distinct verification);
+  8. *Scope-splitting* (silently carving hard requirements out of a bead to declare it "done");
+  9. *Spec-editing as progress* (editing docs/specs downward to match broken code instead of fixing code);
+  10. *Conformance metastasis* (adding synthetic wrapper tests that inflate counts without testing real execution);
+  11. *Dependency smuggling* (pulling unreviewed/duplicate crate generations or bypassing workspace locks);
+  12. *Bench-path hardcoding* (special-casing benchmark filenames, seeds, or static payloads).
+- **Work-Graph Discipline:** `.beads/issues.jsonl` is the source of truth and `beads.db` is
+  disposable; run `br sync --import-only` after every pull (or use `br --no-db`); keep single-writer
+  discipline on graph structure; close beads ONLY on cited verification evidence with producer-distinct
+  verification beads gated on their named probes; keep `br dep cycles` strictly empty.
 
 The three that most often decide whether a number here is real: a **self-speedup is
 MAINTENANCE, not a win** — a win needs the incumbent live in the SAME invocation; **never

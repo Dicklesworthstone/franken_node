@@ -1442,6 +1442,33 @@ fn load_compatibility_corpus_pass_rate() -> Option<f64> {
         .and_then(|p| p.as_f64())
 }
 
+/// Render a `BenchmarkSummary` JSON document from a measured `BenchmarkReport`
+/// for `artifacts/category_shift/latest_benchmark_summary.json` and `DR-BENCH-015`.
+pub fn render_benchmark_summary_json(
+    report: &crate::tools::benchmark_suite::BenchmarkReport,
+    timestamp: u64,
+) -> Result<String, CategoryShiftError> {
+    let summary = BenchmarkSummary {
+        timestamp,
+        aggregate_score: report.aggregate_score,
+        scenarios: report
+            .scenarios
+            .iter()
+            .map(|s| ScenarioSummary {
+                name: s.name.clone(),
+                dimension: format!("{:?}", s.dimension),
+                raw_value: s.raw_value,
+                score: s.score,
+                unit: s.unit.clone(),
+            })
+            .collect(),
+        provenance_hash: report.provenance_hash.clone(),
+    };
+    serde_json::to_string_pretty(&summary).map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+        msg: format!("failed to serialize benchmark summary: {e}"),
+    })
+}
+
 /// Save benchmark results to artifacts folder for CI gating and regression detection
 #[cfg(feature = "advanced-features")]
 fn save_benchmark_results(
@@ -1471,29 +1498,8 @@ fn save_benchmark_results(
     })?;
 
     // Save summary metrics for CI gate comparison
-    let summary = BenchmarkSummary {
-        timestamp,
-        aggregate_score: report.aggregate_score,
-        scenarios: report
-            .scenarios
-            .iter()
-            .map(|s| ScenarioSummary {
-                name: s.name.clone(),
-                dimension: format!("{:?}", s.dimension),
-                raw_value: s.raw_value,
-                score: s.score,
-                unit: s.unit.clone(),
-            })
-            .collect(),
-        provenance_hash: report.provenance_hash.clone(),
-    };
-
     let summary_path = "artifacts/category_shift/latest_benchmark_summary.json";
-    let summary_json = serde_json::to_string_pretty(&summary).map_err(|e| {
-        CategoryShiftError::ArtifactSaveFailed {
-            msg: format!("failed to serialize benchmark summary: {}", e),
-        }
-    })?;
+    let summary_json = render_benchmark_summary_json(report, timestamp)?;
 
     fs::write(summary_path, summary_json).map_err(|e| CategoryShiftError::ArtifactSaveFailed {
         msg: format!(
@@ -3387,6 +3393,19 @@ mod tests {
                 assert!(metrics.compatibility_percent <= 100.0);
                 assert!(metrics.throughput_ops_per_sec > 0);
                 assert!(metrics.latency_p99_ms > 0.0);
+                let validation = validate_benchmark_thresholds()
+                    .expect("regenerated benchmark summary should validate cleanly");
+                assert!(
+                    validation.passed,
+                    "regenerated benchmark summary failed thresholds: {:?}",
+                    validation.details
+                );
+                if std::env::var_os("FRANKEN_NODE_PRINT_BENCH_SUMMARY").is_some()
+                    && let Ok(raw) =
+                        fs::read_to_string("artifacts/category_shift/latest_benchmark_summary.json")
+                {
+                    println!("===BENCHMARK_SUMMARY_BEGIN===\n{raw}\n===BENCHMARK_SUMMARY_END===");
+                }
                 println!(
                     "Real benchmark metrics: compatibility={}%, throughput={} ops/sec, latency={}ms",
                     metrics.compatibility_percent,

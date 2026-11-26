@@ -150,10 +150,10 @@ impl FleetPolicyRollout {
             u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // The transport belongs to this operation; clearing the budget permits
         // callers to inspect its durable state after a timeout.
-        if let Err(error) = transport.set_operation_deadline(None) {
-            if report.error.is_none() {
-                report.error = Some(error.to_string());
-            }
+        if let Err(error) = transport.set_operation_deadline(None)
+            && report.error.is_none()
+        {
+            report.error = Some(error.to_string());
         }
         report
     }

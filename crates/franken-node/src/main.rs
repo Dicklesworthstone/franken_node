@@ -200,7 +200,9 @@ use frankenengine_node::{
         },
         zk_attestation,
     },
-    supply_chain::category_shift::validate_benchmark_thresholds_with_config,
+    supply_chain::category_shift::{
+        render_benchmark_summary_json, validate_benchmark_thresholds_with_config,
+    },
     supply_chain::{
         certification::{EvidenceType, VerifiedEvidenceRef},
         extension_registry::{
@@ -10168,6 +10170,7 @@ struct BenchRunErrorCliReport<'a> {
 }
 
 fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
+    let mut default_output_override: Option<PathBuf> = None;
     let (rendered, summary) = if args.fixture_mode {
         let mut config = BenchmarkSuiteConfig::for_cli();
         if let Some(output) = &args.output {
@@ -10184,6 +10187,23 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
                 .context("failed serializing benchmark fixture report")?,
             benchmark_suite_render_human_summary(&report),
         )
+    } else if args.subsystem_summary {
+        let mut config = BenchmarkSuiteConfig::for_cli();
+        let target_path = args
+            .output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(config::BenchmarkConfig::default().summary_path));
+        config.evidence_path = Some(target_path.display().to_string());
+        let report = benchmark_suite_run_default_suite_with_config_and_mode(
+            config,
+            args.scenario.as_deref(),
+            BenchmarkEvidenceMode::Measured,
+        )
+        .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+        let rendered = render_benchmark_summary_json(&report, now_unix_secs())
+            .map_err(|err| anyhow::anyhow!("failed serializing benchmark summary: {err}"))?;
+        default_output_override = Some(target_path);
+        (rendered, benchmark_suite_render_human_summary(&report))
     } else {
         use tools::benchmark_suite::{
             TriadExecutionLimits, TriadRuntimeLeg, TriadWorkloadSpec,
@@ -10279,7 +10299,7 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
 
     // Only complete, parity-checked live runs or explicitly requested fixtures
     // reach the artifact writer. Preserve an existing artifact on every error.
-    if let Some(output) = &args.output {
+    if let Some(output) = args.output.as_ref().or(default_output_override.as_ref()) {
         write_bytes_atomically(output, rendered.as_bytes()).with_context(|| {
             format!(
                 "failed writing benchmark suite report to {}",
@@ -19530,7 +19550,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
             Ok(result) if result.details.is_empty() => (
                 DoctorStatus::Warn,
                 result.message,
-                "Run category shift validation to generate benchmark results first.".to_string(),
+                "Run 'franken-node bench run --subsystem-summary' to generate benchmark results first.".to_string(),
             ),
             Ok(result) => (
                 DoctorStatus::Fail,
@@ -19544,7 +19564,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
             Err(e) => (
                 DoctorStatus::Warn,
                 format!("Benchmark validation failed to run: {}", e),
-                "Run category shift validation to generate benchmark results first.".to_string(),
+                "Run 'franken-node bench run --subsystem-summary' to generate benchmark results first.".to_string(),
             ),
         },
     ));
@@ -33600,6 +33620,7 @@ fn handle_ops_session_inventory(command: &cli::OpsSessionInventoryCommand) -> Re
     #[cfg(feature = "engine")]
     {
         use ops::native_session_inventory::{
+            NativeSessionInventoryCompactRequest, compact_local_native_session_inventory,
             read_local_native_session_capacity, recover_local_native_session_capacity,
         };
         match command {
@@ -33647,6 +33668,43 @@ fn handle_ops_session_inventory(command: &cli::OpsSessionInventoryCommand) -> Re
                     println!(
                         "  Missing signed outcomes remain pending; fleet fences are unchanged."
                     );
+                }
+            }
+            cli::OpsSessionInventoryCommand::Compact(args) => {
+                let request = NativeSessionInventoryCompactRequest {
+                    archive_dir: args.archive_dir.clone(),
+                    max_sessions_to_archive: args.max_sessions,
+                    finalize_orphaned_pending: args.finalize_orphaned_pending,
+                    min_pending_age_secs: args.min_pending_age_secs,
+                    confirm: args.confirm,
+                    operator_id: Some(args.operator_id.clone()),
+                    reason: Some(args.reason.clone()),
+                };
+                let report = compact_local_native_session_inventory(&request)?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("Native-session inventory compaction");
+                    println!(
+                        "  recovered_signed_outcomes={} finalized_orphaned_pending={} archived_clean_sessions={}",
+                        report.recovered_signed_outcomes,
+                        report.finalized_orphaned_pending,
+                        report.archived_clean_sessions,
+                    );
+                    println!(
+                        "  reserved_bytes={} -> {} ({:.2}% -> {:.2}%)",
+                        report.before.reserved_bytes,
+                        report.after.reserved_bytes,
+                        report.before.utilization_pct,
+                        report.after.utilization_pct,
+                    );
+                    if let Some(path) = &report.archive_path {
+                        println!(
+                            "  cold_archive={} merkle_root={}",
+                            path.display(),
+                            report.archive_merkle_root_sha256.as_deref().unwrap_or(""),
+                        );
+                    }
                 }
             }
         }
@@ -51240,6 +51298,7 @@ fn main() -> Result<()> {
                 let json = match &command {
                     cli::OpsSessionInventoryCommand::Status(args)
                     | cli::OpsSessionInventoryCommand::Recover(args) => args.json,
+                    cli::OpsSessionInventoryCommand::Compact(args) => args.json,
                 };
                 if let Err(err) = handle_ops_session_inventory(&command) {
                     return ops_fail("ops.session-inventory", json, err);

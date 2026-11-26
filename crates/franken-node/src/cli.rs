@@ -3767,11 +3767,50 @@ pub enum OpsSessionInventoryCommand {
     /// Restore missing database outcomes from existing signed supervisor receipts.
     /// Unobserved sessions remain pending; this never deletes evidence or releases a fence.
     Recover(OpsSessionInventoryArgs),
+    /// Compact authenticated clean completed sessions into an Ed25519-signed Merkle cold archive
+    /// and/or explicitly finalize aged orphaned pending reservations with honest signed
+    /// `SupervisionIncomplete`/`Unknown` outcomes (`--confirm` required).
+    Compact(OpsSessionInventoryCompactArgs),
 }
 
 #[derive(Debug, Parser)]
 pub struct OpsSessionInventoryArgs {
     /// Emit the accounting or authenticated recovery report as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsSessionInventoryCompactArgs {
+    /// Directory where Ed25519-signed Merkle cold-archive bundles for clean completed sessions are written.
+    #[arg(long = "archive-dir")]
+    pub archive_dir: Option<PathBuf>,
+
+    /// Maximum number of clean completed sessions to archive in this invocation.
+    #[arg(long = "max-sessions")]
+    pub max_sessions: Option<usize>,
+
+    /// Seal aged orphaned pending (`outcome_json IS NULL`) rows with honest signed `SupervisionIncomplete`/`Unknown` outcomes to reclaim phantom ~5.35 MiB outcome reservations. Requires `--confirm`.
+    #[arg(long = "finalize-orphaned-pending")]
+    pub finalize_orphaned_pending: bool,
+
+    /// Minimum age in seconds before an orphaned pending session is eligible for explicit finalization.
+    #[arg(long = "min-pending-age-secs", default_value_t = 300)]
+    pub min_pending_age_secs: u64,
+
+    /// Explicit operator confirmation required for `--finalize-orphaned-pending`.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Operator identity recorded inside the archive manifest and audit logs.
+    #[arg(long = "operator-id", default_value = "")]
+    pub operator_id: String,
+
+    /// Operational rationale recorded inside the archive manifest and audit logs.
+    #[arg(long, default_value = "")]
+    pub reason: String,
+
+    /// Emit `franken-node/ops-session-inventory-compact/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -4730,6 +4769,24 @@ pub struct BenchRunArgs {
     /// Fixture reports are not release or headline benchmark evidence.
     #[arg(long)]
     pub fixture_mode: bool,
+
+    /// Measure real in-process product subsystems and emit/write the doctor
+    /// `DR-BENCH-015` benchmark summary JSON (default path:
+    /// `artifacts/category_shift/latest_benchmark_summary.json`, or `--output`).
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "fixture_mode",
+            "samples",
+            "warmups",
+            "timeout_ms",
+            "budget_ms",
+            "seed",
+            "node_bin",
+            "bun_bin"
+        ]
+    )]
+    pub subsystem_summary: bool,
 
     /// Measured invocations per runtime, interleaved in seeded rounds.
     #[arg(
@@ -9363,8 +9420,33 @@ mod fleet_policy_rollout_cli_tests {
                     assert_eq!(verb, "recover");
                     assert!(args.json);
                 }
+                OpsSessionInventoryCommand::Compact(_) => {
+                    panic!("unexpected compact variant for {verb}");
+                }
             }
         }
+        let compact = Cli::try_parse_from([
+            "franken-node",
+            "ops",
+            "session-inventory",
+            "compact",
+            "--finalize-orphaned-pending",
+            "--confirm",
+            "--operator-id",
+            "op-1",
+            "--reason",
+            "reclaim orphaned reservations",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Ops(OpsCommand::SessionInventory(OpsSessionInventoryCommand::Compact(args))) =
+            compact.command
+        else {
+            panic!("expected compact command");
+        };
+        assert!(args.finalize_orphaned_pending);
+        assert!(args.confirm);
+        assert!(args.json);
         assert!(Cli::try_parse_from(["franken-node", "ops", "session-inventory"]).is_err());
         assert!(
             Cli::try_parse_from([

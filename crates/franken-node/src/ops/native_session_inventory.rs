@@ -5457,6 +5457,762 @@ fn read_inventory_at(
     Ok(report)
 }
 
+pub const NATIVE_SESSION_INVENTORY_STATUS_SCHEMA: &str =
+    "franken-node/ops-session-inventory-status/v1";
+pub const NATIVE_SESSION_INVENTORY_COMPACT_SCHEMA: &str =
+    "franken-node/ops-session-inventory-compact/v1";
+pub const NATIVE_SESSION_COLD_ARCHIVE_SCHEMA: &str = "franken-node/native-session-cold-archive/v1";
+const NATIVE_SESSION_COLD_ARCHIVE_LEAF_DOMAIN: &[u8] =
+    b"franken-node/native-session-cold-archive-leaf/v1\0";
+const NATIVE_SESSION_COLD_ARCHIVE_NODE_DOMAIN: &[u8] =
+    b"franken-node/native-session-cold-archive-node/v1\0";
+const NATIVE_SESSION_COLD_ARCHIVE_SIG_DOMAIN: &[u8] =
+    b"franken-node/native-session-cold-archive-sig/v1\0";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeSessionInventoryStatusReport {
+    pub schema_version: String,
+    pub inventory_root: PathBuf,
+    pub database_present: bool,
+    pub retained_sessions: usize,
+    pub max_sessions: usize,
+    pub pending_null_outcomes: usize,
+    pub completed_sessions: usize,
+    pub clean_completed_sessions: usize,
+    pub incident_or_failed_sessions: usize,
+    pub actual_payload_bytes: usize,
+    pub pending_phantom_reserved_bytes: usize,
+    pub reserved_bytes: usize,
+    pub max_reserved_bytes: usize,
+    pub utilization_pct: f64,
+    pub admission_blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSessionInventoryCompactRequest {
+    pub archive_dir: Option<PathBuf>,
+    pub max_sessions_to_archive: Option<usize>,
+    pub finalize_orphaned_pending: bool,
+    pub min_pending_age_secs: u64,
+    pub confirm: bool,
+    pub operator_id: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionColdArchiveEntry {
+    pub session_nonce: String,
+    pub leaf_sha256: String,
+    pub admission: NativeSessionAdmission,
+    pub outcome: NativeSessionOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionColdArchiveBundle {
+    pub schema_version: String,
+    pub archived_at: DateTime<Utc>,
+    pub operator_id: String,
+    pub reason: String,
+    pub session_count: usize,
+    pub merkle_root_sha256: String,
+    pub signing_public_key_hex: String,
+    pub signature_hex: String,
+    pub entries: Vec<NativeSessionColdArchiveEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeSessionInventoryCompactReport {
+    pub schema_version: String,
+    pub inventory_root: PathBuf,
+    pub recovered_signed_outcomes: usize,
+    pub finalized_orphaned_pending: usize,
+    pub archived_clean_sessions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_merkle_root_sha256: Option<String>,
+    pub before: NativeSessionInventoryStatusReport,
+    pub after: NativeSessionInventoryStatusReport,
+}
+
+fn is_clean_completed_outcome(outcome: &NativeSessionOutcome) -> bool {
+    outcome.kind == NativeSessionOutcomeKind::Completed
+        && outcome.process == NativeSessionProcessObservation::WorkerReaped
+        && outcome.panic_evidence.is_none()
+        && matches!(
+            outcome.effects,
+            NativeSessionEffectObservation::FinalLedgerObserved {
+                denied_count: 0,
+                failed_count: 0,
+                ..
+            }
+        )
+}
+
+fn cold_archive_leaf_sha256(
+    admission: &NativeSessionAdmission,
+    outcome: &NativeSessionOutcome,
+) -> Result<String> {
+    let admission_bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
+    let outcome_bytes = bounded_json(outcome, MAX_OUTCOME_BYTES)?;
+    let mut hash = Sha256::new();
+    hash.update(NATIVE_SESSION_COLD_ARCHIVE_LEAF_DOMAIN);
+    hash.update(u64::try_from(admission.session_nonce.len())?.to_be_bytes());
+    hash.update(admission.session_nonce.as_bytes());
+    hash.update(u64::try_from(admission_bytes.len())?.to_be_bytes());
+    hash.update(admission_bytes.as_bytes());
+    hash.update(u64::try_from(outcome_bytes.len())?.to_be_bytes());
+    hash.update(outcome_bytes.as_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn compute_cold_archive_merkle_root(leaves: &[String]) -> String {
+    if leaves.is_empty() {
+        let mut hash = Sha256::new();
+        hash.update(NATIVE_SESSION_COLD_ARCHIVE_NODE_DOMAIN);
+        hash.update(0_u64.to_be_bytes());
+        return hex::encode(hash.finalize());
+    }
+    let mut level: Vec<String> = leaves.to_vec();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let left = &pair[0];
+            let right = pair.get(1).unwrap_or(left);
+            let mut hash = Sha256::new();
+            hash.update(NATIVE_SESSION_COLD_ARCHIVE_NODE_DOMAIN);
+            hash.update(left.as_bytes());
+            hash.update(b":");
+            hash.update(right.as_bytes());
+            next.push(hex::encode(hash.finalize()));
+        }
+        level = next;
+    }
+    level.into_iter().next().unwrap_or_default()
+}
+
+fn cold_archive_signature_preimage(bundle: &NativeSessionColdArchiveBundle) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Signable<'a> {
+        schema_version: &'a str,
+        archived_at: &'a DateTime<Utc>,
+        operator_id: &'a str,
+        reason: &'a str,
+        session_count: usize,
+        merkle_root_sha256: &'a str,
+        signing_public_key_hex: &'a str,
+    }
+    let payload = serde_json::to_vec(&Signable {
+        schema_version: &bundle.schema_version,
+        archived_at: &bundle.archived_at,
+        operator_id: &bundle.operator_id,
+        reason: &bundle.reason,
+        session_count: bundle.session_count,
+        merkle_root_sha256: &bundle.merkle_root_sha256,
+        signing_public_key_hex: &bundle.signing_public_key_hex,
+    })?;
+    let mut preimage =
+        Vec::with_capacity(NATIVE_SESSION_COLD_ARCHIVE_SIG_DOMAIN.len() + payload.len());
+    preimage.extend_from_slice(NATIVE_SESSION_COLD_ARCHIVE_SIG_DOMAIN);
+    preimage.extend_from_slice(&payload);
+    Ok(preimage)
+}
+
+/// Independently verify every archived session leaf digest, the binary Merkle
+/// root, and the strict Ed25519 signature over the archive metadata.
+pub fn verify_native_session_cold_archive(
+    bundle: &NativeSessionColdArchiveBundle,
+    expected_verifying_key: &ed25519_dalek::VerifyingKey,
+) -> Result<()> {
+    if bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA {
+        bail!("unsupported native-session cold archive schema version");
+    }
+    if bundle.operator_id.trim().is_empty() || bundle.reason.trim().is_empty() {
+        bail!("native-session cold archive requires non-empty operator_id and reason");
+    }
+    if bundle.session_count != bundle.entries.len() || bundle.entries.is_empty() {
+        bail!("native-session cold archive session_count does not match entries");
+    }
+    let expected_key_hex = hex::encode(expected_verifying_key.as_bytes());
+    if !crate::security::constant_time::ct_eq(&bundle.signing_public_key_hex, &expected_key_hex) {
+        bail!("native-session cold archive signing key does not match trusted product root");
+    }
+    let mut leaves = Vec::with_capacity(bundle.entries.len());
+    let mut seen = BTreeSet::new();
+    for entry in &bundle.entries {
+        if entry.session_nonce != entry.admission.session_nonce
+            || !seen.insert(entry.session_nonce.clone())
+        {
+            bail!("native-session cold archive contains duplicate or mismatched session nonce");
+        }
+        validate_admission(&entry.admission)?;
+        validate_outcome(&entry.admission, &entry.outcome)?;
+        if !is_clean_completed_outcome(&entry.outcome) {
+            bail!("native-session cold archive contains non-clean session outcome");
+        }
+        let recomputed_leaf = cold_archive_leaf_sha256(&entry.admission, &entry.outcome)?;
+        if !crate::security::constant_time::ct_eq(&entry.leaf_sha256, &recomputed_leaf) {
+            bail!(
+                "native-session cold archive leaf digest mismatch for {}",
+                entry.session_nonce
+            );
+        }
+        leaves.push(recomputed_leaf);
+    }
+    let recomputed_root = compute_cold_archive_merkle_root(&leaves);
+    if !crate::security::constant_time::ct_eq(&bundle.merkle_root_sha256, &recomputed_root) {
+        bail!("native-session cold archive Merkle root mismatch");
+    }
+    if bundle.signature_hex.len() != 128 {
+        bail!("native-session cold archive signature has invalid length");
+    }
+    let sig_bytes = hex::decode(&bundle.signature_hex)
+        .context("decode native-session cold archive signature")?;
+    let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
+        .context("parse native-session cold archive signature")?;
+    expected_verifying_key
+        .verify_strict(&cold_archive_signature_preimage(bundle)?, &signature)
+        .context("native-session cold archive Ed25519 signature verification failed")?;
+    Ok(())
+}
+
+fn inspect_status_in_tx(
+    protected_root: &Path,
+    tx: &Transaction<'_>,
+) -> Result<NativeSessionInventoryStatusReport> {
+    let (count, reserved_bytes) = inventory_reservation_usage(tx)?;
+    let rows = tx.query(&format!(
+        "SELECT session_nonce, admission_json, outcome_json FROM native_sessions
+         ORDER BY session_nonce ASC LIMIT {};",
+        MAX_STORED_SESSIONS.saturating_add(1)
+    ))?;
+    let mut pending_null_outcomes = 0_usize;
+    let mut completed_sessions = 0_usize;
+    let mut clean_completed_sessions = 0_usize;
+    let mut incident_or_failed_sessions = 0_usize;
+    let mut actual_payload_bytes = 0_usize;
+    for row in &rows {
+        let [_, admission_val, outcome_val] = row.values() else {
+            bail!("native-session inventory row shape is invalid");
+        };
+        if let SqliteValue::Text(adm) = admission_val {
+            actual_payload_bytes = actual_payload_bytes.saturating_add(adm.len());
+        }
+        match outcome_val {
+            SqliteValue::Null => {
+                pending_null_outcomes = pending_null_outcomes.saturating_add(1);
+            }
+            SqliteValue::Text(out_raw) => {
+                completed_sessions = completed_sessions.saturating_add(1);
+                actual_payload_bytes = actual_payload_bytes.saturating_add(out_raw.len());
+                match serde_json::from_str::<NativeSessionOutcome>(out_raw) {
+                    Ok(outcome) if is_clean_completed_outcome(&outcome) => {
+                        clean_completed_sessions = clean_completed_sessions.saturating_add(1);
+                    }
+                    _ => {
+                        incident_or_failed_sessions = incident_or_failed_sessions.saturating_add(1);
+                    }
+                }
+            }
+            _ => bail!("native-session inventory contains a non-text outcome column"),
+        }
+    }
+    let pending_phantom_reserved_bytes = pending_null_outcomes.saturating_mul(MAX_OUTCOME_BYTES);
+    let session_pct = (count as f64 / MAX_STORED_SESSIONS as f64) * 100.0;
+    let byte_pct = (reserved_bytes as f64 / MAX_RESERVED_BYTES as f64) * 100.0;
+    let utilization_pct = (session_pct.max(byte_pct) * 100.0).round() / 100.0;
+    let admission_blocked = count >= MAX_STORED_SESSIONS
+        || reserved_bytes.saturating_add(MAX_OUTCOME_BYTES) > MAX_RESERVED_BYTES;
+    let fix_command = if admission_blocked || utilization_pct >= 85.0 {
+        if pending_phantom_reserved_bytes > actual_payload_bytes && pending_null_outcomes > 0 {
+            Some(
+                "franken-node ops session-inventory compact --finalize-orphaned-pending \
+                 --confirm --operator-id <operator> --reason 'reclaim orphaned killed-worker reservations' --json"
+                    .to_string(),
+            )
+        } else {
+            Some(
+                "franken-node ops session-inventory compact --archive-dir <archive-dir> \
+                 --operator-id <operator> --reason 'archive clean completed sessions' --json"
+                    .to_string(),
+            )
+        }
+    } else {
+        None
+    };
+    Ok(NativeSessionInventoryStatusReport {
+        schema_version: NATIVE_SESSION_INVENTORY_STATUS_SCHEMA.to_string(),
+        inventory_root: protected_root.to_path_buf(),
+        database_present: true,
+        retained_sessions: count,
+        max_sessions: MAX_STORED_SESSIONS,
+        pending_null_outcomes,
+        completed_sessions,
+        clean_completed_sessions,
+        incident_or_failed_sessions,
+        actual_payload_bytes,
+        pending_phantom_reserved_bytes,
+        reserved_bytes,
+        max_reserved_bytes: MAX_RESERVED_BYTES,
+        utilization_pct,
+        admission_blocked,
+        fix_command,
+    })
+}
+
+/// Read-only inspection of native-session inventory utilization and capacity.
+/// Never mutates the database and succeeds even when admission capacity is
+/// currently saturated so operators can diagnose and unbrick a host cleanly.
+pub fn inspect_native_session_inventory_status_at(
+    protected_root: &Path,
+) -> Result<NativeSessionInventoryStatusReport> {
+    if !protected_root.join(INVENTORY_FILE).exists() {
+        return Ok(NativeSessionInventoryStatusReport {
+            schema_version: NATIVE_SESSION_INVENTORY_STATUS_SCHEMA.to_string(),
+            inventory_root: protected_root.to_path_buf(),
+            database_present: false,
+            retained_sessions: 0,
+            max_sessions: MAX_STORED_SESSIONS,
+            pending_null_outcomes: 0,
+            completed_sessions: 0,
+            clean_completed_sessions: 0,
+            incident_or_failed_sessions: 0,
+            actual_payload_bytes: 0,
+            pending_phantom_reserved_bytes: 0,
+            reserved_bytes: 0,
+            max_reserved_bytes: MAX_RESERVED_BYTES,
+            utilization_pct: 0.0,
+            admission_blocked: false,
+            fix_command: None,
+        });
+    }
+    retry_snapshot_conflict(|| {
+        let Some(connection) = open_capacity_inventory_at(protected_root, true)? else {
+            return Ok(NativeSessionInventoryStatusReport {
+                schema_version: NATIVE_SESSION_INVENTORY_STATUS_SCHEMA.to_string(),
+                inventory_root: protected_root.to_path_buf(),
+                database_present: false,
+                retained_sessions: 0,
+                max_sessions: MAX_STORED_SESSIONS,
+                pending_null_outcomes: 0,
+                completed_sessions: 0,
+                clean_completed_sessions: 0,
+                incident_or_failed_sessions: 0,
+                actual_payload_bytes: 0,
+                pending_phantom_reserved_bytes: 0,
+                reserved_bytes: 0,
+                max_reserved_bytes: MAX_RESERVED_BYTES,
+                utilization_pct: 0.0,
+                admission_blocked: false,
+                fix_command: None,
+            });
+        };
+        let tx = connection.transaction()?;
+        inspect_status_in_tx(protected_root, &tx)
+    })
+}
+
+/// Compact native-session inventory capacity without silently discarding
+/// incident, failed, panicked, denied-effect, or active session evidence:
+/// 1. Recovers any already-signed `session-outcomes/` receipts.
+/// 2. When `finalize_orphaned_pending` + `confirm` are explicitly requested by
+///    an operator, seals aged `outcome_json IS NULL` rows with honest signed
+///    `SupervisionIncomplete` + `Unproven` + `Unknown` outcomes (preserving
+///    unresolved-effect alarms while releasing ~5.35 MiB phantom reservations).
+/// 3. When `archive_dir` is supplied, seals authenticated clean completed exit-0
+///    non-incident sessions into an Ed25519-signed Merkle cold-archive bundle,
+///    verifies the persisted bundle from disk, and atomically removes only those
+///    verified clean rows from `native_sessions`.
+pub fn compact_native_session_inventory_at(
+    protected_root: &Path,
+    request: &NativeSessionInventoryCompactRequest,
+) -> Result<NativeSessionInventoryCompactReport> {
+    use ed25519_dalek::Signer as _;
+    use std::io::Write as _;
+
+    if request.archive_dir.is_none() && !request.finalize_orphaned_pending {
+        bail!(
+            "session-inventory compact requires --archive-dir <dir> and/or \
+             --finalize-orphaned-pending --confirm"
+        );
+    }
+    let operator_id = request
+        .operator_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .context("session-inventory compact requires a non-empty --operator-id")?
+        .to_string();
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .context("session-inventory compact requires a non-empty --reason")?
+        .to_string();
+    if request.finalize_orphaned_pending && !request.confirm {
+        bail!(
+            "refusing to finalize orphaned pending sessions without explicit --confirm; \
+             finalization records honest SupervisionIncomplete/Unknown outcomes and never \
+             marks orphaned sessions as cleanly completed"
+        );
+    }
+
+    let before = inspect_native_session_inventory_status_at(protected_root)?;
+    if !before.database_present {
+        return Ok(NativeSessionInventoryCompactReport {
+            schema_version: NATIVE_SESSION_INVENTORY_COMPACT_SCHEMA.to_string(),
+            inventory_root: protected_root.to_path_buf(),
+            recovered_signed_outcomes: 0,
+            finalized_orphaned_pending: 0,
+            archived_clean_sessions: 0,
+            archive_path: None,
+            archive_merkle_root_sha256: None,
+            after: before.clone(),
+            before,
+        });
+    }
+
+    tracing::info!(
+        event_code = "NSI_COMPACT_START",
+        retained_sessions = before.retained_sessions,
+        pending_null_outcomes = before.pending_null_outcomes,
+        reserved_bytes = before.reserved_bytes,
+        finalize_orphaned_pending = request.finalize_orphaned_pending,
+        archive_requested = request.archive_dir.is_some(),
+        operator_id = %operator_id,
+        "starting native-session inventory compaction"
+    );
+
+    let root_key = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let verifying_key = root_key.verifying_key();
+    let _write_lock = lock_inventory_file(protected_root, false)?;
+
+    let mut recovered_signed_outcomes = 0_usize;
+    let mut finalized_orphaned_pending = 0_usize;
+    let mut archived_clean_sessions = 0_usize;
+    let mut archive_path_out: Option<PathBuf> = None;
+    let mut archive_merkle_root_out: Option<String> = None;
+
+    // Phase 1: Opportunistically recover any already-signed outcome receipts.
+    let pending_snapshot = retry_snapshot_conflict(|| {
+        let connection = open_inventory_unlocked(protected_root, false)?
+            .context("native-session inventory disappeared during compaction")?;
+        let tx = connection.transaction()?;
+        read_records_in_transaction_matching(&tx, true)
+    })?;
+    let recoveries = retained_outcome_recoveries(protected_root, &pending_snapshot)?;
+    if !recoveries.is_empty() {
+        retry_snapshot_conflict(|| {
+            let connection = open_inventory_unlocked(protected_root, false)?
+                .context("native-session inventory disappeared during recovery")?;
+            let mut tx = connection.transaction()?;
+            for (admission, outcome) in &recoveries {
+                write_observed_outcome(&mut tx, admission, outcome)?;
+            }
+            tx.commit()?;
+            protect_sidecars(protected_root)?;
+            Ok(())
+        })?;
+        recovered_signed_outcomes = recoveries.len();
+    }
+
+    // Phase 2: Explicit operator finalization of aged orphaned pending rows.
+    if request.finalize_orphaned_pending {
+        let now = Utc::now();
+        let min_age = chrono::Duration::seconds(
+            i64::try_from(request.min_pending_age_secs).unwrap_or(i64::MAX),
+        );
+        let remaining_pending = retry_snapshot_conflict(|| {
+            let connection = open_inventory_unlocked(protected_root, false)?
+                .context("native-session inventory disappeared before pending finalization")?;
+            let tx = connection.transaction()?;
+            read_records_in_transaction_matching(&tx, true)
+        })?;
+        let mut to_finalize = Vec::new();
+        for record in remaining_pending {
+            if now.signed_duration_since(record.admission.admitted_at) >= min_age {
+                let honest_outcome = NativeSessionOutcome {
+                    observed_at: now,
+                    kind: NativeSessionOutcomeKind::SupervisionIncomplete,
+                    process: NativeSessionProcessObservation::Unproven,
+                    containment_empty_observed: false,
+                    effects: NativeSessionEffectObservation::Unknown,
+                    panic_evidence: None,
+                };
+                validate_outcome(&record.admission, &honest_outcome)?;
+                retain_outcome_receipt(protected_root, &record.admission, &honest_outcome)?;
+                to_finalize.push((record.admission, honest_outcome));
+            }
+        }
+        if !to_finalize.is_empty() {
+            retry_snapshot_conflict(|| {
+                let connection = open_inventory_unlocked(protected_root, false)?
+                    .context("native-session inventory disappeared during pending finalization")?;
+                let mut tx = connection.transaction()?;
+                for (admission, outcome) in &to_finalize {
+                    write_observed_outcome(&mut tx, admission, outcome)?;
+                }
+                tx.commit()?;
+                protect_sidecars(protected_root)?;
+                Ok(())
+            })?;
+            finalized_orphaned_pending = to_finalize.len();
+            tracing::info!(
+                event_code = "NSI_PENDING_FINALIZED",
+                finalized_orphaned_pending,
+                operator_id = %operator_id,
+                "sealed orphaned pending native sessions with honest SupervisionIncomplete/Unknown outcomes"
+            );
+        }
+    }
+
+    // Phase 3: Signed Merkle cold-archive compaction of authenticated clean completed sessions only.
+    if let Some(archive_dir) = &request.archive_dir {
+        if let Ok(meta) = std::fs::symlink_metadata(archive_dir)
+            && meta.file_type().is_symlink()
+        {
+            bail!(
+                "refusing to write native-session cold archive into symlinked directory {}",
+                archive_dir.display()
+            );
+        }
+        std::fs::create_dir_all(archive_dir).with_context(|| {
+            format!(
+                "create native-session cold archive directory {}",
+                archive_dir.display()
+            )
+        })?;
+        let all_records = retry_snapshot_conflict(|| {
+            let connection = open_inventory_unlocked(protected_root, false)?
+                .context("native-session inventory disappeared before cold-archive scan")?;
+            let tx = connection.transaction()?;
+            read_records_in_transaction_matching(&tx, false)
+        })?;
+        // Fail closed if any retained DB outcome disagrees with its signed
+        // supervisor receipt, and never archive/delete unproven rows.
+        let authority = authenticate_inventory_records(protected_root, &all_records)?;
+        let max_archive = request.max_sessions_to_archive.unwrap_or(usize::MAX);
+        let mut entries = Vec::new();
+        let mut leaves = Vec::new();
+        for record in all_records {
+            if entries.len() >= max_archive {
+                break;
+            }
+            if authority
+                .unproven_admissions
+                .contains(&record.admission.session_nonce)
+                || authority
+                    .unproven_outcomes
+                    .contains(&record.admission.session_nonce)
+            {
+                continue;
+            }
+            let Some(outcome) = record.outcome else {
+                continue;
+            };
+            if !is_clean_completed_outcome(&outcome) {
+                continue;
+            }
+            let leaf_sha256 = cold_archive_leaf_sha256(&record.admission, &outcome)?;
+            leaves.push(leaf_sha256.clone());
+            entries.push(NativeSessionColdArchiveEntry {
+                session_nonce: record.admission.session_nonce.clone(),
+                leaf_sha256,
+                admission: record.admission,
+                outcome,
+            });
+        }
+        if !entries.is_empty() {
+            let merkle_root_sha256 = compute_cold_archive_merkle_root(&leaves);
+            let archived_at = Utc::now();
+            let mut bundle = NativeSessionColdArchiveBundle {
+                schema_version: NATIVE_SESSION_COLD_ARCHIVE_SCHEMA.to_string(),
+                archived_at,
+                operator_id: operator_id.clone(),
+                reason: reason.clone(),
+                session_count: entries.len(),
+                merkle_root_sha256: merkle_root_sha256.clone(),
+                signing_public_key_hex: hex::encode(verifying_key.as_bytes()),
+                signature_hex: String::new(),
+                entries,
+            };
+            let preimage = cold_archive_signature_preimage(&bundle)?;
+            bundle.signature_hex = hex::encode(root_key.sign(&preimage).to_bytes());
+            verify_native_session_cold_archive(&bundle, &verifying_key)?;
+
+            let encoded = serde_json::to_vec_pretty(&bundle)
+                .context("serialize native-session cold archive bundle")?;
+            let file_name = format!(
+                "native-session-archive-{}-{}.json",
+                archived_at.format("%Y%m%dT%H%M%SZ"),
+                &merkle_root_sha256[..16.min(merkle_root_sha256.len())]
+            );
+            let final_path = archive_dir.join(file_name);
+            let mut staged = tempfile::NamedTempFile::new_in(archive_dir)
+                .context("stage native-session cold archive bundle")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                staged
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            staged.write_all(&encoded)?;
+            staged.as_file().sync_all()?;
+            staged
+                .persist_noclobber(&final_path)
+                .map_err(|err| err.error)
+                .with_context(|| {
+                    format!(
+                        "persist native-session cold archive bundle to {}",
+                        final_path.display()
+                    )
+                })?;
+            #[cfg(unix)]
+            std::fs::File::open(archive_dir)?.sync_all()?;
+
+            // Re-read and independently verify the persisted archive before deleting any DB rows.
+            let persisted_bytes = std::fs::read(&final_path).with_context(|| {
+                format!(
+                    "read back persisted native-session cold archive {}",
+                    final_path.display()
+                )
+            })?;
+            let verified_bundle: NativeSessionColdArchiveBundle =
+                serde_json::from_slice(&persisted_bytes)
+                    .context("decode persisted native-session cold archive for verification")?;
+            verify_native_session_cold_archive(&verified_bundle, &verifying_key)?;
+
+            let archived_sessions: Vec<(String, PathBuf)> = verified_bundle
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.session_nonce.clone(),
+                        entry.admission.identity_capture_path.clone(),
+                    )
+                })
+                .collect();
+            let surviving_captures: BTreeSet<PathBuf> = retry_snapshot_conflict(|| {
+                let connection = open_inventory_unlocked(protected_root, false)?
+                    .context("native-session inventory disappeared before row deletion")?;
+                let mut tx = connection.transaction()?;
+                for (nonce, _) in &archived_sessions {
+                    tx.execute_with_params(
+                        "DELETE FROM native_sessions
+                         WHERE session_nonce = ?1 AND outcome_json IS NOT NULL;",
+                        &[SqliteValue::Text(nonce.clone().into())],
+                    )?;
+                }
+                let remaining = read_records_in_transaction_matching(&tx, false)?;
+                tx.commit()?;
+                protect_sidecars(protected_root)?;
+                Ok(remaining
+                    .into_iter()
+                    .map(|record| record.admission.identity_capture_path)
+                    .collect())
+            })?;
+
+            // Retire per-session hot sidecars for the already-verified cold-archived
+            // clean sessions so `check_admission_record_capacity` reclaims slots and
+            // forensic reconciliation sees zero orphaned captures or missing-DB records.
+            // Content-addressed `source-capsules/` may be shared and are never removed.
+            let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+            let mut touched_dirs = BTreeSet::new();
+            let mut retire_private_file = |path: &Path| -> Result<()> {
+                if validate_private_path_if_present(path)? {
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {
+                            if let Some(parent) = path.parent() {
+                                touched_dirs.insert(parent.to_path_buf());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("retire archived native-session sidecar {}", path.display())
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            };
+            for (nonce, capture_path) in &archived_sessions {
+                retire_private_file(&admission_record_path(protected_root, nonce))?;
+                retire_private_file(&admission_receipt_path(protected_root, nonce))?;
+                retire_private_file(&outcome_receipt_path(protected_root, nonce))?;
+                retire_private_file(
+                    &super::native_session_journal::native_session_effect_journal_path(
+                        protected_root,
+                        nonce,
+                    ),
+                )?;
+                if capture_path.parent() == Some(capture_directory.as_path())
+                    && !surviving_captures.contains(capture_path)
+                {
+                    retire_private_file(capture_path)?;
+                }
+            }
+            #[cfg(unix)]
+            for dir in &touched_dirs {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+
+            archived_clean_sessions = archived_sessions.len();
+            archive_path_out = Some(final_path);
+            archive_merkle_root_out = Some(merkle_root_sha256);
+            tracing::info!(
+                event_code = "NSI_ARCHIVE_SIGNED",
+                archived_clean_sessions,
+                merkle_root = ?archive_merkle_root_out,
+                "verified signed Merkle cold archive and reclaimed clean completed session rows"
+            );
+        }
+    }
+
+    let after = retry_snapshot_conflict(|| {
+        let connection = open_inventory_unlocked(protected_root, false)?
+            .context("native-session inventory disappeared after compaction")?;
+        let tx = connection.transaction()?;
+        inspect_status_in_tx(protected_root, &tx)
+    })?;
+    drop(_write_lock);
+    tracing::info!(
+        event_code = "NSI_COMPACT_COMPLETE",
+        recovered_signed_outcomes,
+        finalized_orphaned_pending,
+        archived_clean_sessions,
+        before_reserved_bytes = before.reserved_bytes,
+        after_reserved_bytes = after.reserved_bytes,
+        "completed native-session inventory compaction"
+    );
+
+    Ok(NativeSessionInventoryCompactReport {
+        schema_version: NATIVE_SESSION_INVENTORY_COMPACT_SCHEMA.to_string(),
+        inventory_root: protected_root.to_path_buf(),
+        recovered_signed_outcomes,
+        finalized_orphaned_pending,
+        archived_clean_sessions,
+        archive_path: archive_path_out,
+        archive_merkle_root_sha256: archive_merkle_root_out,
+        before,
+        after,
+    })
+}
+
+pub fn compact_local_native_session_inventory(
+    request: &NativeSessionInventoryCompactRequest,
+) -> Result<NativeSessionInventoryCompactReport> {
+    compact_native_session_inventory_at(&inventory_root()?, request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11427,5 +12183,268 @@ mod tests {
         symlink(&target, root.join(format!("{INVENTORY_FILE}-wal"))).unwrap();
         assert!(open_inventory(&root, true).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+    }
+
+    #[test]
+    fn capacity_error_includes_actionable_fix_command_and_status_succeeds() {
+        let err = check_reservation_usage(
+            50,
+            MAX_RESERVED_BYTES + 1,
+            MAX_STORED_SESSIONS,
+            MAX_RESERVED_BYTES,
+        )
+        .expect_err("saturated reservation must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("native-session inventory capacity exceeded"));
+        assert!(msg.contains("inspect_command=`franken-node ops session-inventory status --json`"));
+        assert!(msg.contains("fix_command=`franken-node ops session-inventory recover --json`"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let empty = inspect_native_session_inventory_status_at(&root).unwrap();
+        assert!(!empty.database_present);
+        assert_eq!(empty.retained_sessions, 0);
+        assert!(!empty.admission_blocked);
+    }
+
+    #[test]
+    fn compact_finalize_orphaned_pending_requires_confirm_and_preserves_unknown_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 41);
+        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        // Simulate a SIGKILL'd supervisor by forgetting the guard without recording an outcome.
+        std::mem::forget(guard);
+
+        let before = inspect_native_session_inventory_status_at(&root).unwrap();
+        assert_eq!(before.retained_sessions, 1);
+        assert_eq!(before.pending_null_outcomes, 1);
+        assert_eq!(before.pending_phantom_reserved_bytes, MAX_OUTCOME_BYTES);
+
+        // Without --confirm, compaction must fail closed.
+        let denied = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: None,
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: true,
+                min_pending_age_secs: 0,
+                confirm: false,
+                operator_id: Some("op-test".to_string()),
+                reason: Some("reclaim killed workers".to_string()),
+            },
+        );
+        assert!(denied.is_err());
+
+        // With explicit --confirm, orphaned pending session receives an honest
+        // SupervisionIncomplete + Unproven + Unknown signed outcome, releasing the
+        // ~5.35 MiB phantom reservation without claiming clean completion.
+        let report = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: None,
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: true,
+                min_pending_age_secs: 0,
+                confirm: true,
+                operator_id: Some("op-test".to_string()),
+                reason: Some("reclaim killed workers".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.finalized_orphaned_pending, 1);
+        assert_eq!(report.after.pending_null_outcomes, 0);
+        assert_eq!(report.after.pending_phantom_reserved_bytes, 0);
+        assert!(report.after.reserved_bytes < before.reserved_bytes);
+        assert_eq!(report.after.incident_or_failed_sessions, 1);
+        assert_eq!(report.after.clean_completed_sessions, 0);
+
+        // Forensic read must still report unknown effects & unproven process.
+        let inventory = read_inventory_at(&root, None).unwrap();
+        assert_eq!(inventory.unknown_effect_sessions, 1);
+        assert_eq!(inventory.unproven_process_sessions, 1);
+        assert_eq!(
+            inventory.records[0].outcome.as_ref().unwrap().kind,
+            NativeSessionOutcomeKind::SupervisionIncomplete
+        );
+    }
+
+    #[test]
+    fn compact_cold_archive_preserves_incidents_and_rejects_tamper() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let archive_dir = temp.path().join("cold-archives");
+
+        // 1. Clean completed exit-0 session (eligible for cold archiving).
+        let clean_adm = fixture(&root, 51);
+        let mut clean_guard =
+            NativeSessionInventoryGuard::admit(&root, clean_adm.clone(), 0).unwrap();
+        clean_guard.worker_reaped();
+        clean_guard.containment_empty();
+        clean_guard.finish(
+            NativeSessionOutcomeKind::Completed,
+            NativeSessionEffectObservation::FinalLedgerObserved {
+                effect_count: 1,
+                allowed_count: 1,
+                denied_count: 0,
+                failed_count: 0,
+                chain_head_hash: format!("sha256:{}", "11".repeat(32)),
+                ledger_sha256: "22".repeat(32),
+            },
+        );
+
+        // 2. Denied-effect incident session (MUST NEVER be removed by compaction).
+        let denied_adm = fixture(&root, 52);
+        let mut denied_guard =
+            NativeSessionInventoryGuard::admit(&root, denied_adm.clone(), 0).unwrap();
+        denied_guard.worker_reaped();
+        denied_guard.containment_empty();
+        denied_guard.finish(
+            NativeSessionOutcomeKind::Completed,
+            NativeSessionEffectObservation::FinalLedgerObserved {
+                effect_count: 1,
+                allowed_count: 0,
+                denied_count: 1,
+                failed_count: 0,
+                chain_head_hash: format!("sha256:{}", "33".repeat(32)),
+                ledger_sha256: "44".repeat(32),
+            },
+        );
+
+        // 3. Pending active session (MUST NEVER be removed by archive compaction).
+        let pending_adm = fixture(&root, 53);
+        let pending_guard =
+            NativeSessionInventoryGuard::admit(&root, pending_adm.clone(), 0).unwrap();
+        std::mem::forget(pending_guard);
+
+        let report = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: Some(archive_dir),
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: false,
+                min_pending_age_secs: 300,
+                confirm: false,
+                operator_id: Some("op-archive".to_string()),
+                reason: Some("routine cold archive".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.archived_clean_sessions, 1);
+        assert_eq!(report.after.retained_sessions, 2);
+        assert_eq!(report.after.clean_completed_sessions, 0);
+        assert_eq!(report.after.incident_or_failed_sessions, 1);
+        assert_eq!(report.after.pending_null_outcomes, 1);
+
+        // Hot admission-record slots and identity captures for archived clean sessions
+        // must be retired cleanly so `check_admission_record_capacity` reclaims capacity
+        // and forensic reconciliation reports zero source errors or untracked captures.
+        let retained_record_files = std::fs::read_dir(root.join(ADMISSION_RECORD_DIRECTORY))
+            .unwrap()
+            .count();
+        assert_eq!(retained_record_files, 2);
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "unexpected forensic source errors after compaction: {:?}",
+            forensics.source_errors
+        );
+        assert!(
+            forensics.untracked_identity_captures.is_empty(),
+            "unexpected untracked identity captures after compaction: {:?}",
+            forensics.untracked_identity_captures
+        );
+        assert_eq!(forensics.records.len(), 2);
+
+        let archive_path = report.archive_path.expect("archive path emitted");
+        let raw = std::fs::read(&archive_path).unwrap();
+        let mut bundle: NativeSessionColdArchiveBundle = serde_json::from_slice(&raw).unwrap();
+        let root_key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap();
+        verify_native_session_cold_archive(&bundle, &root_key.verifying_key()).unwrap();
+
+        // Tampering 1 byte in reason or entry must fail closed.
+        bundle.reason.push('!');
+        assert!(verify_native_session_cold_archive(&bundle, &root_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn compact_cold_archive_skips_unproven_outcomes_and_rejects_receipt_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let archive_dir = temp.path().join("cold-archives");
+
+        // Admit a session and write a DB outcome WITHOUT a signed outcome receipt.
+        let unsigned_adm = fixture(&root, 61);
+        let guard = NativeSessionInventoryGuard::admit(&root, unsigned_adm.clone(), 0).unwrap();
+        std::mem::forget(guard);
+        let fake_clean = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Completed,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: true,
+            effects: NativeSessionEffectObservation::FinalLedgerObserved {
+                effect_count: 1,
+                allowed_count: 1,
+                denied_count: 0,
+                failed_count: 0,
+                chain_head_hash: format!("sha256:{}", "55".repeat(32)),
+                ledger_sha256: "66".repeat(32),
+            },
+            panic_evidence: None,
+        };
+        let conn = open_inventory(&root, false).unwrap().unwrap();
+        {
+            let mut tx = conn.transaction().unwrap();
+            write_observed_outcome(&mut tx, &unsigned_adm, &fake_clean).unwrap();
+            tx.commit().unwrap();
+        }
+        drop(conn);
+
+        // Compaction MUST NOT archive or delete an unproven/unsigned DB outcome.
+        let report = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: Some(archive_dir.clone()),
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: false,
+                min_pending_age_secs: 300,
+                confirm: false,
+                operator_id: Some("op-audit".to_string()),
+                reason: Some("verify unproven row retention".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.archived_clean_sessions, 0);
+        assert!(report.archive_path.is_none());
+        assert_eq!(report.after.retained_sessions, 1);
+
+        // Now attach a DIFFERENT signed outcome receipt (e.g. SupervisionIncomplete) to
+        // prove that DB-vs-receipt disagreement fails closed during cold archive compaction.
+        let conflicting = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::SupervisionIncomplete,
+            process: NativeSessionProcessObservation::Unproven,
+            containment_empty_observed: false,
+            effects: NativeSessionEffectObservation::Unknown,
+            panic_evidence: None,
+        };
+        retain_outcome_receipt(&root, &unsigned_adm, &conflicting).unwrap();
+        let err = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: Some(archive_dir),
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: false,
+                min_pending_age_secs: 300,
+                confirm: false,
+                operator_id: Some("op-audit".to_string()),
+                reason: Some("must fail on receipt mismatch".to_string()),
+            },
+        )
+        .expect_err("DB outcome disagreeing with signed receipt must fail closed");
+        assert!(err.to_string().contains("disagrees with its signed"));
     }
 }

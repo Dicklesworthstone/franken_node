@@ -1552,6 +1552,18 @@ pub fn expected_fleet_store_schema() -> sqlmodel_schema::DatabaseSchema {
             Vec::new(),
         ),
     );
+    schema.tables.insert(
+        "fleet_guarded_native_resumes".to_string(),
+        typed_table(
+            "fleet_guarded_native_resumes",
+            vec![
+                typed_column("action_id", SqlType::Text, true, true, false),
+                typed_column("receipt_json", SqlType::Text, false, false, false),
+            ],
+            vec!["action_id"],
+            Vec::new(),
+        ),
+    );
     schema
 }
 

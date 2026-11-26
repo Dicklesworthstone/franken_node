@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-**FrankenNode** is the product layer over sibling `franken_engine`: migration, trust, fleet quarantine/control-plane coordination, replay, and verifier surfaces around a native JS/TS runtime. It is **not** a drop-in Node.js/Bun replacement (committed L1 corpus artifact is currently `69.82%` (`391/560`) in `artifacts/compat/corpus_pass.json`, with `78.93%` (`442/560`) under `balanced` in `CLAIM-001`; `child_process` and strict ambient capabilities remain gated). The system implements a 3-kernel architecture for separation of concerns between execution, correctness control, and product surfaces.
+**FrankenNode** is the product layer over sibling `franken_engine`: migration, trust, fleet quarantine/control-plane coordination, replay, and verifier surfaces around a native JS/TS runtime. It is **not** a drop-in Node.js/Bun replacement: committed L1 corpus artifact (`artifacts/13/compatibility_corpus_results.json`, `legacy-risky` policy) currently measures **`97.32%` (`545/560`)** overall (`0` IFC refusals, `child_process 30/30`, `tls 40/40`), but L1 stays **RED** because the `core` band is `249/254` (`98.03% < 99.00%`), `balanced` defaults still gate guest writes/`process.platform` (`bd-bpmb2`), and `dist.yml` requires `--min-cases 1000`. The system implements a 3-kernel architecture for separation of concerns between execution, correctness control, and product surfaces.
 
 **Key Stats:**
 - **Language:** Rust 2024 Edition (`nightly-2026-09-21` pinned in `rust-toolchain.toml`, required by `fsqlite-pager` `core_intrinsics`)
@@ -26,14 +26,14 @@ FrankenNode is built on a tri-kernel design that separates concerns across three
 │ • Extension     │    │ • Deterministic │    │ • Migration aid │
 │   sandbox       │    │   execution     │    │ • Trust/supply  │
 │ • Native JS/TS  │    │ • Evidence      │    │   chain control │
-│   (no V8/QJS)   │    │   ledger        │    │ • File fleet log│
+│   (no V8/QJS)   │    │   ledger        │    │ • Fleet control │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
        │                         │                         │
        └─────────────────────────┼─────────────────────────┘
                                  │
                     Shared facades & adapters
-                    (CLI fleet is file JSONL;
-                    live_control_plane=false)
+                    (local WAL store by default;
+                    live HTTP coordinator via `fleet serve`)
 ```
 
 ### Kernel Responsibilities
@@ -94,12 +94,12 @@ FrankenNode organizes functionality into distinct product planes:
 - Replay bundle generation and validation
 - Evidence ledger for audit trails
 - Incident bundle integrity verification
-- Counterfactual re-evaluation of the recorded decision trace (not live re-execution)
+- Default replay verifies recorded traces; `--inspect-steps`/`--step` invokes `replay::time_travel_engine`; `--execute` runs native guest re-execution via `ops::native_replay`
 
 **Entry Points:**
 - `src/replay/mod.rs` - Replay orchestration
 - `src/observability/evidence_ledger.rs` - Evidence capture
-- CLI: `franken-node incident replay`, `franken-node incident bundle` (recorded bundles, not live re-execution)
+- CLI: `franken-node incident replay` (`--execute` / `--inspect-steps`), `franken-node incident bundle`, `franken-node incident counterfactual`
 
 ### ⚙️ Runtime & Control Plane Domain (`runtime/`, `control_plane/`)
 **Purpose:** Runtime execution control, lane scheduling, engine dispatch  
@@ -118,9 +118,9 @@ FrankenNode organizes functionality into distinct product planes:
 **Purpose:** Scope-bound Ed25519 capability tokens for network-bound operations  
 **Key Components:**
 - Token issue / inspect / revoke
-- `remotecap use` / `verify` authorize a scoped operation (dry-run; does not perform the HTTP request)
+- `remotecap use` / `verify` authorize a scoped operation (dry-run); `remotecap invoke` executes one bounded native HTTP(S) request with durable signed evidence and revocation/single-use checks
 - Audience binding and optional single-use
-- Remote transport abstractions in-library (CLI is token lifecycle, not a live federated executor)
+- Remote transport abstractions in-library plus bounded CLI `remotecap invoke`
 
 **Entry Points:**
 - `src/remote/mod.rs` - Remote capability coordination
@@ -183,8 +183,8 @@ Core Commands:
   ops              Local ops snapshots (not a live daemon)
     health-check   Compiled git SHA plus local ledger/receipt files
   verify           Compatibility/release verification (Node is spec when included)
-  incident         Recorded incident bundles (replay is not live re-execution)
-  remotecap        Ed25519 capability tokens (`use` is dry-run)
+  incident         Incident bundles, step inspection, counterfactuals, and `--execute` native replay
+  remotecap        Ed25519 capability tokens (`use` is dry-run; `invoke` performs bounded signed HTTP(S))
   doctor           Diagnostic and health checking
 ```
 
@@ -201,9 +201,9 @@ FrankenNode uses granular feature flags for compile-time optimization and option
 
 ### Product Surface Features
 - **`extended-surfaces`** - Legacy umbrella for `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`
-- **`control-plane`** - API middleware and file-transport fleet/quarantine log (not a live multi-node plane)
+- **`control-plane`** - API middleware, fleet quarantine/rollout control plane, and epoch barriers
 - **`policy-engine`** - Security policies, guardrail monitors, hardening
-- **`remote-ops`** - Remote capability tokens and distributed coordination primitives (CLI `remotecap use` is dry-run)
+- **`remote-ops`** - Remote capability tokens (`remotecap use`/`invoke`) and distributed coordination primitives
 - **`admin-tools`** - Enterprise governance, migration tools
 - **`verifier-tools`** - Verifier-specific tooling and SDK
 - **`advanced-features`** - Claims, conformance, encoding, extensions, federation, performance, and repair surfaces
@@ -251,7 +251,7 @@ Supply Chain Input → Trust Card Validation → Policy Engine → Decision Rece
 | Kernel | Repository | Integration |
 |--------|------------|-------------|
 | **franken_engine** | sibling `../franken_engine/` | Default `run` uses the embedded engine; `--engine-bin` is an optional process path |
-| **asupersync** | Published `0.6.2` | Default-enabled (`fleet-control-plane-server` + `asupersync-transport`) `Cx`-checkpointed control-lane runtime for `fleet serve` and `fleet agent` |
+| **asupersync** | Published `0.7.0` | Default-enabled (`fleet-control-plane-server` + `asupersync-transport`) `Cx`-checkpointed control-lane runtime for `fleet serve` and `fleet agent` |
 
 ### Substrate Dependencies
 | Substrate | Repository | Purpose |

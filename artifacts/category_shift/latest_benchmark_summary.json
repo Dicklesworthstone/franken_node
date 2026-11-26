@@ -1,60 +1,60 @@
 {
-  "timestamp": 1794935911,
-  "aggregate_score": 82,
+  "timestamp": 1795659764,
+  "aggregate_score": 88,
   "scenarios": [
     {
       "name": "secure-extension-heavy",
       "dimension": "PerformanceUnderHardening",
-      "raw_value": 2.1619486,
+      "raw_value": 0.14957820000000002,
       "score": 100,
       "unit": "ms"
     },
     {
       "name": "cold_start_latency",
       "dimension": "PerformanceUnderHardening",
-      "raw_value": 0.4870716,
+      "raw_value": 0.005152,
       "score": 100,
       "unit": "ms"
     },
     {
       "name": "p99_request_latency",
       "dimension": "PerformanceUnderHardening",
-      "raw_value": 0.1236066,
+      "raw_value": 0.0012259999999999999,
       "score": 100,
       "unit": "ms"
     },
     {
       "name": "extension_overhead_ratio",
       "dimension": "PerformanceUnderHardening",
-      "raw_value": 1.4824230222952979,
-      "score": 4,
+      "raw_value": 1.1373348820158522,
+      "score": 73,
       "unit": "ratio"
     },
     {
       "name": "migration_scanner_throughput",
       "dimension": "MigrationSpeed",
-      "raw_value": 19857.731747884245,
+      "raw_value": 1070328.3574416651,
       "score": 100,
       "unit": "fixtures/s"
     },
     {
       "name": "lockstep_harness_throughput",
       "dimension": "CompatibilityCorrectness",
-      "raw_value": 56698.77063302528,
+      "raw_value": 4412454.44274356,
       "score": 100,
       "unit": "fixtures/s"
     },
     {
       "name": "quarantine_propagation_latency",
       "dimension": "ContainmentLatency",
-      "raw_value": 0.24995540000000002,
+      "raw_value": 0.0073228,
       "score": 100,
       "unit": "ms"
     },
     {
       "name": "trust_card_materialization",
       "dimension": "ContainmentLatency",
-      "raw_value": 0.164709,
+      "raw_value": 0.002019,
       "score": 100,
       "unit": "ms"
     },
@@ -80,5 +80,5 @@
       "unit": "percent"
     }
   ],
-  "provenance_hash": "sha256:c004f4d315cfb7434ddbe94abfd114d3a93ca1453ec0106f1790cacc907b39e8"
+  "provenance_hash": "sha256:b3046c191c276909212216c35ce1afd6b41a5e16e99fc4f54e9ce1036b3a314c"
 }

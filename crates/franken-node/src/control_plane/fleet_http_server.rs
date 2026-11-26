@@ -1025,7 +1025,8 @@ impl FleetControlPlaneService {
                 "not_found",
                 "FLEET_HTTP_NOT_FOUND",
                 format!("no fleet route at `{path}`"),
-            ).into();
+            )
+            .into();
         }
         if path == FLEET_HTTP_HEALTH_PATH {
             if request.method != "GET" {
@@ -1040,7 +1041,8 @@ impl FleetControlPlaneService {
                     service: FLEET_HTTP_SERVICE_NAME.to_string(),
                     store: FLEET_HTTP_STORE_LABEL.to_string(),
                 },
-            ).into();
+            )
+            .into();
         }
 
         let Some(principal) = self.authenticate(request.authorization) else {
@@ -1049,7 +1051,8 @@ impl FleetControlPlaneService {
                 "unauthorized",
                 "FLEET_HTTP_UNAUTHORIZED",
                 "a valid `Authorization: Bearer <token>` header is required",
-            ).into();
+            )
+            .into();
         };
         let request_limit = if matches!(
             path,
@@ -1068,7 +1071,8 @@ impl FleetControlPlaneService {
                     "request body is {} bytes; the route limit is {request_limit}",
                     request.body.len()
                 ),
-            ).into();
+            )
+            .into();
         }
 
         if request.method == "POST" {
@@ -1089,7 +1093,8 @@ impl FleetControlPlaneService {
                     "forbidden",
                     "FLEET_HTTP_CREDENTIAL_SCOPE",
                     "credential is not authorized for this fleet operation",
-                ).into();
+                )
+                .into();
             }
         }
         if matches!(&principal, FleetPrincipal::Node { .. })
@@ -1101,7 +1106,8 @@ impl FleetControlPlaneService {
                 "forbidden",
                 "FLEET_HTTP_CREDENTIAL_SCOPE",
                 "whole-fleet inventory and convergence require an operator credential",
-            ).into();
+            )
+            .into();
         }
 
         let enrollment = self.node_credentials.clone();
@@ -1120,7 +1126,8 @@ impl FleetControlPlaneService {
                     "bad_request",
                     "FLEET_HTTP_INVALID_EPOCH",
                     "a retained epoch must be a canonical positive decimal u64",
-                ).into();
+                )
+                .into();
             };
             let Some(signer) = self.epoch_commit_signer.clone() else {
                 return FleetHttpResponse::problem(
@@ -1149,18 +1156,20 @@ impl FleetControlPlaneService {
         }
 
         match (request.method, path) {
-            ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(&budget, move |transport, _| {
-                let mut actions = transport.list_actions()?;
-                principal.filter_actions(&mut actions);
-                Ok(FleetHttpResponse::json(
-                    200,
-                    "ok",
-                    &FleetHttpActionList {
-                        schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
-                        actions,
-                    },
-                ))
-            }),
+            ("GET", FLEET_HTTP_ACTIONS_PATH) => {
+                self.with_transport(&budget, move |transport, _| {
+                    let mut actions = transport.list_actions()?;
+                    principal.filter_actions(&mut actions);
+                    Ok(FleetHttpResponse::json(
+                        200,
+                        "ok",
+                        &FleetHttpActionList {
+                            schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                            actions,
+                        },
+                    ))
+                })
+            }
             ("POST", FLEET_HTTP_ACTIONS_PATH) => {
                 let action: FleetActionRecord = match parse_body(request.body) {
                     Ok(action) => action,
@@ -1288,7 +1297,8 @@ impl FleetControlPlaneService {
                         "conflict",
                         "FLEET_HTTP_COORDINATOR_SIGNING_KEY_REQUIRED",
                         "retryable epoch operations require a provisioned coordinator signing key",
-                    ).into();
+                    )
+                    .into();
                 }
                 let clock = self.clock;
                 let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
@@ -1401,7 +1411,8 @@ impl FleetControlPlaneService {
                         "forbidden",
                         "FLEET_HTTP_NODE_IDENTITY_MISMATCH",
                         "heartbeat identity does not match the enrolled credential",
-                    ).into();
+                    )
+                    .into();
                 }
                 let recorded_at = (self.clock)();
                 if let Some(credentials) = &enrollment
@@ -2467,12 +2478,7 @@ mod tests {
         service: &FleetControlPlaneService,
         operation_id: &str,
     ) -> FleetHttpEpochBarrierRequest {
-        let response = service.handle(request(
-            "GET",
-            FLEET_HTTP_STATE_PATH,
-            Some(&bearer()),
-            b"",
-        ));
+        let response = service.handle(request("GET", FLEET_HTTP_STATE_PATH, Some(&bearer()), b""));
         assert_eq!(response.status, 200);
         let state: FleetHttpState = serde_json::from_slice(&response.body).unwrap();
         FleetHttpEpochBarrierRequest {
@@ -2506,7 +2512,12 @@ mod tests {
         let (dir, service) = service_with_held_population(&root, Some(coordinator_signer()));
         let first_request = retryable_epoch_request(&service, "operation-one");
         let first = post_epoch_operation(&service, &first_request);
-        assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+        assert_eq!(
+            first.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&first.body)
+        );
         let first: FleetHttpEpochBarrierResponse = serde_json::from_slice(&first.body).unwrap();
         assert!(!first.already_committed);
         assert_eq!(first.certificate.committed_epoch, 1);
@@ -2518,7 +2529,12 @@ mod tests {
 
         let second_request = retryable_epoch_request(&service, "operation-two");
         let second = post_epoch_operation(&service, &second_request);
-        assert_eq!(second.status, 200, "{}", String::from_utf8_lossy(&second.body));
+        assert_eq!(
+            second.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&second.body)
+        );
         let second: FleetHttpEpochBarrierResponse = serde_json::from_slice(&second.body).unwrap();
         assert_eq!(second.certificate.committed_epoch, 2);
         let live_cache = service.seqlock_page().read_safepoint();
@@ -2574,10 +2590,7 @@ mod tests {
         let first = post_epoch_operation(&service, &original);
         assert_eq!(first.status, 200);
         let first: FleetHttpEpochBarrierResponse = serde_json::from_slice(&first.body).unwrap();
-        assert_eq!(
-            first.evidence.stale_after,
-            MAX_GUARDED_POLICY_STALE_AFTER
-        );
+        assert_eq!(first.evidence.stale_after, MAX_GUARDED_POLICY_STALE_AFTER);
         let cache = service.seqlock_page().read_safepoint();
         for field in 0..6 {
             let mut changed = original.clone();
@@ -2588,8 +2601,7 @@ mod tests {
                 3 => changed.stale_after = std::time::Duration::from_secs(302),
                 4 => changed.expected_action_log = None,
                 _ => {
-                    changed.expected_action_log.as_mut().unwrap().actions_sha256 =
-                        "00".repeat(32);
+                    changed.expected_action_log.as_mut().unwrap().actions_sha256 = "00".repeat(32);
                 }
             }
             let refused = post_epoch_operation(&service, &changed);
@@ -2620,7 +2632,11 @@ mod tests {
             .with_epoch_commit_signer(coordinator_signer())
             .unwrap();
         let mut wrong_snapshot = original.clone();
-        wrong_snapshot.expected_action_log.as_mut().unwrap().actions_sha256 = "00".repeat(32);
+        wrong_snapshot
+            .expected_action_log
+            .as_mut()
+            .unwrap()
+            .actions_sha256 = "00".repeat(32);
         assert_eq!(post_epoch_operation(&service, &wrong_snapshot).status, 409);
         assert_eq!(export_epoch(&service, 1).status, 409);
         let mut bad_id = original.clone();
