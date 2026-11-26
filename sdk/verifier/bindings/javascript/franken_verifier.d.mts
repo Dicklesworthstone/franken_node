@@ -23,7 +23,7 @@ export interface VerifierOptions {
   expectedSourceArtifactSha256?: string;
   /** Optional authenticated graph commitment. Requires expectedManifestSha256; does not reconstruct the graph. */
   expectedGraphInputHash?: string;
-  /** SourceGraphReport JSON file; publisher-source formats only. Requires independent hash verification, not parser/resolver reconstruction. */
+  /** Bounded regular SourceGraphReport file for incident-bundle or publisher-source formats. Binds caller-read bytes and authenticated sources without upgrading origin scope or reconstructing resolver semantics. */
   graphReport?: string;
   /** Independently retained native admission nonce. Requires expectedAdmissionSha256; native-session-forensics only. */
   expectedSessionNonce?: string;
@@ -119,6 +119,8 @@ export interface IncidentFacts {
   signer_public_key_hex: string;
   signing_identity: string;
   native_capture: NativeCaptureMetadata | null;
+  /** Present only when a requested report matches this incident's authenticated native capture. */
+  graph_report?: SourceGraphCommitment;
 }
 /** Authenticated original receipt-authority statement, not guest execution. */
 export interface RunOriginMetadata {
@@ -425,6 +427,7 @@ export const MAX_NATIVE_SESSION_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
 export const MAX_SIGNED_SESSION_POLICY_BYTES: number;
+export const MAX_SOURCE_GRAPH_REPORT_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualIncidentOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualPromotionOptions): Promise<Verification>;

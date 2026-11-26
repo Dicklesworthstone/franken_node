@@ -108,6 +108,24 @@ export async function auditOriginalRun(
   return `${verified.facts.run_origin.receipt_id}:${verified.facts.run_origin.record_sha256}`;
 }
 
+export async function auditIncidentGraph(
+  data: Uint8Array, exporterAnchor: string, runAnchor: string, runtimeAnchor: string,
+  reportPath: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, exporterAnchor, {
+    verifier: executable, format: "incident-bundle", graphReport: reportPath,
+    trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor,
+  });
+  if (verified.format !== "incident-bundle" || verified.scope !== "authenticated_runtime_incident"
+      || verified.facts.graph_report === undefined) {
+    throw new Error("requested incident graph and runtime origin required");
+  }
+  const recomputed: true = verified.facts.graph_report.graph_hash_recomputed;
+  const semantics: false = verified.facts.graph_report.graph_semantics_reconstructed;
+  if (!recomputed || semantics) throw new Error("graph commitment cannot certify resolver execution");
+  return verified.facts.graph_report.report_sha256;
+}
+
 export async function auditCounterfactualIncident(
   data: Uint8Array, receiptAnchor: string, incidentAnchor: string, expectedBaseline: string,
   signature: string, runAnchor: string, runtimeAnchor: string, executable: string,

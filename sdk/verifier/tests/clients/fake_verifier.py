@@ -403,18 +403,61 @@ if mode.startswith(("fleet_", "epoch_")):
             "statement_sha256": "a" * 64,
         })
 exit_code = 0
-graph_prefix = next((prefix for prefix in ("publisher_graph_witness_", "publisher_trust_graph_witness_")
+graph_prefix = next((prefix for prefix in ("publisher_graph_witness_", "publisher_trust_graph_witness_",
+                                          "incident_graph_witness_")
                      if mode.startswith(prefix)), None)
 if graph_prefix is not None:
     source = response["facts"]["source"] if mode.startswith("publisher_trust_") else response["facts"]
     action = mode[len(graph_prefix):]
+    if graph_prefix == "incident_graph_witness_":
+        candidate = json.loads(data)
+        capture = candidate.get("initial_state_snapshot", {}).get("native_replay", {})
+        raw = capture.get("payload_json", "{}")
+        if not isinstance(raw, str):
+            raw = "{}"
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = {}
+        source["native_capture"] = {
+            "payload_sha256": hashlib.sha256(raw.encode()).hexdigest(), "payload_bytes": len(raw.encode()),
+            "captured_terminal_state": payload.get("expected", {}).get("terminal_state", "completed"),
+            "host_io_exchange_count": len(payload.get("host_effect_transcript", [])),
+        }
+        capsule = {"graph_input_hash": "sha256:" + "d" * 64, "input_count": 1}
+        capsule_digest = "sha256:" + "c" * 64
+        if "--trusted-run-key-hex" in sys.argv:
+            response["scope"] = "authenticated_run_incident"
+            source["run_origin"] = {
+                "receipt_id": "run-protocol-control", "receipt_hash": "sha256:" + "a" * 64,
+                "signer_public_key_hex": run_anchor, "record_sha256": "b" * 64,
+            }
+        if "--trusted-runtime-key-hex" in sys.argv:
+            response["scope"] = "authenticated_runtime_incident"
+            source["runtime_origin"] = {
+                "session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+                "product_root_key_id": "ed25519:" + runtime_anchor,
+                "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
+                "signed_epoch": "18446744073709551615",
+            }
+    else:
+        capsule, capsule_digest = source["capsule"], source["capsule_digest"]
+    report_bytes = b"{}\n"
+    if "--graph-report" in sys.argv:
+        report_path = sys.argv[sys.argv.index("--graph-report") + 1]
+        with open(report_path, "rb") as report_file:
+            report_bytes = report_file.read()
+        if action == "replaced_file":
+            report_bytes += b"\n"
+            with open(report_path, "wb") as report_file:
+                report_file.write(report_bytes)
     if action != "ignored":
         source["graph_report"] = {
             "schema_version": "franken-verifier/source-graph-commitment/v1",
-            "graph_input_hash": source["capsule"]["graph_input_hash"],
+            "graph_input_hash": capsule["graph_input_hash"],
             "graph_hash_recomputed": True, "graph_semantics_reconstructed": False,
-            "capsule_digest": source["capsule_digest"], "report_sha256": "e" * 64,
-            "observation_count": source["capsule"]["input_count"],
+            "capsule_digest": capsule_digest, "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "observation_count": capsule["input_count"],
             # Multiple query/fragment identities can share one captured file.
             "module_count": 2, "resolution_target_count": 0, "edge_count": 1,
             "diagnostic_count": 0, "declared_fully_resolved": True,
@@ -425,10 +468,13 @@ if graph_prefix is not None:
             "semantic_claim": ("graph_semantics_reconstructed", True),
             "wrong_graph": ("graph_input_hash", "sha256:" + "f" * 64),
             "wrong_capsule": ("capsule_digest", "sha256:" + "f" * 64),
+            "wrong_report_hash": ("report_sha256", "f" * 64),
             "prefixed_report_hash": ("report_sha256", "sha256:" + "e" * 64),
             "uppercase_report_hash": ("report_sha256", "E" * 64),
             "newline_report_hash": ("report_sha256", "e" * 64 + "\n"),
             "observation_mismatch": ("observation_count", 2),
+            "zero_observations": ("observation_count", 0),
+            "too_many_observations": ("observation_count", 1025),
             "boolean_count": ("edge_count", True),
             "unsafe_count": ("edge_count", 2**53),
             "zero_modules": ("module_count", 0),
@@ -446,9 +492,35 @@ if graph_prefix is not None:
             del source["graph_report"]["report_sha256"]
         elif action == "null":
             source["graph_report"] = None
+    if graph_prefix == "incident_graph_witness_":
+        if action == "missing_capture":
+            source["native_capture"] = None
+        elif action == "wrong_capture_hash":
+            source["native_capture"]["payload_sha256"] = "0" * 64
+        elif action == "wrong_capture_bytes":
+            source["native_capture"]["payload_bytes"] += 1
+        elif action == "wrong_capture_state":
+            source["native_capture"]["captured_terminal_state"] = "engine_failure"
+        elif action == "wrong_capture_count":
+            source["native_capture"]["host_io_exchange_count"] += 1
+        elif action == "wrong_scope":
+            response["scope"] = "authenticated_graph_execution"
+        elif action == "scope_downgrade":
+            response["scope"] = "authenticated_recorded_incident"
+        elif action == "missing_run_origin":
+            source.pop("run_origin", None)
+        elif action == "missing_runtime_origin":
+            source.pop("runtime_origin", None)
+        elif action == "wrong_run_anchor":
+            source["run_origin"]["signer_public_key_hex"] = anchor
+        elif action == "wrong_runtime_anchor":
+            source["runtime_origin"]["product_root_key_id"] = "ed25519:" + anchor
     if action == "forwarded":
+        expected_path = json.loads(data).get("expected_graph_report_path")
         if (sys.argv.count("--graph-report") != 1
-                or sys.argv[sys.argv.index("--graph-report") + 1] != "private graph; $(ignored).json"):
+                or not isinstance(expected_path, str)
+                or os.path.basename(expected_path) != "private graph; $(ignored).json"
+                or sys.argv[sys.argv.index("--graph-report") + 1] != expected_path):
             response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
                         "error": {"code": "GRAPH_ARGUMENT_MISSING", "message": "graph report path was not forwarded"}}
             exit_code = 2

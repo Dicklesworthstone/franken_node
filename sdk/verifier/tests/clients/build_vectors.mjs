@@ -676,6 +676,67 @@ addSourceTrust("publisher_trust_graph_report_revoked", "PUBLISHER_REVOKED", {
   metadata: { graph_report_path: graphReportPath },
 });
 
+// Exercise the same retained producer report through independently signed
+// incident captures. These fixtures authenticate wire statements only; they do
+// not claim a native execution or use the Rust verifier to generate signatures.
+function incidentSourceCapture(state, vectorIndex = 2) {
+  const fixture = sourceFixtures.vectors[vectorIndex];
+  const payload = captured(state);
+  payload.module_sources = clone(fixture.module_sources);
+  Object.assign(payload.package, {
+    source: fixture.project_files["app.mjs"], module_root: "/captured", source_file: "/captured/app.mjs",
+  });
+  return canonical(payload);
+}
+const incidentGraphWire = withCapture(incidentSourceCapture("completed"));
+for (const state of ["completed", "uncaught_exception", "engine_failure"]) {
+  add("incident_graph_report_" + state, "incident-bundle", withCapture(incidentSourceCapture(state)), "verified", {
+    graph_report_path: graphReportPath, incident_graph_report: graphCommitment,
+  });
+}
+add("incident_graph_capture_without_report", "incident-bundle", incidentGraphWire);
+const runtimeGraphWire = runtimeIncident(({ value, record }) => {
+  const raw = incidentSourceCapture("completed");
+  const capture = {
+    schema_version: "franken-node/native-replay-capture/v3", payload_json: raw, payload_sha256: hash(raw),
+  };
+  value.initial_state_snapshot.native_replay = capture;
+  record.native_replay = clone(capture);
+  record.receipt_snapshot.native_replay_payload_sha256 = capture.payload_sha256;
+});
+add("incident_graph_report_run_origin", "incident-bundle", runtimeGraphWire, "verified", {
+  ...testExporterOptions, graph_report_path: graphReportPath, incident_graph_report: graphCommitment,
+});
+add("incident_graph_report_runtime_origin", "incident-bundle", runtimeGraphWire, "verified", {
+  ...runtimeOptions, graph_report_path: graphReportPath, incident_graph_report: graphCommitment,
+});
+const invalidIncidentGraphPath = "invalid incident graph report.json";
+writeFileSync(join(dirname(output), invalidIncidentGraphPath), "{]");
+const ambiguousIncidentGraphPath = "ambiguous incident graph report.json";
+const ambiguousIncidentGraph = graphReportBytes.toString().replace('"scope":', '"scope":"ignored","scope":');
+assert.notEqual(ambiguousIncidentGraph, graphReportBytes.toString());
+writeFileSync(join(dirname(output), ambiguousIncidentGraphPath), ambiguousIncidentGraph);
+for (const [name, wire, expected, metadata] of [
+  ["missing_capture", incidentBytes, "GRAPH_REPORT_MISSING", {}],
+  ["missing_sources", withCapture(rawCapture), "GRAPH_REPORT_MISSING", {}],
+  ["foreign_sources", withCapture(incidentSourceCapture("completed", 0)), "GRAPH_REPORT_INVALID", {}],
+  ["tampered", incidentGraphWire, "GRAPH_REPORT_INVALID", { graph_report_path: changedGraphReportPath }],
+  ["invalid_json", incidentGraphWire, "GRAPH_REPORT_INVALID", { graph_report_path: invalidIncidentGraphPath }],
+  ["ambiguous", incidentGraphWire, "GRAPH_REPORT_INVALID", { graph_report_path: ambiguousIncidentGraphPath }],
+  ["missing_file", incidentGraphWire, "GRAPH_REPORT_IO", { graph_report_path: "missing graph report.json" }],
+  ["wrong_exporter", incidentGraphWire, "SIGNER_UNTRUSTED", { anchor: foreign }],
+  ["missing_run_origin", incidentGraphWire, "RUN_ORIGIN_MISSING", { run_anchor: runAnchor }],
+  ["wrong_run_authority", runtimeGraphWire, "RUN_ORIGIN_SIGNATURE_INVALID", { ...runtimeOptions, run_anchor: foreign }],
+  ["wrong_runtime_authority", runtimeGraphWire, "RUNTIME_ORIGIN_SIGNER_UNTRUSTED", { ...runtimeOptions, runtime_anchor: foreign }],
+]) {
+  add("incident_graph_report_" + name, "incident-bundle", wire, expected,
+    { graph_report_path: graphReportPath, ...metadata });
+}
+const unsignedIncidentGraph = JSON.parse(incidentGraphWire);
+unsignedIncidentGraph.signature.signature_hex = "00".repeat(64);
+add("incident_graph_report_invalid_signature", "incident-bundle", canonical(unsignedIncidentGraph), "SIGNATURE_INVALID",
+  { graph_report_path: graphReportPath });
+
 // These retained expectations describe the approved release, not whichever
 // candidate is later signed. Signatures on substitutions remain genuine.
 const approvedSource = sourceFacts(registration, registrationBytes, sourceBytes);

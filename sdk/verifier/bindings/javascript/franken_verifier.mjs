@@ -11,6 +11,7 @@ export const MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024;
 export const MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024;
+export const MAX_SOURCE_GRAPH_REPORT_BYTES = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
@@ -101,7 +102,8 @@ function instantNs(value) {
   return BigInt(seconds) * 1_000_000_000n + BigInt((match[7] ?? "").padEnd(9, "0"));
 }
 
-function publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
+function publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge,
+  graphReportRequested = false) {
   if (!keys(facts, ["source", "revocation_list_sha256", "revocation_authority_public_key_hex",
     "revocation_issued_at", "revocation_evaluated_at", "max_revocation_age_secs",
     "provenance_chain_sha256", "provenance_authority_public_key_hex", "provenance_link_count"])) return false;
@@ -114,7 +116,9 @@ function publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAn
       || evaluated < issued || evaluated - issued >= BigInt(maxAge) * 1_000_000_000n
       || !digest(facts.revocation_list_sha256)
       || facts.revocation_authority_public_key_hex !== revocationAnchor
-      || !factsValid(facts.source, "publisher-source", anchor)) return false;
+      || !factsValid(facts.source, "publisher-source", anchor,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        graphReportRequested)) return false;
   if (provenanceAnchor === undefined) {
     return facts.provenance_chain_sha256 === null && facts.provenance_authority_public_key_hex === null
       && facts.provenance_link_count === null;
@@ -213,17 +217,79 @@ function sourceGraphCommitmentValid(report, source) {
     "module_count", "resolution_target_count", "edge_count", "diagnostic_count", "declared_fully_resolved"])
     && report.schema_version === "franken-verifier/source-graph-commitment/v1"
     && report.graph_hash_recomputed === true && report.graph_semantics_reconstructed === false
-    && report.graph_input_hash === source.capsule.graph_input_hash
-    && report.capsule_digest === source.capsule_digest
+    && digest(report.graph_input_hash) && digest(report.capsule_digest)
     && typeof report.report_sha256 === "string" && report.report_sha256.length === 64
     && /^[0-9a-f]{64}$/u.test(report.report_sha256)
-    && count(report.observation_count) && report.observation_count === source.capsule.input_count
+    && count(report.observation_count) && report.observation_count >= 1 && report.observation_count <= 1024
     && count(report.module_count) && report.module_count >= 1 && report.module_count <= 256
     && count(report.resolution_target_count) && report.resolution_target_count <= 256
     && count(report.edge_count) && report.edge_count <= 4096
     && count(report.diagnostic_count) && report.diagnostic_count <= 4096
     && typeof report.declared_fully_resolved === "boolean"
-    && (!report.declared_fully_resolved || report.diagnostic_count === 0);
+    && (!report.declared_fully_resolved || report.diagnostic_count === 0)
+    && (source === undefined || report.graph_input_hash === source.capsule.graph_input_hash
+      && report.capsule_digest === source.capsule_digest
+      && report.observation_count === source.capsule.input_count);
+}
+
+function incidentGraphMatches(facts, bytes) {
+  try {
+    // Parse without re-encoding numbers or raw payload text. Both layers must
+    // reject duplicate decoded member names, including escaped equivalents.
+    const envelope = sessionPolicyJson(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    const capture = envelope.initial_state_snapshot.native_replay;
+    const raw = capture.payload_json;
+    if (typeof raw !== "string" || Buffer.from(raw, "utf8").toString("utf8") !== raw) return false;
+    const payloadBytes = Buffer.from(raw, "utf8");
+    if (payloadBytes.length === 0 || payloadBytes.length > 4 * 1024 * 1024) return false;
+    const payload = sessionPolicyJson(raw);
+    const sources = payload.module_sources;
+    const native = facts.native_capture;
+    return keys(sources, ["capsule_base64", "capsule_digest", "graph_input_hash"])
+      && typeof sources.capsule_base64 === "string"
+      && facts.graph_report.capsule_digest === sources.capsule_digest
+      && facts.graph_report.graph_input_hash === sources.graph_input_hash
+      && object(native) && native.payload_sha256 === capture.payload_sha256
+      && native.payload_sha256 === createHash("sha256").update(payloadBytes).digest("hex")
+      && native.payload_bytes === payloadBytes.length
+      && native.captured_terminal_state === payload.expected.terminal_state
+      && Array.isArray(payload.host_effect_transcript)
+      && native.host_io_exchange_count === payload.host_effect_transcript.length;
+  } catch {
+    return false;
+  }
+}
+
+async function readGraphReportDigest(path) {
+  let file;
+  try {
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0)
+      | (fsConstants.O_CLOEXEC ?? 0) | (fsConstants.O_NOCTTY ?? 0);
+    file = await open(path, flags);
+    const metadata = await file.stat();
+    if (!metadata.isFile()) throw new VerifierError("GRAPH_REPORT_IO", "graph report must be a regular file");
+    if (metadata.size > MAX_SOURCE_GRAPH_REPORT_BYTES) {
+      throw new VerifierError("INPUT_TOO_LARGE", "source graph report exceeds its byte bound");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    while (true) {
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, MAX_SOURCE_GRAPH_REPORT_BYTES + 1 - total), null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > MAX_SOURCE_GRAPH_REPORT_BYTES) {
+        throw new VerifierError("INPUT_TOO_LARGE", "source graph report exceeds its byte bound");
+      }
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return hash.digest("hex");
+  } catch (error) {
+    if (error instanceof VerifierError) throw error;
+    throw new VerifierError("GRAPH_REPORT_IO", "cannot read a bounded regular source graph report");
+  } finally {
+    await file?.close().catch(() => {});
+  }
 }
 
 function publisherSourceValid(facts, anchor) {
@@ -594,10 +660,12 @@ function fleetFactsValid(facts, trusted, bytes, coordinator) {
 }
 
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
-  revocationAnchor, provenanceAnchor, evaluationTime, maxAge, incidentAnchor, expectedBaseline) {
+  revocationAnchor, provenanceAnchor, evaluationTime, maxAge, incidentAnchor, expectedBaseline,
+  graphReportRequested = false) {
   if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
   if (format === "publisher-source-trust") {
-    return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge);
+    return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge,
+      graphReportRequested);
   }
   if (format === "counterfactual-promotion") {
     const baselineScope = runtimeAnchor !== undefined ? "authenticated_runtime_incident"
@@ -652,7 +720,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
     "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
     "ltv-evidence": ["artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds", "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256", "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"],
   }[format];
-  if (format === "publisher-source" && object(facts) && Object.hasOwn(facts, "graph_report")) expected.push("graph_report");
+  if (["incident-bundle", "publisher-source"].includes(format) && graphReportRequested) expected.push("graph_report");
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
@@ -703,6 +771,8 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
       if (!runOriginValid(value, runAnchor)) return false;
     } else if (key === "runtime_origin") {
       if (!runtimeOriginValid(value, runtimeAnchor)) return false;
+    } else if (key === "graph_report") {
+      if (!sourceGraphCommitmentValid(value) || facts.native_capture === null) return false;
     } else if (key === "native_capture") {
       if (value !== null && (!keys(value, ["payload_sha256", "payload_bytes", "captured_terminal_state", "host_io_exchange_count"])
           || !hex(value.payload_sha256, 64) || !["completed", "uncaught_exception", "engine_failure"].includes(value.captured_terminal_state)
@@ -719,6 +789,10 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * signature and matching run data. Missing proof or downgraded scope fails.
  * trustedRuntimePublicKeyHex additionally requires the original product-root
  * and session signatures; it does not establish guest execution or cleanup.
+ * graphReport accepts a bounded regular SourceGraphReport file for incident
+ * and publisher-source formats. Its returned digest must match the caller-read
+ * bytes. Incident graph and capsule identities bind to the exact native capture.
+ * This preserves origin scope and never establishes parser/resolver semantics.
  * Counterfactual incidents require an independent incident exporter key and
  * caller-pinned raw lowercase baseline integrity hash. The primary key and
  * detached signature authenticate the receipt. Optional run/runtime keys
@@ -819,8 +893,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     throw new VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust");
   }
   if (graphReport !== undefined) {
-    if (!["publisher-source", "publisher-source-trust"].includes(format)) {
-      throw new VerifierError("INPUT_INVALID", "graph reports apply only to publisher-source formats");
+    if (!["incident-bundle", "publisher-source", "publisher-source-trust"].includes(format)) {
+      throw new VerifierError("INPUT_INVALID", "graph reports require an incident or publisher-source format");
     }
     if (typeof graphReport !== "string" || graphReport.length === 0 || graphReport.includes("\0")
         || Buffer.from(graphReport, "utf8").toString("utf8") !== graphReport) {
@@ -876,6 +950,9 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
   } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "this format does not accept a detached signature");
+  // Snapshot the witness before the child opens its path; a replacement or an
+  // invented response digest cannot satisfy this invocation's request.
+  const graphReportDigest = graphReport === undefined ? undefined : await readGraphReportDigest(graphReport);
   return new Promise((resolve, reject) => {
     const child = execFile(verifier, args, {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),
@@ -909,14 +986,15 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
             : sessionPolicy !== undefined ? sessionPolicyFactsValid(result.facts, anchor, sessionPolicy)
             : factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
               revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs,
-              incidentAnchor, expectedBaselineIntegrityHash))
+              incidentAnchor, expectedBaselineIntegrityHash, graphReport !== undefined))
           || (format === "ltv-evidence" && !ltvPolicyMatches(result.facts, bytes))) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }
       if (graphReport !== undefined) {
         const source = format === "publisher-source-trust" ? result.facts.source : result.facts;
-        if (!Object.hasOwn(source, "graph_report")) {
-          return reject(new VerifierError("PROTOCOL_INVALID", "verifier omitted the requested graph commitment"));
+        if (source.graph_report.report_sha256 !== graphReportDigest
+            || (format === "incident-bundle" && !incidentGraphMatches(source, bytes))) {
+          return reject(new VerifierError("PROTOCOL_INVALID", "graph commitment does not match the requested inputs"));
         }
       }
       if (expectedManifestSha256 !== undefined) {

@@ -29,6 +29,7 @@ MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
 MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024
+MAX_SOURCE_GRAPH_REPORT_BYTES = 32 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
@@ -162,7 +163,28 @@ class NativeCaptureMetadata(TypedDict):
     host_io_exchange_count: int
 
 
-class IncidentFacts(TypedDict):
+class SourceGraphCommitment(TypedDict):
+    """Recomputed commitment and source bindings, without resolver execution."""
+
+    schema_version: Literal["franken-verifier/source-graph-commitment/v1"]
+    graph_input_hash: str
+    graph_hash_recomputed: Literal[True]
+    graph_semantics_reconstructed: Literal[False]
+    capsule_digest: str
+    report_sha256: str
+    observation_count: int
+    module_count: int
+    resolution_target_count: int
+    edge_count: int
+    diagnostic_count: int
+    declared_fully_resolved: bool
+
+
+class _IncidentGraphFacts(TypedDict, total=False):
+    graph_report: SourceGraphCommitment
+
+
+class IncidentFacts(_IncidentGraphFacts):
     bundle_id: str
     incident_id: str
     created_at: str
@@ -532,7 +554,7 @@ def _instant_ns(value: Any) -> int | None:
 
 def _publisher_source_trust_valid(
     facts: Any, anchor: str, revocation_anchor: str | None, provenance_anchor: str | None,
-    evaluation_time: str | None, max_age: str | None,
+    evaluation_time: str | None, max_age: str | None, graph_report_requested: bool = False,
 ) -> bool:
     if not isinstance(facts, dict) or set(facts) != {
         "source", "revocation_list_sha256", "revocation_authority_public_key_hex",
@@ -549,7 +571,8 @@ def _publisher_source_trust_valid(
             or not 0 <= evaluated - issued < int(max_age) * 1_000_000_000
             or not _digest(facts["revocation_list_sha256"])
             or facts["revocation_authority_public_key_hex"] != revocation_anchor
-            or not _facts_valid(facts["source"], "publisher-source", anchor, None, None)):
+            or not _facts_valid(facts["source"], "publisher-source", anchor, None, None,
+                                graph_report_requested=graph_report_requested)):
         return False
     if provenance_anchor is None:
         return all(facts[name] is None for name in (
@@ -657,7 +680,7 @@ def _source_capsule_valid(summary: Any, capsule_limit: int, payload_limit: int) 
     )
 
 
-def _source_graph_commitment_valid(report: Any, source: dict[str, Any]) -> bool:
+def _source_graph_commitment_valid(report: Any, source: dict[str, Any] | None = None) -> bool:
     return (
         isinstance(report, dict)
         and set(report) == {
@@ -668,19 +691,91 @@ def _source_graph_commitment_valid(report: Any, source: dict[str, Any]) -> bool:
         and report["schema_version"] == "franken-verifier/source-graph-commitment/v1"
         and report["graph_hash_recomputed"] is True
         and report["graph_semantics_reconstructed"] is False
-        and report["graph_input_hash"] == source["capsule"]["graph_input_hash"]
-        and report["capsule_digest"] == source["capsule_digest"]
+        and _digest(report["graph_input_hash"]) and _digest(report["capsule_digest"])
         and isinstance(report["report_sha256"], str)
         and re.fullmatch(r"[0-9a-f]{64}", report["report_sha256"]) is not None
         and type(report["observation_count"]) is int
-        and report["observation_count"] == source["capsule"]["input_count"]
+        and 1 <= report["observation_count"] <= 1024
         and type(report["module_count"]) is int and 1 <= report["module_count"] <= 256
         and type(report["resolution_target_count"]) is int and 0 <= report["resolution_target_count"] <= 256
         and type(report["edge_count"]) is int and 0 <= report["edge_count"] <= 4096
         and type(report["diagnostic_count"]) is int and 0 <= report["diagnostic_count"] <= 4096
         and type(report["declared_fully_resolved"]) is bool
         and (not report["declared_fully_resolved"] or report["diagnostic_count"] == 0)
+        and (source is None or (
+            report["graph_input_hash"] == source["capsule"]["graph_input_hash"]
+            and report["capsule_digest"] == source["capsule_digest"]
+            and report["observation_count"] == source["capsule"]["input_count"]
+        ))
     )
+
+
+def _incident_graph_matches(facts: dict[str, Any], data: bytes) -> bool:
+    """Bind response facts to the original capture, without opening source paths."""
+    try:
+        envelope = json.loads(data.decode("utf-8"), object_pairs_hook=_object)
+        capture = envelope["initial_state_snapshot"]["native_replay"]
+        raw = capture["payload_json"]
+        if not isinstance(raw, str):
+            return False
+        payload_bytes = raw.encode("utf-8")
+        if not 0 < len(payload_bytes) <= 4 * 1024 * 1024:
+            return False
+        payload = json.loads(raw, object_pairs_hook=_object)
+        sources = payload["module_sources"]
+        native = facts["native_capture"]
+        return (
+            isinstance(sources, dict)
+            and set(sources) == {"capsule_base64", "capsule_digest", "graph_input_hash"}
+            and isinstance(sources["capsule_base64"], str)
+            and facts["graph_report"]["capsule_digest"] == sources["capsule_digest"]
+            and facts["graph_report"]["graph_input_hash"] == sources["graph_input_hash"]
+            and isinstance(native, dict)
+            and native["payload_sha256"] == capture["payload_sha256"]
+            == hashlib.sha256(payload_bytes).hexdigest()
+            and native["payload_bytes"] == len(payload_bytes)
+            and native["captured_terminal_state"] == payload["expected"]["terminal_state"]
+            and isinstance(payload["host_effect_transcript"], list)
+            and native["host_io_exchange_count"] == len(payload["host_effect_transcript"])
+        )
+    except (UnicodeError, ValueError, TypeError, KeyError, RecursionError):
+        return False
+
+
+def _read_graph_report_digest(path: str) -> str:
+    """Pin the bounded caller-read bytes before the verifier opens the path."""
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0),
+        )
+        try:
+            source = os.fdopen(descriptor, "rb")
+        except (OSError, TypeError, ValueError):
+            os.close(descriptor)
+            raise
+        with source:
+            metadata = os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("report is not a regular file")
+            if metadata.st_size > MAX_SOURCE_GRAPH_REPORT_BYTES:
+                raise VerifierError("INPUT_TOO_LARGE", "source graph report exceeds its byte bound")
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                block = source.read(min(64 * 1024, MAX_SOURCE_GRAPH_REPORT_BYTES + 1 - total))
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_SOURCE_GRAPH_REPORT_BYTES:
+                    raise VerifierError("INPUT_TOO_LARGE", "source graph report exceeds its byte bound")
+                digest.update(block)
+        return digest.hexdigest()
+    except VerifierError:
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError):
+        raise VerifierError("GRAPH_REPORT_IO", "cannot read a bounded regular source graph report") from None
 
 
 def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
@@ -1068,12 +1163,13 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None, revocation_anchor: str | None = None,
                  provenance_anchor: str | None = None, evaluation_time: str | None = None,
                  max_age: str | None = None, incident_anchor: str | None = None,
-                 expected_baseline: str | None = None) -> bool:
+                 expected_baseline: str | None = None, graph_report_requested: bool = False) -> bool:
     if format == "native-session-forensics":
         return _native_session_valid(facts, anchor)
     if format == "publisher-source-trust":
         return _publisher_source_trust_valid(
             facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
+            graph_report_requested,
         )
     if format == "counterfactual-promotion":
         baseline_scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
@@ -1157,7 +1253,7 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                          "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256",
                          "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"},
     }[format]
-    if format == "publisher-source" and "graph_report" in facts:
+    if format in ("incident-bundle", "publisher-source") and graph_report_requested:
         expected.add("graph_report")
     if run_anchor is not None:
         expected.add("run_origin")
@@ -1233,6 +1329,9 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         elif key == "runtime_origin":
             if runtime_anchor is None or not _runtime_origin_valid(value, runtime_anchor):
                 return False
+        elif key == "graph_report":
+            if not _source_graph_commitment_valid(value) or facts["native_capture"] is None:
+                return False
         elif key == "native_capture":
             if value is not None:
                 if not isinstance(value, dict) or set(value) != {
@@ -1282,9 +1381,11 @@ def verify_artifact(
 ) -> Verification:
     """Authenticate raw artifact bytes using an explicit trusted executable/key.
 
-    ``graph_report`` supplies a SourceGraphReport JSON file for publisher-source
-    formats. Its verified hash commitment is required in the response; this does
-    not independently reconstruct parser/resolver semantics or execute sources.
+    ``graph_report`` supplies a bounded regular SourceGraphReport JSON file for
+    incident-bundle or publisher-source formats. The returned commitment must
+    match the caller-read report bytes and authenticated capsule. Incidents bind
+    it to their exact retained native capture without changing origin scope.
+    This does not reconstruct parser/resolver semantics or execute sources.
     Supported formats and proof scopes are in ``_SCOPES``. Capsule verification
     re-derives signed content hashes; incident verification checks recorded
     evidence. Neither constitutes guest execution or original-policy replay.
@@ -1410,8 +1511,8 @@ def verify_artifact(
         raise VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust")
     graph_report_path = None
     if graph_report is not None:
-        if format not in ("publisher-source", "publisher-source-trust"):
-            raise VerifierError("INPUT_INVALID", "graph reports apply only to publisher-source formats")
+        if format not in ("incident-bundle", "publisher-source", "publisher-source-trust"):
+            raise VerifierError("INPUT_INVALID", "graph reports require an incident or publisher-source format")
         try:
             graph_report_path = os.fspath(graph_report)
             if not isinstance(graph_report_path, str) or not graph_report_path or "\0" in graph_report_path:
@@ -1489,6 +1590,9 @@ def verify_artifact(
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
         raise VerifierError("INPUT_INVALID", "this format does not accept a detached signature")
+    graph_report_digest = (
+        _read_graph_report_digest(graph_report_path) if graph_report_path is not None else None
+    )
     try:
         process = _run_bounded(args, data, timeout)
     except OSError as error:
@@ -1518,13 +1622,15 @@ def verify_artifact(
                     if session_policy is not None else
                     _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
                                  revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs,
-                                 incident_anchor, expected_baseline_integrity_hash))
+                                 incident_anchor, expected_baseline_integrity_hash,
+                                 graph_report_path is not None))
             or (format == "ltv-evidence" and not _ltv_policy_matches(result["facts"], data))):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     if graph_report_path is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
-        if "graph_report" not in source:
-            raise VerifierError("PROTOCOL_INVALID", "verifier omitted the requested graph commitment")
+        if (source["graph_report"]["report_sha256"] != graph_report_digest
+                or (format == "incident-bundle" and not _incident_graph_matches(source, data))):
+            raise VerifierError("PROTOCOL_INVALID", "graph commitment does not match the requested inputs")
     if expected_manifest_sha256 is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
         if (source["manifest_sha256"] != expected_manifest_sha256

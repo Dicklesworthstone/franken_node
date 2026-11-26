@@ -8,7 +8,10 @@ import sys
 import tempfile
 import time
 
-from franken_verifier import MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, VerifierError, verify_artifact
+from franken_verifier import (
+    MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, MAX_SOURCE_GRAPH_REPORT_BYTES,
+    VerifierError, verify_artifact,
+)
 
 
 def check_bounded_transport() -> int:
@@ -114,6 +117,11 @@ for case in cases:
         assert case["expected"] == "verified", case["name"]
         assert result["artifact_sha256"] == hashlib.sha256(data).hexdigest()
         if case["format"] == "incident-bundle":
+            if "incident_graph_report" in case:
+                assert result["facts"]["graph_report"] == case["incident_graph_report"], case["name"]
+                assert result["facts"]["native_capture"] is not None
+            else:
+                assert "graph_report" not in result["facts"]
             if case.get("run_anchor") is not None:
                 assert result["scope"] == ("authenticated_runtime_incident" if case.get("runtime_anchor") else "authenticated_run_incident")
                 assert result["facts"]["run_origin"]["signer_public_key_hex"] == case["run_anchor"].lower()
@@ -703,12 +711,15 @@ publisher_trust_inputs = [
     ("trust_missing_source_signature", {"signature_hex": None}, "SIGNATURE_MALFORMED"),
 ]
 # BEGIN publisher identity protocol controls (no cryptographic proof claims).
-graph_witness_path = "private graph; $(ignored).json"
+graph_witness_path = str(Path(tempfile.mkdtemp(prefix="franken-graph-witness-")) / "private graph; $(ignored).json")
+graph_witness_bytes = b"{}\n"
+Path(graph_witness_path).write_bytes(graph_witness_bytes)
 graph_witness_controls = [
     "ignored", "null", "wrong_schema", "not_recomputed", "semantic_claim", "wrong_graph", "wrong_capsule",
-    "prefixed_report_hash", "uppercase_report_hash", "newline_report_hash", "observation_mismatch", "boolean_count", "unsafe_count",
+    "wrong_report_hash", "prefixed_report_hash", "uppercase_report_hash", "newline_report_hash",
+    "observation_mismatch", "zero_observations", "too_many_observations", "boolean_count", "unsafe_count",
     "zero_modules", "too_many_targets", "negative_count", "nonboolean_resolution",
-    "inconsistent_resolution", "unknown_field", "missing_field",
+    "inconsistent_resolution", "unknown_field", "missing_field", "replaced_file",
 ]
 graph_client_cases = 0
 graph_protocol_cases = 0
@@ -724,15 +735,18 @@ for trusted in (False, True):
         else:
             raise AssertionError("invalid graph path reached the verifier")
         graph_client_cases += 1
-    forwarded = verify_artifact(json.dumps({"protocol_control": prefix + "forwarded"}).encode(),
+    forwarded = verify_artifact(json.dumps({"protocol_control": prefix + "forwarded",
+                                           "expected_graph_report_path": graph_witness_path}).encode(),
                                 cases[0]["anchor"], verifier=root / "fake_verifier",
                                 **options, graph_report=Path(graph_witness_path))
     source = forwarded["facts"]["source"] if trusted else forwarded["facts"]
     assert source["graph_report"]["graph_hash_recomputed"] is True
     assert source["graph_report"]["graph_semantics_reconstructed"] is False
+    assert source["graph_report"]["report_sha256"] == hashlib.sha256(graph_witness_bytes).hexdigest()
     assert source["graph_report"]["module_count"] > source["capsule"]["file_count"]
     graph_protocol_cases += 1
     for control in graph_witness_controls:
+        Path(graph_witness_path).write_bytes(graph_witness_bytes)
         try:
             verify_artifact(json.dumps({"protocol_control": prefix + control}).encode(),
                             cases[0]["anchor"], verifier=root / "fake_verifier",
@@ -743,14 +757,144 @@ for trusted in (False, True):
             raise AssertionError("unverified graph summary accepted: " + prefix + control)
         graph_protocol_cases += 1
         print(json.dumps({"case": prefix + control, "result": "PROTOCOL_INVALID"}), flush=True)
+    Path(graph_witness_path).write_bytes(graph_witness_bytes)
+    try:
+        verify_artifact(json.dumps({"protocol_control": prefix + "unsolicited"}).encode(),
+                        cases[0]["anchor"], verifier=root / "fake_verifier", **options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID"
+    else:
+        raise AssertionError("unsolicited publisher graph commitment accepted")
+    graph_protocol_cases += 1
 try:
     verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
-                    format="incident-bundle", graph_report=graph_witness_path)
+                    format="capsule", graph_report=graph_witness_path)
 except VerifierError as error:
     assert error.code == "INPUT_INVALID" and error.exit_code is None
 else:
-    raise AssertionError("graph report accepted for incident format")
+    raise AssertionError("graph report accepted for unsupported format")
 graph_client_cases += 1
+
+# These fake-child controls exercise the client contract, never signatures.
+incident_graph_payload = {
+    "module_sources": {"capsule_base64": "Y2Fwc3VsZQ==", "capsule_digest": "sha256:" + "c" * 64,
+                       "graph_input_hash": "sha256:" + "d" * 64},
+    "expected": {"terminal_state": "completed"}, "host_effect_transcript": [],
+}
+incident_graph_raw = json.dumps(incident_graph_payload, separators=(",", ":"))
+
+
+def incident_graph_input(action: str, raw: str = incident_graph_raw) -> bytes:
+    return json.dumps({
+        "protocol_control": "incident_graph_witness_" + action,
+        "expected_graph_report_path": graph_witness_path,
+        "initial_state_snapshot": {"native_replay": {
+            "schema_version": "franken-node/native-replay-capture/v3", "payload_json": raw,
+            "payload_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        }},
+    }).encode()
+
+
+incident_graph_controls = [control for control in graph_witness_controls if control != "observation_mismatch"]
+incident_graph_controls += ["missing_capture", "wrong_capture_hash", "wrong_capture_bytes",
+                            "wrong_capture_state", "wrong_capture_count", "wrong_scope"]
+for origins, expected_scope in (
+    ({}, "authenticated_recorded_incident"),
+    ({"trusted_run_public_key_hex": run_anchor}, "authenticated_run_incident"),
+    ({"trusted_run_public_key_hex": run_anchor, "trusted_runtime_public_key_hex": runtime_anchor},
+     "authenticated_runtime_incident"),
+):
+    Path(graph_witness_path).write_bytes(graph_witness_bytes)
+    verified = verify_artifact(incident_graph_input("forwarded"), cases[0]["anchor"],
+                               verifier=root / "fake_verifier", graph_report=Path(graph_witness_path), **origins)
+    assert verified["scope"] == expected_scope
+    assert verified["facts"]["graph_report"]["report_sha256"] == hashlib.sha256(graph_witness_bytes).hexdigest()
+    assert verified["facts"]["native_capture"]["captured_terminal_state"] == "completed"
+    assert ("run_origin" in verified["facts"]) == ("trusted_run_public_key_hex" in origins)
+    assert ("runtime_origin" in verified["facts"]) == ("trusted_runtime_public_key_hex" in origins)
+    graph_protocol_cases += 1
+    controls_for_scope = list(incident_graph_controls)
+    if "trusted_run_public_key_hex" in origins:
+        controls_for_scope += ["scope_downgrade", "missing_run_origin", "wrong_run_anchor"]
+    if "trusted_runtime_public_key_hex" in origins:
+        controls_for_scope += ["missing_runtime_origin", "wrong_runtime_anchor"]
+    for control in controls_for_scope:
+        Path(graph_witness_path).write_bytes(graph_witness_bytes)
+        try:
+            verify_artifact(incident_graph_input(control), cases[0]["anchor"],
+                            verifier=root / "fake_verifier", graph_report=graph_witness_path, **origins)
+        except VerifierError as error:
+            assert error.code == "PROTOCOL_INVALID" and graph_witness_path not in str(error), (control, error.code)
+        else:
+            raise AssertionError("forged incident graph facts accepted: " + control)
+        graph_protocol_cases += 1
+    try:
+        verify_artifact(incident_graph_input("unsolicited"), cases[0]["anchor"],
+                        verifier=root / "fake_verifier", **origins)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID"
+    else:
+        raise AssertionError("unsolicited incident graph commitment accepted")
+    graph_protocol_cases += 1
+
+Path(graph_witness_path).write_bytes(graph_witness_bytes)
+for raw in (
+    "{}",
+    incident_graph_raw.replace('"module_sources":', '"module_sources":{},"module_sources":', 1),
+    incident_graph_raw.replace('"module_sources":', '"module_sources":{},"module_\\u0073ources":', 1),
+    incident_graph_raw.replace('"capsule_base64":', '"unsigned_claim":true,"capsule_base64":', 1),
+):
+    try:
+        verify_artifact(incident_graph_input("valid", raw), cases[0]["anchor"],
+                        verifier=root / "fake_verifier", graph_report=graph_witness_path)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (raw, error.code)
+    else:
+        raise AssertionError("missing or ambiguous captured sources accepted")
+    graph_protocol_cases += 1
+missing_capture_input = json.dumps({"protocol_control": "incident_graph_witness_valid"}).encode()
+duplicate_capture_input = incident_graph_input("valid").replace(
+    b'"initial_state_snapshot":', b'"initial_state_snapshot":{},"initial_state_snapshot":', 1)
+for data in (missing_capture_input, duplicate_capture_input):
+    try:
+        verify_artifact(data, cases[0]["anchor"], verifier=root / "fake_verifier", graph_report=graph_witness_path)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID"
+    else:
+        raise AssertionError("missing or ambiguous incident capture accepted")
+    graph_protocol_cases += 1
+
+for path in ("", False, 7, [], {}, b"private-report.json", "private\0report", "\ud800"):
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist", graph_report=path)
+    except VerifierError as error:
+        assert error.code == "GRAPH_REPORT_INVALID" and error.exit_code is None
+    else:
+        raise AssertionError("invalid incident graph path reached the verifier")
+    graph_client_cases += 1
+graph_files = Path(tempfile.mkdtemp(prefix="franken-graph-input-"))
+oversized_graph = graph_files / "PRIVATE-oversized-report.json"
+with oversized_graph.open("wb") as graph_file:
+    graph_file.truncate(MAX_SOURCE_GRAPH_REPORT_BYTES + 1)
+graph_file_controls = [
+    (graph_files / "PRIVATE-absent-report.json", "GRAPH_REPORT_IO"),
+    (graph_files, "GRAPH_REPORT_IO"),
+    (oversized_graph, "INPUT_TOO_LARGE"),
+]
+if os.name == "posix":
+    graph_fifo = graph_files / "PRIVATE-report-pipe"
+    os.mkfifo(graph_fifo)
+    graph_file_controls.append((graph_fifo, "GRAPH_REPORT_IO"))
+for path, expected in graph_file_controls:
+    started = time.monotonic()
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist", graph_report=path)
+    except VerifierError as error:
+        assert error.code == expected and error.exit_code is None and "PRIVATE-" not in str(error), (path, error.code)
+    else:
+        raise AssertionError("unbounded or non-regular graph report accepted")
+    assert time.monotonic() - started < 2, "graph file admission must not block on a pipe"
+    graph_client_cases += 1
 
 identity_pins = {
     "expected_manifest_sha256": "sha256:" + "a" * 64,

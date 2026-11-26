@@ -219,8 +219,9 @@ re-export their retained authenticated public capture.
 
 ## Independently recompute an incident's source graph
 
-For an incident that retains native module sources, the Rust API and verifier
-CLI can also check the source-graph report against those authenticated bytes:
+For an incident that retains native module sources, the Rust API, verifier CLI,
+and Python and JavaScript/TypeScript clients can check the source-graph report
+against those authenticated bytes:
 
 ```bash
 franken-verifier verify --format incident-bundle \
@@ -263,6 +264,38 @@ returns `GRAPH_REPORT_INVALID`; an unreadable or non-regular witness file return
 or incorrect keys before a graph can be accepted. With no graph option, existing
 incident verification behavior and response fields are unchanged.
 
-The graph option for incidents is available through Rust and the CLI. The Python
-and JavaScript clients currently accept graph witnesses only for publisher-source
-verification; they do not yet expose this incident option.
+Python callers pass `graph_report="captured-source-graph.json"` to
+`verify_artifact`; JavaScript and TypeScript callers pass
+`graphReport: "captured-source-graph.json"` to `verifyArtifact`:
+
+```python
+verified = verify_artifact(
+    incident_bytes,
+    trusted_bundle_public_key_hex,
+    verifier="/trusted/bin/franken-verifier",
+    format="incident-bundle",
+    trusted_run_public_key_hex=trusted_run_public_key_hex,
+    trusted_runtime_public_key_hex=trusted_product_root_public_key_hex,
+    graph_report="captured-source-graph.json",
+)
+assert verified["facts"]["graph_report"]["graph_hash_recomputed"] is True
+```
+
+```javascript
+const verified = await verifyArtifact(incidentBytes, trustedBundlePublicKeyHex, {
+  verifier: "/trusted/bin/franken-verifier",
+  format: "incident-bundle",
+  trustedRunPublicKeyHex,
+  trustedRuntimePublicKeyHex: trustedProductRootPublicKeyHex,
+  graphReport: "captured-source-graph.json",
+});
+```
+
+Both clients hash bounded regular report files before invoking the verifier and
+require the returned digest to match those exact caller-read bytes. A changed
+report, omitted requested commitment, or unsolicited commitment is rejected with
+`PROTOCOL_INVALID`. The clients also bind incident graph identities and native
+capture metadata to the original input bytes, preserving the selected exporter,
+run-authority, or product-root scope. The same report-byte binding applies to
+publisher-source verification. Neither client opens paths recorded inside the
+artifact or source graph.
