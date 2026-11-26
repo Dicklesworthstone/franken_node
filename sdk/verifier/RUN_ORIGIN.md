@@ -216,3 +216,53 @@ and unsupported schema or provenance are rejected, with diagnostics that do
 not include private captured values. Older exports without a portable identity
 retain their previous narrower verification scope until the product can
 re-export their retained authenticated public capture.
+
+## Independently recompute an incident's source graph
+
+For an incident that retains native module sources, the Rust API and verifier
+CLI can also check the source-graph report against those authenticated bytes:
+
+```bash
+franken-verifier verify --format incident-bundle \
+  --trusted-key-hex "$BUNDLE_PUBLIC_KEY_HEX" \
+  --trusted-run-key-hex "$RUN_PUBLIC_KEY_HEX" \
+  --trusted-runtime-key-hex "$PRODUCT_ROOT_PUBLIC_KEY_HEX" \
+  --graph-report captured-source-graph.json < incident.fnbundle
+```
+
+The run and product-root options select the same authority scopes described
+above. Omitting both retains exporter-only incident authentication. The graph
+option never supplies a trust key or upgrades the selected origin scope.
+
+Rust callers use
+`incident_bundle::verify_incident_bundle_with_graph_report(bytes,
+bundle_key, run_key, product_root_key, graph_report_bytes)`, where the run and
+product-root keys are optional references. A product-root key requires a run
+key. The returned `VerifiedIncidentBundleWithSourceGraph` carries the verified
+bundle, any authenticated origins, and a `graph_report` commitment summary.
+
+The SDK extracts the source capsule from the exact signed native capture; it
+does not accept a replacement capsule from the caller. It independently rehashes
+the v2/v3 report, binds the report's observations, modules and package-map input
+hashes to the retained capsule, and checks the entrypoint and graph commitment.
+The report file is bounded to 32 MiB and opened nonblocking as a regular file.
+Captured paths are never opened or extracted. Returned facts contain hashes and
+counts, without private source code, paths or resolution specifiers.
+
+Success adds `facts.graph_report` with `graph_hash_recomputed: true`,
+`graph_semantics_reconstructed: false`, the exact witness `report_sha256`, and
+the authenticated capsule digest and graph identity. The
+`declared_fully_resolved` field remains the producer's claim. Rehashing proves
+commitment and source-byte consistency; it does not rerun the parser/resolver,
+prove complete dependency discovery, execute the guest or certify cleanup.
+
+A historical incident without native module sources returns
+`GRAPH_REPORT_MISSING`. A malformed, altered, ambiguous or mismatched witness
+returns `GRAPH_REPORT_INVALID`; an unreadable or non-regular witness file returns
+`GRAPH_REPORT_IO`. Requested origin authentication still fails on absent records
+or incorrect keys before a graph can be accepted. With no graph option, existing
+incident verification behavior and response fields are unchanged.
+
+The graph option for incidents is available through Rust and the CLI. The Python
+and JavaScript clients currently accept graph witnesses only for publisher-source
+verification; they do not yet expose this incident option.

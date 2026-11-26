@@ -23,8 +23,8 @@ use frankenengine_verifier_sdk::fleet_quiescence::{
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
     VerifiedIncidentBundle, VerifiedRunOrigin, VerifiedRuntimeOrigin, decode_evidence_json,
-    verify_incident_bundle, verify_incident_bundle_with_run_key,
-    verify_incident_bundle_with_runtime_keys,
+    verify_incident_bundle, verify_incident_bundle_with_graph_report,
+    verify_incident_bundle_with_run_key, verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
     MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionExpectedIdentity,
@@ -382,7 +382,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     if graph_report_path.is_some()
         && !matches!(
             format.as_str(),
-            "publisher-source" | "publisher-source-trust"
+            "incident-bundle" | "publisher-source" | "publisher-source-trust"
         )
     {
         return Err(usage());
@@ -690,6 +690,8 @@ fn incident_failure(error: &IncidentBundleError) -> Failure {
         IncidentBundleError::SignatureInvalid => "SIGNATURE_INVALID",
         IncidentBundleError::IntegrityMismatch { .. } => "INTEGRITY_MISMATCH",
         IncidentBundleError::DecisionSequenceMismatch { .. } => "DECISION_SEQUENCE_MISMATCH",
+        IncidentBundleError::SourceGraphMissing => "GRAPH_REPORT_MISSING",
+        IncidentBundleError::SourceGraphInvalid => "GRAPH_REPORT_INVALID",
         IncidentBundleError::RunOriginMissing => "RUN_ORIGIN_MISSING",
         IncidentBundleError::RunOriginInvalid { .. } => "RUN_ORIGIN_INVALID",
         IncidentBundleError::RunOriginSignatureMalformed => "RUN_ORIGIN_SIGNATURE_MALFORMED",
@@ -1127,6 +1129,23 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             )
         }
         "incident-bundle" => {
+            if let Some(report) = &request.graph_report {
+                let verified = verify_incident_bundle_with_graph_report(
+                    bytes,
+                    trusted_key,
+                    request.run_anchor.as_ref(),
+                    request.runtime_anchor.as_ref(),
+                    &report.bytes,
+                )
+                .map_err(|error| incident_failure(&error))?;
+                let mut response = incident_verification_response(
+                    verified.bundle,
+                    verified.run_origin,
+                    verified.runtime_origin,
+                );
+                response["facts"]["graph_report"] = json!(verified.graph_report);
+                return Ok(response);
+            }
             let (verified, run_origin, runtime_origin) =
                 match (&request.run_anchor, &request.runtime_anchor) {
                     (Some(run_anchor), Some(runtime_anchor)) => {
@@ -2258,6 +2277,49 @@ mod tests {
         let error = run(&malformed, &mut input.as_slice()).unwrap_err();
         assert_eq!(error.code, "GRAPH_REPORT_INVALID");
         assert!(!error.message.contains("node_modules"));
+    }
+
+    #[test]
+    fn incident_graph_witness_cannot_be_ignored_or_weaken_requested_authority() {
+        let report_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/module_source_graph_workspace_report.json"
+        );
+        let mut arguments = args("incident-bundle", ANCHOR);
+        arguments.extend(["--graph-report".into(), report_path.into()]);
+
+        // This real historical CLI bundle remains verifiable without a graph
+        // requirement. Supplying a witness must not silently retain that weaker
+        // success when no native source capsule exists.
+        assert_eq!(
+            run(&args("incident-bundle", ANCHOR), &mut &*FIXTURE).unwrap()["verdict"],
+            "verified"
+        );
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "GRAPH_REPORT_MISSING"
+        );
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
+        let mut foreign = args(
+            "incident-bundle",
+            &hex::encode(stranger.verifying_key().as_bytes()),
+        );
+        foreign.extend(["--graph-report".into(), report_path.into()]);
+        assert_eq!(
+            run(&foreign, &mut &*FIXTURE).unwrap_err().code,
+            "SIGNER_UNTRUSTED"
+        );
+
+        arguments.extend(["--trusted-run-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "RUN_ORIGIN_MISSING"
+        );
+        arguments.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(
+            run(&arguments, &mut &*FIXTURE).unwrap_err().code,
+            "RUN_ORIGIN_MISSING"
+        );
     }
 
     #[test]
