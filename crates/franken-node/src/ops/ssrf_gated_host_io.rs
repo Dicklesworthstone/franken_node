@@ -861,6 +861,12 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
         self.inner.filesystem_exception_provenance()
     }
 
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner.network_revocation()
+    }
+
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         let (endpoint, use_tls) = match request {
             HostIoRequest::NetworkSend { endpoint, .. }
@@ -1576,5 +1582,37 @@ mod tests {
         assert_eq!(audit.len(), 2);
         assert!(audit.iter().all(|entry| entry.action == Action::Deny
             && entry.cidr_matched.as_deref() == Some("dns_resolution_refused")));
+    }
+
+    #[test]
+    fn ssrf_gate_delegates_network_revocation_handle_to_inner_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let inner = SandboxedHostIo::with_root(root.path()).unwrap();
+        let inner_revocation = inner.network_revocation();
+        let gate = SsrfGatedHostIo::from_network_policy(
+            inner,
+            &NetworkPolicyConfig::default(),
+            "delegated-revocation",
+        );
+        let delegated = gate
+            .network_revocation()
+            .expect("SsrfGatedHostIo must delegate SandboxedHostIo network revocation handle");
+        assert!(!inner_revocation.is_revoked());
+        delegated.revoke();
+        assert!(inner_revocation.is_revoked());
+        let dns_outcome = gate.perform(
+            &request("must-not-resolve.invalid:443", true),
+            &[HostIoCapability::NetworkSend],
+        );
+        assert!(matches!(dns_outcome, Err(HostIoError::Denied { reason })
+            if reason.contains("dns_resolution_refused")));
+        let literal_outcome = gate.perform(
+            &request("93.184.216.34:443", false),
+            &[HostIoCapability::NetworkSend],
+        );
+        assert!(
+            matches!(literal_outcome, Err(HostIoError::Denied { reason })
+            if reason.contains("revoked"))
+        );
     }
 }

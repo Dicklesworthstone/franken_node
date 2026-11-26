@@ -1034,8 +1034,7 @@ pub(super) fn prepare_runtime_evidence_directories(
     ensure_runtime_evidence_directory(&product_state_root, true)?;
     ensure_runtime_evidence_directory(&state_root, true)?;
     validate_runtime_evidence_protected_root(
-        &state_root
-            .canonicalize()
+        &canonicalize_under_known_canonical_root(&state_root, &state_home)
             .context("resolve runtime evidence protected state root")?,
         guest_project_root,
     )?;
@@ -3039,6 +3038,12 @@ impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
         self.inner.filesystem_exception_provenance()
     }
 
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner.network_revocation()
+    }
+
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         self.write_ahead(request, || self.inner.perform(request, granted))
     }
@@ -3065,6 +3070,17 @@ impl<P: crate::ops::ssrf_gated_host_io::PinnedNetworkProvider>
 
     fn supports_pinned_tls(&self) -> bool {
         self.inner.supports_pinned_tls()
+    }
+
+    fn resolve_pinned_endpoint_until(
+        &self,
+        host: &str,
+        port: u16,
+        deadline: std::time::Instant,
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> std::io::Result<Vec<std::net::IpAddr>> {
+        self.inner
+            .resolve_pinned_endpoint_until(host, port, deadline, control)
     }
 
     fn perform_pinned_network(
@@ -3366,6 +3382,7 @@ fn receive_native_session_request_writer(
 struct CancellationGatedHostIo {
     inner: Arc<dyn HostIoProvider>,
     cancellation: NativeEngineCancellation,
+    fallback_network_revocation: Option<frankenengine_extension_host::host_io::NetworkRevocation>,
 }
 
 #[cfg(feature = "engine")]
@@ -3374,7 +3391,16 @@ impl CancellationGatedHostIo {
         Self {
             inner,
             cancellation,
+            fallback_network_revocation: None,
         }
+    }
+
+    fn with_fallback_network_revocation(
+        mut self,
+        revocation: Option<frankenengine_extension_host::host_io::NetworkRevocation>,
+    ) -> Self {
+        self.fallback_network_revocation = revocation;
+        self
     }
 }
 
@@ -3386,6 +3412,14 @@ impl HostIoProvider for CancellationGatedHostIo {
 
     fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
         self.inner.filesystem_exception_provenance()
+    }
+
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner
+            .network_revocation()
+            .or_else(|| self.fallback_network_revocation.clone())
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
@@ -3615,6 +3649,12 @@ impl HostIoProvider for PublisherAuthorityHostIo {
         self.inner.filesystem_exception_provenance()
     }
 
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner.network_revocation()
+    }
+
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         self.authority.authorize(request, granted)?;
         self.inner.perform(request, granted)
@@ -3745,6 +3785,10 @@ fn compose_native_host_io_with_declassifications<P: HostIoProvider + 'static>(
     use crate::ops::flow_gated_host_io::FlowGatedHostIo;
 
     let trace_id = trace_id.into();
+    // Retain the inner live network-revocation handle before optional
+    // EnvironmentSnapshotHostIo wrapping so containment revocation reaches the
+    // underlying SandboxedHostIo even when an environment allowlist is active.
+    let inner_network_revocation = inner.network_revocation();
     // Arc<dyn HostIoProvider> is not itself a HostIoProvider implementation.
     // Wrap each concrete source first, then erase the two flow-gate types.
     let flow_gated: Arc<dyn HostIoProvider> = match environment_snapshot {
@@ -3766,10 +3810,10 @@ fn compose_native_host_io_with_declassifications<P: HostIoProvider + 'static>(
         }),
         None => flow_gated,
     };
-    Ok(Arc::new(CancellationGatedHostIo::new(
-        authority_gated,
-        cancellation,
-    )))
+    Ok(Arc::new(
+        CancellationGatedHostIo::new(authority_gated, cancellation)
+            .with_fallback_network_revocation(inner_network_revocation),
+    ))
 }
 
 #[cfg(all(feature = "engine", test))]
@@ -8962,6 +9006,12 @@ impl HostIoProvider for AttributingHostIoProvider {
 
     fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
         self.inner.filesystem_exception_provenance()
+    }
+
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner.network_revocation()
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
@@ -31015,6 +31065,104 @@ exec "$2" pinned-worker-image"#,
                     .with_operator_protected_paths(vec![dangling])
                     .is_err()
             );
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn composed_native_host_io_stack_propagates_network_revocation_with_and_without_env_snapshot() {
+        use crate::extensions::artifact_contract::EffectiveCapabilityCeiling;
+        use crate::ops::operator_state_gated_host_io::OperatorStateGatedHostIo;
+        use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
+        use frankenengine_extension_host::host_io::{
+            HostIoCapability, HostIoError, HostIoProvider, HostIoRequest, SandboxedHostIo,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+
+        for env_snapshot in [
+            None,
+            Some(BTreeMap::from([(
+                "APP_ENV".to_string(),
+                "prod".to_string(),
+            )])),
+        ] {
+            for with_publisher_ceiling in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let sandboxed = SandboxedHostIo::with_root(root.path()).unwrap();
+                let innermost_revocation = sandboxed.network_revocation();
+                let wal = super::WriteAheadHostIo::new(sandboxed, None);
+                let ssrf = SsrfGatedHostIo::from_network_policy(
+                    wal,
+                    &crate::config::NetworkPolicyConfig::default(),
+                    "full-stack-revocation",
+                );
+                let op_state = OperatorStateGatedHostIo::new(ssrf, root.path(), &[]).unwrap();
+                let publisher_ceiling =
+                    with_publisher_ceiling.then(|| EffectiveCapabilityCeiling {
+                        contract_id: "full-stack-revocation".to_string(),
+                        allowed_capabilities: BTreeSet::from(["network_egress".to_string()]),
+                        max_calls_per_epoch: BTreeMap::from([("network_egress".to_string(), 16)]),
+                        capability_scopes: BTreeMap::from([(
+                            "network_egress".to_string(),
+                            "network:egress".to_string(),
+                        )]),
+                        path_prefixes: None,
+                        host_ports: None,
+                        env_keys: None,
+                        module_scope_prefix: None,
+                    });
+                let composed = super::compose_native_host_io_with_declassifications(
+                    op_state,
+                    env_snapshot.clone(),
+                    "full-stack-revocation",
+                    super::NativeEngineCancellation::new(),
+                    None,
+                    publisher_ceiling,
+                )
+                .unwrap();
+                let tracker = Arc::new(
+                    super::RuntimePackageAttributionTracker::from_captured_resolver(
+                        root.path(),
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        &[],
+                        &super::CapturedPackageIdentities {
+                            manifests: BTreeMap::new(),
+                        },
+                    ),
+                );
+                let outer: Arc<dyn HostIoProvider> = Arc::new(super::AttributingHostIoProvider {
+                    inner: composed,
+                    tracker,
+                });
+                let propagated = outer.network_revocation().expect(
+                    "full native HostIoProvider stack must expose SandboxedHostIo network revocation",
+                );
+                assert!(!innermost_revocation.is_revoked());
+                propagated.revoke();
+                assert!(innermost_revocation.is_revoked());
+                let dns_outcome = outer.perform(
+                    &HostIoRequest::NetworkSend {
+                        endpoint: "must-not-resolve.invalid:443".to_string(),
+                        payload: b"ping".to_vec(),
+                    },
+                    &[HostIoCapability::NetworkSend],
+                );
+                assert!(
+                    matches!(dns_outcome, Err(HostIoError::Denied { reason }) if reason.contains("dns_resolution_refused")),
+                    "revoking through outermost provider must refuse DNS resolution (env_snapshot={env_snapshot:?}, ceiling={with_publisher_ceiling})"
+                );
+                let literal_outcome = outer.perform(
+                    &HostIoRequest::NetworkSend {
+                        endpoint: "93.184.216.34:443".to_string(),
+                        payload: b"ping".to_vec(),
+                    },
+                    &[HostIoCapability::NetworkSend],
+                );
+                assert!(
+                    matches!(literal_outcome, Err(HostIoError::Denied { reason }) if reason.contains("revoked")),
+                    "revoking through outermost provider must refuse literal IP egress at SandboxedHostIo (env_snapshot={env_snapshot:?}, ceiling={with_publisher_ceiling})"
+                );
+            }
         }
     }
 }

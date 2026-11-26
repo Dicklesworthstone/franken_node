@@ -559,6 +559,12 @@ impl<P: HostIoProvider> HostIoProvider for OperatorStateGatedHostIo<P> {
         self.inner.filesystem_exception_provenance()
     }
 
+    fn network_revocation(
+        &self,
+    ) -> Option<frankenengine_extension_host::host_io::NetworkRevocation> {
+        self.inner.network_revocation()
+    }
+
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         self.dispatch(request, granted, || self.inner.perform(request, granted))
     }
@@ -1195,5 +1201,19 @@ mod tests {
         fs::write(root.join("ordinary"), b"replacement").unwrap();
         assert_refused(&gate, &read("ordinary"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn operator_state_gate_delegates_network_revocation_handle_to_inner_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let inner = SandboxedHostIo::with_root(root.path()).unwrap();
+        let inner_revocation = inner.network_revocation();
+        let gate = OperatorStateGatedHostIo::new(inner, root.path(), &[]).unwrap();
+        let delegated = gate
+            .network_revocation()
+            .expect("OperatorStateGatedHostIo must delegate network revocation handle");
+        assert!(!inner_revocation.is_revoked());
+        delegated.revoke();
+        assert!(inner_revocation.is_revoked());
     }
 }

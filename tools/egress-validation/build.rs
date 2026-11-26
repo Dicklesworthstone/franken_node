@@ -66,14 +66,14 @@ fn main() {
     let mut helpers = 0;
     for item in parse(&root.join("lib.rs")).items {
         if matches!(&item, Item::Fn(item) if matches!(item.sig.ident.to_string().as_str(),
-            "push_bounded" | "bounded_read" | "bounded_reader_limit" | "len_to_u64_saturating" | "file_too_large_error"))
+            "push_bounded" | "open_bounded_regular_file" | "bounded_read" | "bounded_reader_limit" | "len_to_u64_saturating" | "file_too_large_error"))
         {
             helpers += 1;
             declarations.push_str(&item.into_token_stream().to_string());
             declarations.push('\n');
         }
     }
-    assert_eq!(helpers, 5, "production bounded helper inventory changed");
+    assert_eq!(helpers, 6, "production bounded helper inventory changed");
     declarations.push_str(&module(&root, "capacity_defaults", "capacity_defaults.rs"));
     declarations.push_str("pub mod security {\n");
     for name in [

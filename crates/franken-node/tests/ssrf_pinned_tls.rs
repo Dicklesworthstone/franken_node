@@ -670,7 +670,16 @@ fn ipv6_literal_https_rejects_trusted_wrong_ip_certificates_before_application_b
         &[HostIoCapability::NetworkSend],
     );
     let peer = server.join().unwrap();
-    assert!(matches!(result, Err(HostIoError::Io { .. })), "{result:?}");
+    assert!(
+        matches!(
+            result,
+            Err(HostIoError::TlsTrust {
+                reason: TlsTrustFailure::NameMismatch,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
     assert!(peer.request.is_empty());
     assert!(peer.sni.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -766,10 +775,20 @@ fn tls_authentication_and_partial_http_failures_never_replay_on_another_candidat
         let original = request("localhost", first.port(), 4096);
         let result = gate.perform(&original, &[HostIoCapability::NetworkSend]);
         let peer = server.join().unwrap();
-        assert!(matches!(result, Err(HostIoError::Io { .. })), "{result:?}");
         if wrong_identity {
+            assert!(
+                matches!(
+                    result,
+                    Err(HostIoError::TlsTrust {
+                        reason: TlsTrustFailure::NameMismatch,
+                        ..
+                    })
+                ),
+                "{result:?}"
+            );
             assert!(peer.request.is_empty());
         } else {
+            assert!(matches!(result, Err(HostIoError::Io { .. })), "{result:?}");
             let HostIoRequest::NetworkRequest { payload, .. } = original else {
                 unreachable!()
             };
