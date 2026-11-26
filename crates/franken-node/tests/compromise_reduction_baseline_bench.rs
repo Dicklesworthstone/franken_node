@@ -62,6 +62,7 @@ const ARTIFACT_RELATIVE_PATH: &str = "artifacts/adversarial/compromise_reduction
 const TRUST_CARD_REGISTRY_RELATIVE_PATH: &str = ".franken-node/state/trust-card-registry.v1.json";
 const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [0x43; 32];
 const RUNTIME_TIMEOUT: Duration = Duration::from_secs(12);
+const NATIVE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(30);
 const HOST_SECRET: &str = "fn-campaign-host-secret-7f3a9c2b";
 const CURRENT_SIGNATURE_DOMAIN: &[u8] = b"franken-node:compromise-campaign-signature:v3:";
 const CURRENT_CORPUS_DOMAIN: &[u8] = b"franken-node:compromise-campaign-corpus:v3:";
@@ -1070,7 +1071,7 @@ fn run_franken_profile(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|err| panic!("spawn franken {profile} for {}: {err}", fixture.case_id));
-    let output = wait_for_output(child, RUNTIME_TIMEOUT);
+    let output = wait_for_output(child, NATIVE_RUNTIME_TIMEOUT);
     thread::sleep(Duration::from_millis(300));
     classify_franken(fixture, &output, &host_dir, &sink, root)
 }
@@ -1343,10 +1344,12 @@ fn current_corpus_digest(inventory: &[Value]) -> String {
 /// its owned project/oracle/state directories are visible. In particular the
 /// external signing key, context, parent /proc and other legs are absent.
 fn current_sandbox(binary: &Path, project: &Path, host: &Path, state: &Path) -> Command {
-    assert!(
-        cfg!(target_os = "linux"),
-        "current campaign requires Linux bwrap"
-    );
+    const {
+        assert!(
+            cfg!(target_os = "linux"),
+            "current campaign requires Linux bwrap"
+        );
+    }
     let mut command = Command::new("/usr/bin/bwrap");
     command.args(["--die-with-parent", "--unshare-pid", "--new-session"]);
     for path in ["/usr", "/lib", "/lib64", "/bin", "/etc/passwd"] {
@@ -1368,6 +1371,29 @@ fn current_sandbox(binary: &Path, project: &Path, host: &Path, state: &Path) -> 
     command
 }
 
+fn ledger_fs_confinement_reasons(report: &Value) -> Vec<String> {
+    report["dispatch"]
+        .get("host_effect_ledger")
+        .or_else(|| report.get("host_effect_ledger"))
+        .unwrap_or(&Value::Null)["entries"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry["receipt"]["effect_kind"].as_str(),
+                        Some("fs_read" | "fs_write" | "fs_meta")
+                    ) && entry["receipt"]["policy_outcome"]["outcome"] == "failed"
+                })
+                .filter_map(|entry| entry["receipt"]["policy_outcome"]["reason"].as_str())
+                .filter(|reason| reason.contains("resolve parent for /"))
+                .map(|reason| reason.chars().take(512).collect::<String>())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn current_native_classification(
     report: Option<&Value>,
     control: bool,
@@ -1382,11 +1408,60 @@ fn current_native_classification(
             false,
         );
     }
-    // Only structured effect receipts establish runtime containment. Generic
-    // interpreter errors, unsupported syntax and startup failures remain invalid.
+    // Only structured effect receipts or typed run-failure-effect-evidence/v2
+    // security refusals establish containment. Generic interpreter errors,
+    // unsupported syntax and startup failures remain invalid.
     let denials = report.map(ledger_denial_reasons).unwrap_or_default();
     if control && exit_code.is_some_and(|code| code != 0) && !denials.is_empty() {
         return ("contained", "runtime_containment", denials.join("; "), true);
+    }
+    if let Some(report) = report
+        && exit_code.is_some_and(|code| code != 0)
+        && report["schema_version"].as_str() == Some("franken-node/run-failure-effect-evidence/v2")
+    {
+        if control {
+            let fs_confinement = ledger_fs_confinement_reasons(report);
+            if !fs_confinement.is_empty() {
+                return (
+                    "contained",
+                    "runtime_containment",
+                    fs_confinement.join("; "),
+                    true,
+                );
+            }
+        }
+        if let Some(error) = report["error"].as_str() {
+            let summary: String = error
+                .lines()
+                .next()
+                .unwrap_or(error)
+                .trim()
+                .chars()
+                .take(512)
+                .collect();
+            if !summary.is_empty() {
+                if summary.contains("interpreter: capability denied: ") {
+                    if summary.to_ascii_lowercase().contains("confidentiality") {
+                        return ("ifc_denied", "ifc_gate", summary, control);
+                    }
+                    return ("capability_denied", "capability_gate", summary, control);
+                }
+                if !control
+                    && (summary.contains("lowering: ambient authority violation:")
+                        || (summary.contains(
+                            "Frozen module source admission failed: ERR_MODULE_REGISTRY_INCOMPLETE:",
+                        ) && (summary.contains("DYNAMIC_CODE_OR_LOADER")
+                            || summary.contains("INDIRECT_CREATE_REQUIRE"))))
+                {
+                    return (
+                        "blocked_at_lowering",
+                        "ambient_authority_denied",
+                        summary,
+                        false,
+                    );
+                }
+            }
+        }
     }
     if control && exit_code == Some(0) && denials.is_empty() {
         return (
@@ -1440,7 +1515,12 @@ fn current_measure_leg(
     let child = command
         .spawn()
         .expect("spawn isolated current campaign leg");
-    let output = wait_for_output(child, RUNTIME_TIMEOUT);
+    let timeout = if native {
+        NATIVE_RUNTIME_TIMEOUT
+    } else {
+        RUNTIME_TIMEOUT
+    };
+    let output = wait_for_output(child, timeout);
     fs::write(leg.join("stdout.bin"), &output.stdout).expect("retain raw stdout");
     fs::write(leg.join("stderr.bin"), &output.stderr).expect("retain raw stderr");
     thread::sleep(Duration::from_millis(300));
@@ -1491,7 +1571,9 @@ fn current_campaign() {
     let context: Value =
         serde_json::from_slice(&fs::read(context_path).expect("read expected context"))
             .expect("decode expected context");
-    let source = option_env!("RCH_BUILD_SOURCE").expect("current campaign must be compiled by RCH");
+    let Some(source) = option_env!("RCH_BUILD_SOURCE") else {
+        panic!("current campaign must be compiled by RCH");
+    };
     assert_eq!(
         context["source_selection"], source,
         "exact RCH source selection"
@@ -1826,6 +1908,114 @@ fn current_campaign_does_not_classify_generic_failures_as_security() {
     assert_eq!(
         current_native_classification(denial.get("dispatch"), true, false, Some(1)).0,
         "contained"
+    );
+
+    // Structured run-failure-effect-evidence/v2 generic errors and plain parse
+    // errors must still classify as invalid.
+    let generic_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Native execution failed: interpreter: unsupported syntax",
+        "captured_output": {"stdout": "FN_CONTROL:test\n", "stderr": ""},
+        "host_effect_ledger": null
+    });
+    for control in [true, false] {
+        assert_eq!(
+            current_native_classification(Some(&generic_v2), control, false, Some(1)).0,
+            "invalid"
+        );
+    }
+    let parse_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Frozen module source admission failed: ERR_MODULE_REGISTRY_INCOMPLETE: source delivery requires a closed graph (diagnostics: JAVASCRIPT_PARSE_ERROR at index.js:1)",
+        "captured_output": {"stdout": "", "stderr": ""},
+        "host_effect_ledger": null
+    });
+    assert_eq!(
+        current_native_classification(Some(&parse_v2), false, false, Some(1)).0,
+        "invalid"
+    );
+
+    // Typed runtime capability refusal after positive control counts as executed containment.
+    let cap_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded.",
+        "captured_output": {"stdout": "FN_CONTROL:test\n", "stderr": ""},
+        "host_effect_ledger": {"entries": []}
+    });
+    let (outcome, control_name, _, contained) =
+        current_native_classification(Some(&cap_v2), true, false, Some(1));
+    assert_eq!(outcome, "capability_denied");
+    assert_eq!(control_name, "capability_gate");
+    assert!(contained);
+    // Without the positive control, a capability refusal cannot count as executed containment.
+    assert!(!current_native_classification(Some(&cap_v2), false, false, Some(1)).3);
+
+    // Typed IFC confidentiality refusal maps to ifc_denied / ifc_gate.
+    let ifc_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Native execution failed: interpreter: capability denied: console:log:confidentiality",
+        "captured_output": {"stdout": "FN_CONTROL:test\n", "stderr": ""},
+        "host_effect_ledger": {"entries": []}
+    });
+    let (outcome, control_name, _, contained) =
+        current_native_classification(Some(&ifc_v2), true, false, Some(1));
+    assert_eq!(outcome, "ifc_denied");
+    assert_eq!(control_name, "ifc_gate");
+    assert!(contained);
+
+    // Preventive lowering/admission refusals classify as blocked_at_lowering only when control=false.
+    let ambient_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process'",
+        "captured_output": {"stdout": "", "stderr": ""},
+        "host_effect_ledger": null
+    });
+    let (outcome, control_name, _, contained) =
+        current_native_classification(Some(&ambient_v2), false, false, Some(1));
+    assert_eq!(outcome, "blocked_at_lowering");
+    assert_eq!(control_name, "ambient_authority_denied");
+    assert!(!contained);
+    assert_eq!(
+        current_native_classification(Some(&ambient_v2), true, false, Some(1)).0,
+        "invalid"
+    );
+
+    let dyn_loader_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Frozen module source admission failed: ERR_MODULE_REGISTRY_INCOMPLETE: source delivery requires a closed graph (diagnostics: DYNAMIC_CODE_OR_LOADER at index.js:2)",
+        "captured_output": {"stdout": "", "stderr": ""},
+        "host_effect_ledger": null
+    });
+    assert_eq!(
+        current_native_classification(Some(&dyn_loader_v2), false, false, Some(1)).0,
+        "blocked_at_lowering"
+    );
+
+    // Signed host_effect_ledger filesystem confinement receipt counts as runtime containment only with control=true.
+    let fs_jail_v2 = json!({
+        "schema_version": "franken-node/run-failure-effect-evidence/v2",
+        "error": "Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for /etc/passwd",
+        "captured_output": {"stdout": "FN_CONTROL:test\n", "stderr": ""},
+        "host_effect_ledger": {
+            "entries": [{
+                "receipt": {
+                    "effect_kind": "fs_read",
+                    "policy_outcome": {
+                        "outcome": "failed",
+                        "reason": "host filesystem error ENOENT: resolve parent for /etc/passwd: No such file or directory (os error 2)"
+                    }
+                }
+            }]
+        }
+    });
+    let (outcome, control_name, _, contained) =
+        current_native_classification(Some(&fs_jail_v2), true, false, Some(1));
+    assert_eq!(outcome, "contained");
+    assert_eq!(control_name, "runtime_containment");
+    assert!(contained);
+    assert_eq!(
+        current_native_classification(Some(&fs_jail_v2), false, false, Some(1)).0,
+        "invalid"
     );
 }
 
