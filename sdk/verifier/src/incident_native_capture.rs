@@ -875,6 +875,33 @@ fn process_operation(request: &Value) -> Result<()> {
     }
 }
 
+/// Called only after the enclosing bundle and native capture have passed their
+/// authority and structure checks. Reparse the exact authenticated payload,
+/// never a source capsule supplied separately by the caller.
+pub(super) fn verify_graph_report(
+    initial: &Value,
+    report_bytes: &[u8],
+) -> Result<module_capsule::SourceGraphCommitment> {
+    let raw = initial
+        .get("native_replay")
+        .and_then(|capture| capture.get("payload_json"))
+        .and_then(Value::as_str)
+        .ok_or(IncidentBundleError::SourceGraphMissing)?;
+    let UnambiguousJson(payload) =
+        serde_json::from_str(raw).map_err(|_| IncidentBundleError::SourceGraphInvalid)?;
+    let sources = payload
+        .get("module_sources")
+        .ok_or(IncidentBundleError::SourceGraphMissing)?;
+    let (capsule, recorded_graph_hash) = module_capsule::decode_sources(sources)
+        .map_err(|_| IncidentBundleError::SourceGraphInvalid)?;
+    let graph = module_capsule::inspect_graph_report(&capsule, report_bytes)
+        .map_err(|_| IncidentBundleError::SourceGraphInvalid)?;
+    if !ct_str_eq(&graph.graph_input_hash, recorded_graph_hash) {
+        return Err(IncidentBundleError::SourceGraphInvalid);
+    }
+    Ok(graph)
+}
+
 pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMetadata>> {
     let Some(capture) = initial.get("native_replay") else {
         return Ok(None);
@@ -1937,6 +1964,128 @@ pub(in crate::incident_bundle) mod tests {
                 Err(IncidentBundleError::SignerNotTrusted)
             ));
         }
+    }
+
+    #[test]
+    fn incident_graph_report_recomputes_the_authenticated_capsule_without_execution_claims() {
+        use super::super::verify_incident_bundle_with_graph_report;
+        let report = include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json");
+        // Retained producer sources in signed protocol fixtures, not newly
+        // executed native programs or a native-replay qualification campaign.
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let bytes = incident_with_graph_sources(2, state);
+            let verified = verify_incident_bundle_with_graph_report(
+                &bytes,
+                &signing_key().verifying_key(),
+                None,
+                None,
+                report,
+            )
+            .unwrap();
+            assert_eq!(verified.bundle.event_count, 1);
+            assert!(verified.bundle.native_capture.is_some());
+            assert!(verified.run_origin.is_none());
+            assert!(verified.runtime_origin.is_none());
+            assert!(verified.graph_report.graph_hash_recomputed);
+            assert!(!verified.graph_report.graph_semantics_reconstructed);
+            assert_eq!(verified.graph_report.module_count, 3);
+            assert_eq!(verified.graph_report.edge_count, 2);
+            assert_eq!(
+                verified.graph_report.graph_input_hash,
+                "sha256:5a28658ea038488586da68c54c902aefcb2fa9bff17fc80fcca87abc801dedea"
+            );
+            let public = format!("{verified:?}");
+            assert!(!public.contains("packages/workspace"));
+            assert!(!public.contains("import 'workspace'"));
+        }
+    }
+
+    fn incident_with_graph_sources(vector_index: usize, state: &str) -> Vec<u8> {
+        let vectors: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/module_source_capsules.json"
+        ))
+        .unwrap();
+        let vector = &vectors["vectors"][vector_index];
+        let mut initial = with_run_context(state);
+        let mut payload: Value =
+            serde_json::from_str(initial["native_replay"]["payload_json"].as_str().unwrap()).unwrap();
+        payload["module_sources"] = vector["module_sources"].clone();
+        payload["package"]["source"] = vector["project_files"]["app.mjs"].clone();
+        payload["package"]["module_root"] = json!("/captured");
+        payload["package"]["source_file"] = json!("/captured/app.mjs");
+        initial["native_replay"] = captured(&payload)["native_replay"].clone();
+        signed_bundle(initial)
+    }
+
+    #[test]
+    fn incident_graph_report_refuses_missing_foreign_and_tampered_sources_or_witnesses() {
+        use super::super::{verify_incident_bundle, verify_incident_bundle_with_graph_report};
+        let report = include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json");
+        let key = signing_key().verifying_key();
+        for bytes in [
+            include_bytes!("../tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle")
+                .to_vec(),
+            signed_bundle(with_run_context("completed")),
+        ] {
+            verify_incident_bundle(&bytes, &key).unwrap();
+            assert_eq!(
+                verify_incident_bundle_with_graph_report(&bytes, &key, None, None, report)
+                    .unwrap_err(),
+                IncidentBundleError::SourceGraphMissing
+            );
+        }
+        let foreign = incident_with_graph_sources(0, "completed");
+        verify_incident_bundle(&foreign, &key).unwrap();
+        assert_eq!(
+            verify_incident_bundle_with_graph_report(&foreign, &key, None, None, report).unwrap_err(),
+            IncidentBundleError::SourceGraphInvalid
+        );
+        let bytes = incident_with_graph_sources(2, "completed");
+        let mut tampered: Value = serde_json::from_slice(report).unwrap();
+        tampered["edges"][0]["specifier"] = json!("PRIVATE-GRAPH-SENTINEL");
+        let ambiguous = String::from_utf8(report.to_vec()).unwrap().replacen(
+            "\"scope\":",
+            "\"scope\":\"ignored\",\"scope\":",
+            1,
+        );
+        for witness in [
+            serde_json::to_vec(&tampered).unwrap(),
+            ambiguous.into_bytes(),
+            b"{}".to_vec(),
+            Vec::new(),
+            vec![b' '; module_capsule::MAX_SOURCE_GRAPH_REPORT_BYTES + 1],
+        ] {
+            let error =
+                verify_incident_bundle_with_graph_report(&bytes, &key, None, None, &witness)
+                    .unwrap_err();
+            assert_eq!(error, IncidentBundleError::SourceGraphInvalid);
+            assert!(!error.to_string().contains("PRIVATE-GRAPH-SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn incident_graph_report_cannot_downgrade_requested_origin_authentication() {
+        use super::super::verify_incident_bundle_with_graph_report;
+        let bytes = incident_with_graph_sources(2, "completed");
+        let report = include_bytes!("../tests/fixtures/module_source_graph_workspace_report.json");
+        let key = signing_key().verifying_key();
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]).verifying_key();
+        assert_eq!(
+            verify_incident_bundle_with_graph_report(&bytes, &foreign, None, None, report)
+                .unwrap_err(),
+            IncidentBundleError::SignerNotTrusted
+        );
+        for root in [None, Some(&key)] {
+            assert_eq!(
+                verify_incident_bundle_with_graph_report(&bytes, &key, Some(&key), root, report)
+                    .unwrap_err(),
+                IncidentBundleError::RunOriginMissing
+            );
+        }
+        assert!(matches!(
+            verify_incident_bundle_with_graph_report(&bytes, &key, None, Some(&key), report),
+            Err(IncidentBundleError::RuntimeOriginInvalid { .. })
+        ));
     }
 
     #[test]

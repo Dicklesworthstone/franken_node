@@ -50,6 +50,7 @@ mod structure;
 
 #[path = "incident_native_capture.rs"]
 pub(crate) mod native_capture;
+pub use native_capture::module_capsule::{MAX_SOURCE_GRAPH_REPORT_BYTES, SourceGraphCommitment};
 pub use native_capture::{CapturedNativeTerminalState, VerifiedNativeCaptureMetadata};
 
 #[path = "incident_run_origin.rs"]
@@ -133,6 +134,18 @@ pub struct VerifiedIncidentBundleWithRuntimeOrigin {
     pub runtime_origin: VerifiedRuntimeOrigin,
 }
 
+/// An authenticated incident with an independently recomputed source-graph
+/// commitment. Optional original-run and runtime authorities are checked before
+/// the graph witness is accepted. This does not reconstruct resolver semantics
+/// or execute the guest; the report's resolution claim remains a producer claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedIncidentBundleWithSourceGraph {
+    pub bundle: VerifiedIncidentBundle,
+    pub run_origin: Option<VerifiedRunOrigin>,
+    pub runtime_origin: Option<VerifiedRuntimeOrigin>,
+    pub graph_report: SourceGraphCommitment,
+}
+
 /// Why a bundle failed independent verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncidentBundleError {
@@ -163,6 +176,8 @@ pub enum IncidentBundleError {
     RuntimeOriginSignerNotTrusted,
     RuntimeOriginCaptureSignatureInvalid,
     RuntimeOriginLedgerSignatureInvalid,
+    SourceGraphMissing,
+    SourceGraphInvalid,
 }
 
 impl std::fmt::Display for IncidentBundleError {
@@ -227,6 +242,15 @@ impl std::fmt::Display for IncidentBundleError {
             Self::SignatureMalformed => write!(f, "bundle signature is malformed"),
             Self::SignatureInvalid => write!(f, "bundle signature does not verify"),
             Self::RunOriginMissing => write!(f, "bundle has no original signed run record"),
+            Self::SourceGraphMissing => {
+                write!(f, "bundle has no captured native module sources")
+            }
+            Self::SourceGraphInvalid => {
+                write!(
+                    f,
+                    "source graph report does not match the authenticated incident capture"
+                )
+            }
             Self::RunOriginInvalid { reason } => {
                 write!(f, "original run record is invalid: {reason}")
             }
@@ -493,6 +517,58 @@ pub fn verify_incident_bundle(
 ) -> Result<VerifiedIncidentBundle, IncidentBundleError> {
     let value = decode_evidence_json(bytes)?;
     verify_incident_value(&value, trusted_signer)
+}
+
+/// Authenticate an incident and independently rehash its captured source graph.
+///
+/// The separately supplied v2/v3 graph report must match the capsule retained in
+/// the signed native capture, including every recorded source observation and
+/// the entrypoint. No source path is opened. A missing capture, a foreign report
+/// or an incomplete witness is an error, never a fallback to byte-only success.
+///
+/// Supply `trusted_run_signer` to also authenticate the original run statement.
+/// Supply both original-run and product-root keys to authenticate the engine
+/// ledger as well. Trust is never inferred from a key embedded in the evidence.
+/// The graph commitment adds source integrity to the selected authority scope;
+/// it does not establish native execution, resolver correctness or completeness.
+///
+/// # Errors
+///
+/// Returns any bundle or requested origin-verification error. A product-root key
+/// without an original-run key is rejected. Missing native module sources return
+/// [`IncidentBundleError::SourceGraphMissing`]; malformed, oversized, ambiguous
+/// or inconsistent reports return [`IncidentBundleError::SourceGraphInvalid`].
+pub fn verify_incident_bundle_with_graph_report(
+    bytes: &[u8],
+    trusted_bundle_signer: &VerifyingKey,
+    trusted_run_signer: Option<&VerifyingKey>,
+    trusted_product_root: Option<&VerifyingKey>,
+    graph_report_bytes: &[u8],
+) -> Result<VerifiedIncidentBundleWithSourceGraph, IncidentBundleError> {
+    if graph_report_bytes.is_empty() || graph_report_bytes.len() > MAX_SOURCE_GRAPH_REPORT_BYTES {
+        return Err(IncidentBundleError::SourceGraphInvalid);
+    }
+    if trusted_product_root.is_some() && trusted_run_signer.is_none() {
+        return Err(IncidentBundleError::RuntimeOriginInvalid {
+            reason: "runtime authority requires an original run authority",
+        });
+    }
+    let value = decode_evidence_json(bytes)?;
+    let bundle = verify_incident_value(&value, trusted_bundle_signer)?;
+    let run_origin = trusted_run_signer
+        .map(|key| run_origin::verify(&value, key))
+        .transpose()?;
+    let runtime_origin = trusted_product_root
+        .map(|key| runtime_origin::verify(&value, key))
+        .transpose()?;
+    let graph_report =
+        native_capture::verify_graph_report(&value["initial_state_snapshot"], graph_report_bytes)?;
+    Ok(VerifiedIncidentBundleWithSourceGraph {
+        bundle,
+        run_origin,
+        runtime_origin,
+        graph_report,
+    })
 }
 
 /// Authenticate a bundle and its original run statement under two explicit
