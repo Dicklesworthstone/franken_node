@@ -251,27 +251,26 @@ fn try_append_signed_chained_fast(
     let mut tx = connection
         .transaction()
         .map_err(|err| io::Error::other(format!("begin entry transaction: {err}")))?;
-    let schema_current = tx
-        .query_with_params(
-            "SELECT value FROM evidence_meta WHERE key = ?1;",
-            &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
-        )
-        .is_ok_and(|rows| {
-            matches!(
-                rows.first().and_then(|row| row.values().first()),
-                Some(SqliteValue::Text(version))
-                    if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
-            )
-        });
+    let Ok(rows) = tx.query_with_params(
+        "SELECT
+            (SELECT value FROM evidence_meta WHERE key = ?1),
+            (SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1);",
+        &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
+    ) else {
+        return Ok(None);
+    };
+    let Some([version_val, prev_val]) = rows.first().map(|row| row.values()) else {
+        return Ok(None);
+    };
+    let schema_current = matches!(
+        version_val,
+        SqliteValue::Text(version) if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
+    );
     if !schema_current {
         return Ok(None);
     }
-    let Ok(rows) = tx.query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
-    else {
-        return Ok(None);
-    };
-    entry.prev_entry_hash = match rows.first().map(|row| row.values().first()) {
-        Some(Some(SqliteValue::Text(previous_json))) => {
+    entry.prev_entry_hash = match prev_val {
+        SqliteValue::Text(previous_json) => {
             let previous: EvidenceEntry =
                 serde_json::from_str(previous_json.as_ref()).map_err(|err| {
                     io::Error::new(
@@ -281,8 +280,8 @@ fn try_append_signed_chained_fast(
                 })?;
             evidence_entry_hash_hex(&previous)
         }
-        None => String::new(),
-        Some(_) => {
+        SqliteValue::Null => String::new(),
+        _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "newest stored row is not a text evidence entry; refusing to reset the chain",

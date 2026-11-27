@@ -4276,6 +4276,14 @@ fn canonicalize_under_known_canonical_root(path: &Path, known_root: &Path) -> io
             cursor.push(segment);
             match std::fs::symlink_metadata(&cursor) {
                 Ok(meta) if !meta.file_type().is_symlink() => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Err(error);
+                }
                 _ => {
                     all_plain = false;
                     break;
@@ -5058,80 +5066,148 @@ impl RunTrustRequirements {
     /// prepared for execution. Graph hashing remains unchanged: this is an
     /// additional operator admission, not a hidden resolver option.
     pub fn verify_operator_module_path(&self, root: &Path, module_path: &str) -> Result<()> {
+        self.verify_operator_module_paths_inner(root, false, std::iter::once(module_path))
+    }
+
+    /// Batch version of [`Self::verify_operator_module_path`] for an already
+    /// canonical project `root`. Preserves identical prefix, symlink, hardlink,
+    /// and ancestor inode checks while stating protected operator paths and
+    /// shared directory ancestors once across all probes.
+    fn verify_operator_module_paths_under_canonical_root<'a>(
+        &self,
+        root: &Path,
+        module_paths: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        self.verify_operator_module_paths_inner(root, true, module_paths)
+    }
+
+    fn verify_operator_module_paths_inner<'a>(
+        &self,
+        root: &Path,
+        root_is_canonical: bool,
+        module_paths: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
         if self.operator_protected_paths.is_empty() {
             return Ok(());
         }
-        let relative = Path::new(module_path);
-        anyhow::ensure!(
-            !relative.is_absolute()
-                && relative.components().all(|component| {
-                    matches!(
-                        component,
-                        std::path::Component::Normal(_) | std::path::Component::CurDir
-                    )
-                }),
-            "captured module path is outside its admitted project"
-        );
-        let candidate = root.join(relative);
-        let canonical_candidate = match candidate.canonicalize() {
-            Ok(path) => Some(path),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                None
-            }
-            Err(error) => return Err(error).context("failed inspecting captured operator alias"),
-        };
-        for protected in &self.operator_protected_paths {
-            anyhow::ensure!(
-                !candidate.starts_with(protected)
-                    && !canonical_candidate
-                        .as_ref()
-                        .is_some_and(|path| path.starts_with(protected)),
-                "frozen module graph selects protected operator state: {module_path}"
-            );
-            // Compare only retained operator inputs. Ordinary package
-            // hardlinks remain compatible with frozen execution; a credential
-            // hardlink or case/alias spelling of a protected directory does not.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let operator = match std::fs::metadata(protected) {
-                    Ok(metadata) => metadata,
+        // Pre-stat protected operator targets once for the batch and cache
+        // candidate ancestor `(dev, ino)` lookups so repeated probes do not
+        // re-walk every shared directory up to `/` for each protected path.
+        #[cfg(unix)]
+        let (protected_identities, any_protected_dir) = {
+            use std::os::unix::fs::MetadataExt;
+            let mut identities = Vec::with_capacity(self.operator_protected_paths.len());
+            let mut any_dir = false;
+            for protected in &self.operator_protected_paths {
+                match std::fs::metadata(protected) {
+                    Ok(metadata) => {
+                        let is_dir = metadata.is_dir();
+                        any_dir |= is_dir;
+                        identities.push((metadata.dev(), metadata.ino(), is_dir));
+                    }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => {
                         return Err(error).context("failed inspecting protected operator identity");
                     }
-                };
-                for alias in std::iter::once(&candidate).chain(canonical_candidate.as_ref()) {
+                }
+            }
+            (identities, any_dir)
+        };
+        #[cfg(unix)]
+        let mut ancestor_metadata_cache: std::collections::HashMap<
+            PathBuf,
+            Option<(u64, u64)>,
+        > = std::collections::HashMap::new();
+
+        for module_path in module_paths {
+            let relative = Path::new(module_path);
+            anyhow::ensure!(
+                !relative.is_absolute()
+                    && relative.components().all(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::Normal(_) | std::path::Component::CurDir
+                        )
+                    }),
+                "captured module path is outside its admitted project"
+            );
+            let candidate = root.join(relative);
+            let canonical_res = if root_is_canonical {
+                canonicalize_under_known_canonical_root(&candidate, root)
+            } else {
+                candidate.canonicalize()
+            };
+            let canonical_candidate = match canonical_res {
+                Ok(path) => Some(path),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => {
+                    return Err(error).context("failed inspecting captured operator alias");
+                }
+            };
+            for protected in &self.operator_protected_paths {
+                anyhow::ensure!(
+                    !candidate.starts_with(protected)
+                        && !canonical_candidate
+                            .as_ref()
+                            .is_some_and(|path| path.starts_with(protected)),
+                    "frozen module graph selects protected operator state: {module_path}"
+                );
+            }
+            // Compare only retained operator inputs. Ordinary package
+            // hardlinks remain compatible with frozen execution; a credential
+            // hardlink or case/alias spelling of a protected directory does not.
+            #[cfg(unix)]
+            if !protected_identities.is_empty() {
+                use std::os::unix::fs::MetadataExt;
+                let distinct_canonical = canonical_candidate
+                    .as_ref()
+                    .filter(|path| path.as_path() != candidate.as_path());
+                for alias in std::iter::once(&candidate).chain(distinct_canonical) {
                     for (depth, ancestor) in alias.ancestors().enumerate() {
                         anyhow::ensure!(
                             depth < 256,
                             "captured operator alias inspection exceeds its depth bound"
                         );
-                        let source = match std::fs::metadata(ancestor) {
-                            Ok(metadata) => metadata,
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                                ) =>
-                            {
-                                continue;
-                            }
-                            Err(error) => {
-                                return Err(error)
-                                    .context("failed inspecting captured operator ancestor");
-                            }
+                        let source = if let Some(cached) = ancestor_metadata_cache.get(ancestor) {
+                            *cached
+                        } else {
+                            let resolved = match std::fs::metadata(ancestor) {
+                                Ok(metadata) => Some((metadata.dev(), metadata.ino())),
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                                    ) =>
+                                {
+                                    None
+                                }
+                                Err(error) => {
+                                    return Err(error)
+                                        .context("failed inspecting captured operator ancestor");
+                                }
+                            };
+                            ancestor_metadata_cache.insert(ancestor.to_path_buf(), resolved);
+                            resolved
                         };
-                        anyhow::ensure!(
-                            source.dev() != operator.dev() || source.ino() != operator.ino(),
-                            "frozen module graph aliases protected operator state: {module_path}"
-                        );
-                        if !operator.is_dir() {
+                        if let Some((source_dev, source_ino)) = source {
+                            for &(op_dev, op_ino, op_is_dir) in &protected_identities {
+                                if depth > 0 && !op_is_dir {
+                                    continue;
+                                }
+                                anyhow::ensure!(
+                                    source_dev != op_dev || source_ino != op_ino,
+                                    "frozen module graph aliases protected operator state: {module_path}"
+                                );
+                            }
+                        }
+                        if !any_protected_dir {
                             break;
                         }
                     }
@@ -5943,6 +6019,106 @@ impl NativeRunControlWakeup {
     }
 }
 
+/// Event-driven wakeup handle shared by the native-session supervisor, live
+/// control monitor, and stdout response reader on Linux (`eventfd`). Lets the
+/// supervisor sleep directly in `poll(pidfd, eventfd)` instead of polling
+/// `wait4(WNOHANG)` every 2ms, waking in microseconds on worker exit, control
+/// violation, durable-effect failure, or stream EOF.
+#[cfg(feature = "engine")]
+#[derive(Clone)]
+struct NativeSupervisorWakeup {
+    #[cfg(target_os = "linux")]
+    fd: Arc<std::os::fd::OwnedFd>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeSupervisorWakeup {
+    fn new() -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let fd = rustix::event::eventfd(
+                0,
+                rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
+            )
+            .ok()?;
+            Some(Self { fd: Arc::new(fd) })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    fn notify(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = rustix::io::write(&self.fd, &1_u64.to_ne_bytes());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain(&self) {
+        let mut buf = [0_u8; 8];
+        let _ = rustix::io::read(&self.fd, &mut buf);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd as _;
+        self.fd.as_fd()
+    }
+}
+
+#[cfg(feature = "engine")]
+struct NativeSupervisorWakeupOnDrop(Option<NativeSupervisorWakeup>);
+
+#[cfg(feature = "engine")]
+impl Drop for NativeSupervisorWakeupOnDrop {
+    fn drop(&mut self) {
+        if let Some(wakeup) = &self.0 {
+            wakeup.notify();
+        }
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn rustix_timespec_from_duration(duration: std::time::Duration) -> rustix::event::Timespec {
+    let secs = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+    let nanos = i64::from(duration.subsec_nanos());
+    rustix::event::Timespec {
+        tv_sec: secs,
+        tv_nsec: nanos,
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn poll_native_supervisor_fds(
+    pidfd: &std::os::fd::OwnedFd,
+    wakeup: Option<&NativeSupervisorWakeup>,
+    timeout: std::time::Duration,
+) -> std::result::Result<(), rustix::io::Errno> {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    let ts = rustix_timespec_from_duration(timeout);
+    let result = match wakeup {
+        Some(wakeup) => {
+            let mut fds = [
+                PollFd::new(pidfd, PollFlags::IN),
+                PollFd::from_borrowed_fd(wakeup.as_fd(), PollFlags::IN),
+            ];
+            poll(&mut fds, Some(&ts))
+        }
+        None => {
+            let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+            poll(&mut fds, Some(&ts))
+        }
+    };
+    match result {
+        Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// One owned observer per native session. Potentially contended store reads
 /// never run in the process supervisor. Cancellation wakes the between-check
 /// wait and skips remaining stores; Drop closes the bounded result channel and
@@ -5966,6 +6142,7 @@ impl NativeRunControlMonitor {
         requirements: RunTrustRequirements,
         mut fleet_high_water: Option<ActiveFleetPolicy>,
         mut wakeup: NativeRunControlWakeup,
+        supervisor_wakeup: Option<NativeSupervisorWakeup>,
     ) -> io::Result<Self> {
         let mut operator_fleet_high_water = requirements.operator_fleet_policy.clone();
         let (stop, stop_receiver) = std::sync::mpsc::channel();
@@ -5976,6 +6153,7 @@ impl NativeRunControlMonitor {
         let worker = thread::Builder::new()
             .name("franken-node-live-control".to_string())
             .spawn(move || {
+                let _wakeup_on_exit = NativeSupervisorWakeupOnDrop(supervisor_wakeup.clone());
                 // `wakeup` captured the pre-admission hint snapshot, and the
                 // supervisor already completed a full control check and atomic
                 // inventory admission right before spawning this observer.
@@ -6000,10 +6178,12 @@ impl NativeRunControlMonitor {
                     );
                     let denied = result.is_err();
                     checked_at = Instant::now();
-                    if worker_cancelled.load(Ordering::Acquire)
-                        || update_sender.send((checked_at, result)).is_err()
-                        || denied
-                    {
+                    let send_failed = worker_cancelled.load(Ordering::Acquire)
+                        || update_sender.send((checked_at, result)).is_err();
+                    if let Some(ref notify) = supervisor_wakeup {
+                        notify.notify();
+                    }
+                    if send_failed || denied {
                         return;
                     }
                 }
@@ -6902,12 +7082,15 @@ pub fn load_verified_recorded_host_effect_identity(
             capture_directory.display()
         )
     })?;
-    let resolved_capture = capture_path.canonicalize().with_context(|| {
-        format!(
-            "resolve runtime evidence identity capture {}",
-            capture_path.display()
-        )
-    })?;
+    let resolved_capture =
+        canonicalize_under_known_canonical_root(capture_path, &capture_directory).with_context(
+            || {
+                format!(
+                    "resolve runtime evidence identity capture {}",
+                    capture_path.display()
+                )
+            },
+        )?;
     if resolved_capture.parent() != Some(capture_directory.as_path()) {
         anyhow::bail!(
             "runtime evidence identity capture {} is not in {}",
@@ -9264,11 +9447,16 @@ fn prepare_native_frozen_modules(
             capture(root, entrypoint, options)
                 .map_err(|error| format!("Frozen module graph capture failed: {error}"))?
         };
-        for probe in &graph.report().probes {
-            trust_requirements
-                .verify_operator_module_path(root, &probe.path)
-                .map_err(|error| format!("Operator module source admission failed: {error:#}"))?;
-        }
+        trust_requirements
+            .verify_operator_module_paths_under_canonical_root(
+                root,
+                graph
+                    .report()
+                    .probes
+                    .iter()
+                    .map(|probe| probe.path.as_str()),
+            )
+            .map_err(|error| format!("Operator module source admission failed: {error:#}"))?;
         let replay_sources = if capture_replay {
             Some(crate::ops::native_replay::CapturedModuleSources::capture(
                 &graph,
@@ -12131,6 +12319,7 @@ impl EngineDispatcher {
             label: &'static str,
             mut durable: Option<NativeSessionDurableOutput>,
             durable_failure: Option<mpsc::SyncSender<String>>,
+            supervisor_wakeup: Option<NativeSupervisorWakeup>,
         ) -> io::Result<(
             thread::JoinHandle<()>,
             mpsc::Receiver<std::result::Result<BoundedPipeRead, String>>,
@@ -12139,6 +12328,7 @@ impl EngineDispatcher {
             let worker = thread::Builder::new()
                 .name(format!("franken-node-native-{label}-reader"))
                 .spawn(move || {
+                    let _wakeup_on_exit = NativeSupervisorWakeupOnDrop(supervisor_wakeup.clone());
                     let mut output = Vec::new();
                     let mut chunk = [0u8; 8192];
                     let mut exceeded = false;
@@ -12161,6 +12351,9 @@ impl EngineDispatcher {
                                         if let Some(failure) = &durable_failure {
                                             let _ = failure.try_send(error.clone());
                                         }
+                                        if let Some(ref notify) = supervisor_wakeup {
+                                            notify.notify();
+                                        }
                                         let _ = sender.send(Err(error));
                                         return;
                                     }
@@ -12170,6 +12363,9 @@ impl EngineDispatcher {
                             Err(error) => {
                                 if let Some(failure) = &durable_failure {
                                     let _ = failure.try_send(format!("native-session live reader failed: {error}"));
+                                }
+                                if let Some(ref notify) = supervisor_wakeup {
+                                    notify.notify();
                                 }
                                 let _ = sender.send(Err(format!(
                                     "failed reading native-session {label}: {error}"
@@ -12641,9 +12837,14 @@ impl EngineDispatcher {
                 )
                 .context("capture frozen source before native-session admission")?
             };
-            for probe in &graph.report().probes {
-                trust_requirements.verify_operator_module_path(root, &probe.path)?;
-            }
+            trust_requirements.verify_operator_module_paths_under_canonical_root(
+                root,
+                graph
+                    .report()
+                    .probes
+                    .iter()
+                    .map(|probe| probe.path.as_str()),
+            )?;
             anyhow::ensure!(
                 config
                     .runtime
@@ -12971,6 +13172,7 @@ impl EngineDispatcher {
         command.stdin(Stdio::piped());
         isolate_process_group(&mut command);
 
+        let supervisor_wakeup = NativeSupervisorWakeup::new();
         // Establish ownership before spawning a guest: failure to start the
         // required control observer cannot leave an unsupervised child behind.
         let mut control_monitor = NativeRunControlMonitor::spawn(
@@ -12979,6 +13181,7 @@ impl EngineDispatcher {
             trust_requirements.clone(),
             fleet_policy.cloned(),
             control_wakeup,
+            supervisor_wakeup.clone(),
         )
         .map_err(|error| {
             EngineDispatchError::EngineExecutionError {
@@ -13001,6 +13204,16 @@ impl EngineDispatcher {
             .to_actionable()
         })?;
         session_inventory.worker_started();
+        // Pin the un-reaped worker PID to a level-triggered `pidfd` on Linux
+        // so the supervisor wakes immediately when the worker becomes reapable
+        // instead of polling `wait4(WNOHANG)` on a 2ms timer.
+        #[cfg(target_os = "linux")]
+        let child_pidfd = i32::try_from(child.id())
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .and_then(|pid| {
+                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::NONBLOCK).ok()
+            });
         let mut containment = NativeSessionContainment::ProcessGroup;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
@@ -13099,6 +13312,7 @@ impl EngineDispatcher {
             "response",
             Some(durable_output),
             Some(durable_failure_sender),
+            supervisor_wakeup.clone(),
         ) {
             Ok(reader) => reader,
             Err(error) => {
@@ -13129,6 +13343,7 @@ impl EngineDispatcher {
             stderr,
             NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES,
             "diagnostics",
+            None,
             None,
             None,
         ) {
@@ -13219,6 +13434,13 @@ impl EngineDispatcher {
         let mut response_stream_closed = false;
         let mut pending_durable_failure = None;
         let status = loop {
+            // Drain the Linux wakeup eventfd BEFORE checking durable failures
+            // and control monitor state so no notification between check and
+            // `poll()` can ever be lost.
+            #[cfg(target_os = "linux")]
+            if let Some(ref wakeup) = supervisor_wakeup {
+                wakeup.drain();
+            }
             if let Some(error) = pending_durable_failure
                 .take()
                 .or_else(|| durable_failures.try_recv().ok())
@@ -13248,27 +13470,42 @@ impl EngineDispatcher {
                     break status;
                 }
                 Ok(NativeSessionPoll::Running) => {
-                    if response_stream_closed {
-                        // The response pipe already reached EOF; start with a
-                        // short reap interval and back off if the worker stays
-                        // alive after closing stdout.
-                        thread::sleep(poll_sleep);
-                        poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
-                    } else {
-                        // Wait on the response reader's failure channel so
-                        // either worker stdout EOF (channel disconnect) or a
-                        // durable-journal error wakes the supervisor immediately
-                        // instead of burning up to 2ms in blind sleep.
-                        match durable_failures.recv_timeout(poll_sleep) {
-                            Ok(error) => {
-                                pending_durable_failure = Some(error);
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                response_stream_closed = true;
-                                poll_sleep = std::time::Duration::from_micros(100);
-                            }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                    let mut waited_event_driven = false;
+                    #[cfg(target_os = "linux")]
+                    if let (Some(pidfd), Some(wakeup)) = (&child_pidfd, &supervisor_wakeup) {
+                        let exec_remaining = timeout.saturating_sub(started.elapsed());
+                        let control_remaining = NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE
+                            .saturating_sub(control_monitor.last_checked.elapsed());
+                        let wait_budget = exec_remaining.min(control_remaining);
+                        if wait_budget.is_zero()
+                            || poll_native_supervisor_fds(pidfd, Some(wakeup), wait_budget).is_ok()
+                        {
+                            waited_event_driven = true;
+                        }
+                    }
+                    if !waited_event_driven {
+                        if response_stream_closed {
+                            // The response pipe already reached EOF; start with a
+                            // short reap interval and back off if the worker stays
+                            // alive after closing stdout.
+                            thread::sleep(poll_sleep);
+                            poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                        } else {
+                            // Wait on the response reader's failure channel so
+                            // either worker stdout EOF (channel disconnect) or a
+                            // durable-journal error wakes the supervisor immediately
+                            // instead of burning up to 2ms in blind sleep.
+                            match durable_failures.recv_timeout(poll_sleep) {
+                                Ok(error) => {
+                                    pending_durable_failure = Some(error);
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    response_stream_closed = true;
+                                    poll_sleep = std::time::Duration::from_micros(100);
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    poll_sleep = (poll_sleep * 2).min(NATIVE_SESSION_POLL_INTERVAL);
+                                }
                             }
                         }
                     }
@@ -13304,11 +13541,22 @@ impl EngineDispatcher {
                                         break;
                                     }
                                     Ok(None) => {
-                                        thread::sleep(
-                                            NATIVE_SESSION_POLL_INTERVAL
-                                                .min(drain_deadline.saturating_duration_since(now))
-                                                .min(timeout.saturating_sub(started.elapsed())),
-                                        );
+                                        let step_budget = drain_deadline
+                                            .saturating_duration_since(now)
+                                            .min(timeout.saturating_sub(started.elapsed()));
+                                        let mut waited_pidfd = false;
+                                        #[cfg(target_os = "linux")]
+                                        if let Some(ref pidfd) = child_pidfd
+                                            && poll_native_supervisor_fds(pidfd, None, step_budget)
+                                                .is_ok()
+                                        {
+                                            waited_pidfd = true;
+                                        }
+                                        if !waited_pidfd {
+                                            thread::sleep(
+                                                NATIVE_SESSION_POLL_INTERVAL.min(step_budget),
+                                            );
+                                        }
                                     }
                                     Err(_) => break,
                                 }
@@ -31066,6 +31314,100 @@ exec "$2" pinned-worker-image"#,
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn verify_operator_module_paths_batch_matches_single_path_and_blocks_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let protected_dir = root.join(".franken-node");
+        let protected_file = root.join("secret.key");
+        let app_dir = root.join("src");
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(protected_dir.join("state.json"), "{}").unwrap();
+        std::fs::write(&protected_file, "secret").unwrap();
+        std::fs::write(app_dir.join("index.js"), "console.log(1);\n").unwrap();
+
+        let req = super::RunTrustRequirements::default()
+            .with_operator_protected_paths(vec![protected_dir.clone(), protected_file.clone()])
+            .unwrap();
+
+        // Plain files and absent probes succeed in batch mode.
+        req.verify_operator_module_paths_under_canonical_root(
+            &root,
+            ["src/index.js", "src/missing.js", "package.json"],
+        )
+        .unwrap();
+
+        // Protected directory descendant fails identically in single and batch modes.
+        assert!(
+            req.verify_operator_module_paths_under_canonical_root(
+                &root,
+                ["src/index.js", ".franken-node/state.json"],
+            )
+            .is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            // Symlink into protected dir must fail.
+            let dir_link = root.join("alias-dir");
+            std::os::unix::fs::symlink(&protected_dir, &dir_link).unwrap();
+            assert!(
+                req.verify_operator_module_paths_under_canonical_root(
+                    &root,
+                    ["src/index.js", "alias-dir/state.json"],
+                )
+                .is_err()
+            );
+
+            // Hardlink to protected file must fail by `(dev, ino)` match.
+            let hardlink = app_dir.join("leaked.key");
+            std::fs::hard_link(&protected_file, &hardlink).unwrap();
+            assert!(
+                req.verify_operator_module_paths_under_canonical_root(
+                    &root,
+                    ["src/index.js", "src/leaked.key"],
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn linux_supervisor_pidfd_and_eventfd_wake_without_polling_delay() {
+        let wakeup = super::NativeSupervisorWakeup::new().expect("linux eventfd available");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn quick child");
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let pidfd =
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::NONBLOCK).unwrap();
+
+        // Eventfd notification wakes poll immediately even before child is checked.
+        wakeup.notify();
+        let start = std::time::Instant::now();
+        super::poll_native_supervisor_fds(&pidfd, Some(&wakeup), std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        wakeup.drain();
+
+        // Level-triggered pidfd wakes immediately when child exits and can be reaped.
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            super::poll_native_supervisor_fds(
+                &pidfd,
+                Some(&wakeup),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        };
+        assert!(status.success());
     }
 
     #[cfg(feature = "engine")]

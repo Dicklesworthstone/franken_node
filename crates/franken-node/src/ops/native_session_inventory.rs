@@ -1491,6 +1491,9 @@ fn lock_file_identity(_file: Option<&std::fs::File>) -> Option<(u64, u64)> {
 
 fn lock_inventory_file(protected_root: &Path, create: bool) -> Result<Option<std::fs::File>> {
     let database_path = protected_root.join(INVENTORY_FILE);
+    database_path
+        .to_str()
+        .context("native-session inventory path must be UTF-8; refusing a lossy path alias")?;
     let observed = match validate_private_path_metadata_if_present(&database_path)? {
         Some(metadata) => metadata,
         None => {
@@ -1557,22 +1560,27 @@ fn path_file_identity(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
-fn inventory_schema_is_current_in_tx(tx: &Transaction<'_>) -> bool {
-    tx.query(
-        "SELECT COUNT(*) FROM sqlite_master
+fn inventory_tables_present(tx: &Transaction<'_>) -> Result<(bool, bool)> {
+    let rows = tx.query(
+        "SELECT name FROM sqlite_master
          WHERE type = 'table'
            AND name IN (
                'native_sessions',
                'native_session_drains',
                'native_session_admission_serialization'
            );",
-    )
-    .is_ok_and(|rows| {
-        matches!(
-            rows.as_slice(),
-            [row] if matches!(row.values(), [SqliteValue::Integer(3)])
-        )
-    })
+    )?;
+    let mut count = 0_usize;
+    let mut has_drains = false;
+    for row in rows {
+        if let [SqliteValue::Text(name)] = row.values() {
+            count += 1;
+            if name.as_ref() == "native_session_drains" {
+                has_drains = true;
+            }
+        }
+    }
+    Ok((count == 3, has_drains))
 }
 
 fn inventory_schema_is_current(connection: &Connection) -> bool {
@@ -2354,6 +2362,81 @@ fn retain_outcome_receipt(
     Ok(())
 }
 
+/// Combined single-query outcome persistence and reservation bounds check for
+/// `persist_outcome`. Fetches the target admission/outcome alongside the exact
+/// table count and reserved-byte sum in one SQLite round-trip, updates the row
+/// if still pending, and checks the exact post-update reservation usage.
+fn write_observed_outcome_and_check_bounds(
+    tx: &mut Transaction<'_>,
+    expected_admission: &NativeSessionAdmission,
+    outcome: &NativeSessionOutcome,
+) -> Result<()> {
+    let rows = tx.query_with_params(
+        &format!(
+            "SELECT
+                 (SELECT admission_json FROM native_sessions WHERE session_nonce = ?1),
+                 (SELECT outcome_json FROM native_sessions WHERE session_nonce = ?1),
+                 COUNT(*),
+                 COALESCE(SUM(LENGTH(CAST(admission_json AS BLOB)) + CASE
+                     WHEN outcome_json IS NULL THEN {MAX_OUTCOME_BYTES}
+                     ELSE LENGTH(CAST(outcome_json AS BLOB)) END), 0)
+             FROM native_sessions;"
+        ),
+        &[SqliteValue::Text(
+            expected_admission.session_nonce.clone().into(),
+        )],
+    )?;
+    let [row] = rows.as_slice() else {
+        bail!("native-session outcome row shape is invalid");
+    };
+    let [
+        admission_val,
+        existing,
+        SqliteValue::Integer(count),
+        SqliteValue::Integer(bytes),
+    ] = row.values()
+    else {
+        bail!("native-session outcome row shape is invalid");
+    };
+    if matches!(admission_val, SqliteValue::Null) {
+        bail!("native-session admission disappeared before outcome persistence");
+    }
+    let admission: NativeSessionAdmission = parse_json(admission_val, MAX_ADMISSION_BYTES)?;
+    validate_admission(&admission)?;
+    if admission != *expected_admission {
+        bail!("native-session admission changed before outcome persistence");
+    }
+    validate_outcome(&admission, outcome)?;
+    let json = bounded_json(outcome, MAX_OUTCOME_BYTES)?;
+    let count = usize::try_from(*count)?;
+    let bytes = usize::try_from(*bytes)?;
+    let post_bytes = match existing {
+        SqliteValue::Null => {
+            let outcome_len = json.len();
+            tx.execute_with_params(
+                "UPDATE native_sessions SET outcome_json = ?1
+                 WHERE session_nonce = ?2 AND outcome_json IS NULL;",
+                &[
+                    SqliteValue::Text(json.into()),
+                    SqliteValue::Text(admission.session_nonce.into()),
+                ],
+            )?;
+            bytes
+                .checked_sub(MAX_OUTCOME_BYTES)
+                .and_then(|base| base.checked_add(outcome_len))
+                .context("native-session reservation accounting overflowed")?
+        }
+        value => {
+            let existing: NativeSessionOutcome = parse_json(value, MAX_OUTCOME_BYTES)?;
+            if existing != *outcome {
+                bail!("native-session outcome is immutable once observed");
+            }
+            bytes
+        }
+    };
+    check_reservation_usage(count, post_bytes, MAX_STORED_SESSIONS, MAX_RESERVED_BYTES)
+}
+
 fn write_observed_outcome(
     tx: &mut Transaction<'_>,
     expected_admission: &NativeSessionAdmission,
@@ -2772,12 +2855,12 @@ impl NativeSessionInventoryGuard {
             // Every enclosing owner participates in the same conflict point.
             // Deduplicate shared ancestors of the release and operator roots;
             // a parent cannot seal a census concurrently with child admission.
-            for project in &serialization_scopes {
-                serialize_project_admission(&mut tx, project)?;
-            }
+            serialize_project_admissions(&mut tx, &serialization_scopes)?;
+            let drains_has_rows = drains_table_has_rows_unchecked(&tx)?;
             let mut admitted = refused_outcome.is_none();
             for (project, expected_generation) in &expected_scopes {
-                let (generation, held_fence) = admission_scope_state(&tx, project)?;
+                let (generation, held_fence) =
+                    admission_scope_state_with_drains(&tx, project, drains_has_rows)?;
                 admitted &= held_fence.is_none() && generation == Some(*expected_generation);
             }
             // A race after identity provisioning must leave a known unspawned
@@ -3066,8 +3149,7 @@ impl NativeSessionInventoryGuard {
             attempt = attempt.saturating_add(1);
             let active_conn = fresh.as_ref().unwrap_or(&self.connection);
             let mut tx = active_conn.transaction()?;
-            write_observed_outcome(&mut tx, &self.admission, outcome)?;
-            check_bounds(&tx)?;
+            write_observed_outcome_and_check_bounds(&mut tx, &self.admission, outcome)?;
             tx.commit()?;
             drop(tx);
             // Keep the WAL bounded so subsequent opens do not replay hundreds
@@ -3290,6 +3372,42 @@ fn serialize_project_admission(tx: &mut Transaction<'_>, project_root: &Path) ->
     Ok(())
 }
 
+fn serialize_project_admissions(tx: &mut Transaction<'_>, scopes: &BTreeSet<&Path>) -> Result<()> {
+    let mut keys = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        keys.push(project_key(scope)?);
+    }
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let nonce = uuid::Uuid::now_v7().to_string();
+    let mut sql = String::from(
+        "INSERT INTO native_session_admission_serialization(project_root, transaction_nonce) VALUES ",
+    );
+    let mut params = Vec::with_capacity(keys.len().saturating_mul(2));
+    for (idx, key) in keys.into_iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(", ");
+        }
+        let base = idx * 2 + 1;
+        use std::fmt::Write as _;
+        let _ = write!(sql, "(?{base}, ?{})", base + 1);
+        params.push(SqliteValue::Text(key.to_owned().into()));
+        params.push(SqliteValue::Text(nonce.clone().into()));
+    }
+    sql.push_str(
+        " ON CONFLICT(project_root) DO UPDATE SET transaction_nonce = excluded.transaction_nonce;",
+    );
+    tx.execute_with_params(&sql, &params)?;
+    Ok(())
+}
+
+fn drains_table_has_rows_unchecked(tx: &Transaction<'_>) -> Result<bool> {
+    Ok(!tx
+        .query("SELECT 1 FROM native_session_drains LIMIT 1;")?
+        .is_empty())
+}
+
 fn drains_table_has_rows(tx: &Transaction<'_>) -> Result<bool> {
     if tx
         .query(
@@ -3299,9 +3417,7 @@ fn drains_table_has_rows(tx: &Transaction<'_>) -> Result<bool> {
     {
         return Ok(false);
     }
-    Ok(!tx
-        .query("SELECT 1 FROM native_session_drains LIMIT 1;")?
-        .is_empty())
+    drains_table_has_rows_unchecked(tx)
 }
 
 fn latest_drain(
@@ -3432,12 +3548,13 @@ fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u6
 /// The public drain generation remains scoped to its exact control owner.
 /// Return held fences and overflow as data so a raced admission can retain its
 /// authenticated never-spawned outcome instead of an unresolved identity capture.
-fn admission_scope_state(
+fn admission_scope_state_with_drains(
     tx: &Transaction<'_>,
     project_root: &Path,
+    drains_has_rows: bool,
 ) -> Result<(Option<u64>, Option<String>)> {
     project_key(project_root)?;
-    if !drains_table_has_rows(tx)? {
+    if !drains_has_rows {
         return Ok((Some(0), None));
     }
     let mut generation = Some(0_u64);
@@ -3612,8 +3729,10 @@ fn admission_ticket_with_connection_at_preopened(
         };
         let (generation, held_fence, schema_verified) = {
             let mut tx = connection.transaction()?;
-            let (generation, held_fence) = admission_scope_state(&tx, project_root)?;
-            let schema_verified = inventory_schema_is_current_in_tx(&tx);
+            let (schema_verified, has_drains_table) = inventory_tables_present(&tx)?;
+            let drains_has_rows = has_drains_table && drains_table_has_rows_unchecked(&tx)?;
+            let (generation, held_fence) =
+                admission_scope_state_with_drains(&tx, project_root, drains_has_rows)?;
             tx.commit()?;
             (generation, held_fence, schema_verified)
         };
@@ -13628,5 +13747,71 @@ mod tests {
                 .contains("fenced by local fleet drain"),
             "unexpected error: {fenced_err:#}"
         );
+    }
+
+    #[test]
+    fn batched_serialization_and_combined_outcome_bounds_preserve_invariants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 92);
+        let project = admission.project_root.clone();
+
+        // Admit using batched ancestor serialization + single-query drain probe.
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        let outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Completed,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: false,
+            effects: clean_compaction_ledger_observation(),
+            panic_evidence: None,
+        };
+        guard.persist_outcome(&outcome).unwrap();
+
+        // Verify all project ancestors were recorded in the serialization table.
+        let conn = open_inventory(&root, false).unwrap().unwrap();
+        let tx = conn.transaction().unwrap();
+        let expected_ancestors: BTreeSet<String> = project
+            .ancestors()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let rows = tx
+            .query("SELECT project_root FROM native_session_admission_serialization;")
+            .unwrap();
+        let actual: BTreeSet<String> = rows
+            .into_iter()
+            .filter_map(|row| match row.values() {
+                [SqliteValue::Text(text)] => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual, expected_ancestors);
+
+        // Verify combined outcome persistence still rejects conflicting overwrite
+        // and missing admissions identically.
+        let mut tx_mut = tx;
+        let conflicting = NativeSessionOutcome {
+            kind: NativeSessionOutcomeKind::ExecutionFailed,
+            ..outcome
+        };
+        let err = write_observed_outcome_and_check_bounds(&mut tx_mut, &admission, &conflicting)
+            .expect_err("conflicting outcome must fail immutability check");
+        assert!(err.to_string().contains("immutable once observed"), "{err}");
+
+        let mut missing = admission.clone();
+        missing.session_nonce = uuid::Uuid::now_v7().to_string();
+        let missing_err =
+            write_observed_outcome_and_check_bounds(&mut tx_mut, &missing, &conflicting)
+                .expect_err("missing admission must fail");
+        assert!(
+            missing_err
+                .to_string()
+                .contains("disappeared before outcome persistence"),
+            "{missing_err}"
+        );
+        drop(tx_mut);
+        guard.finished = true;
     }
 }

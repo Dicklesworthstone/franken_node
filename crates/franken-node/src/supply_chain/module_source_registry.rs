@@ -2838,7 +2838,7 @@ import('./dep.mjs', {with:{color:'blue',type:'json'}});
         assert_eq!(
             requests
                 .iter()
-                .filter(|(_, s, _, _, _)| s == "./shared.mjs")
+                .filter(|(_, s, _, _, _, _)| s == "./shared.mjs")
                 .count(),
             2
         );
