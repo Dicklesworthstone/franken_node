@@ -462,7 +462,7 @@ if mode.startswith("archive_"):
                         "error": {"code": "ARCHIVE_ARGUMENT_MISSING", "message": "archive root pin was not forwarded"}}
             exit_code = 2
 graph_prefix = next((prefix for prefix in ("publisher_graph_witness_", "publisher_trust_graph_witness_",
-                                          "incident_graph_witness_")
+                                          "incident_graph_witness_", "native_v3_graph_witness_")
                      if mode.startswith(prefix)), None)
 if graph_prefix is not None:
     source = response["facts"]["source"] if mode.startswith("publisher_trust_") else response["facts"]
@@ -498,6 +498,17 @@ if graph_prefix is not None:
                 "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
                 "signed_epoch": "18446744073709551615",
             }
+    elif graph_prefix == "native_v3_graph_witness_":
+        raw = json.loads(data).get("admission_json", "{}")
+        if not isinstance(raw, str):
+            raw = "{}"
+        admission_bytes = raw.encode("utf-8")
+        source["admission_sha256"] = hashlib.sha256(
+            b"franken-node/native-session-admission/v1\0"
+            + len(admission_bytes).to_bytes(8, "big") + admission_bytes
+        ).hexdigest()
+        source["durable_journal"]["admission_sha256"] = source["admission_sha256"]
+        capsule, capsule_digest = source["source_capsule"], "sha256:" + "c" * 64
     else:
         capsule, capsule_digest = source["capsule"], source["capsule_digest"]
     report_bytes = b"{}\n"
@@ -573,6 +584,36 @@ if graph_prefix is not None:
             source["run_origin"]["signer_public_key_hex"] = anchor
         elif action == "wrong_runtime_anchor":
             source["runtime_origin"]["product_root_key_id"] = "ed25519:" + anchor
+    if graph_prefix == "native_v3_graph_witness_":
+        if action == "wrong_source_graph":
+            source["source_capsule"]["graph_input_hash"] = "sha256:" + "f" * 64
+            source["graph_report"]["graph_input_hash"] = "sha256:" + "f" * 64
+        elif action == "wrong_source_length":
+            source["source_capsule"]["capsule_bytes"] += 1
+        elif action == "wrong_admission":
+            source["admission_sha256"] = "f" * 64
+            source["durable_journal"]["admission_sha256"] = "f" * 64
+        elif action == "wrong_session":
+            source["session_nonce"] = "0199abcd-1234-7000-8000-123456789abd"
+            source["durable_journal"]["session_nonce"] = source["session_nonce"]
+        elif action == "downgrade":
+            source["schema_version"] = "franken-node/native-session-forensics/v2"
+            del source["source_capsule"]
+        elif action == "wrong_scope":
+            response["scope"] = "authenticated_native_execution"
+        elif action in ("replay_claim", "quiescence_claim", "history_claim"):
+            field = {"replay_claim": "replay_certified", "quiescence_claim": "quiescence_certified",
+                     "history_claim": "historical_completeness"}[action]
+            source[field] = True
+        if action == "forwarded":
+            receipt = json.loads(data)["admission_receipt"]
+            for option, expected in (("--expected-session-nonce", receipt["session_nonce"]),
+                                     ("--expected-admission-sha256", receipt["admission_sha256"])):
+                if sys.argv.count(option) != 1 or sys.argv[sys.argv.index(option) + 1] != expected:
+                    response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
+                                "error": {"code": "NATIVE_ARGUMENT_MISSING", "message": "native identity was not forwarded"}}
+                    exit_code = 2
+                    break
     if action == "forwarded":
         expected_path = json.loads(data).get("expected_graph_report_path")
         if (sys.argv.count("--graph-report") != 1

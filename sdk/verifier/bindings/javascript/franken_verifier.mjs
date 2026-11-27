@@ -262,6 +262,38 @@ function incidentGraphMatches(facts, bytes) {
   }
 }
 
+function nativeSessionGraphMatches(facts, bytes) {
+  try {
+    // Keep the exact signed admission spelling, including lossless u64 text.
+    // The Rust verifier authenticates it; this check prevents a response from
+    // substituting a different source commitment or native admission.
+    const envelope = sessionPolicyJson(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    const raw = envelope.admission_json;
+    if (envelope.schema_version !== "franken-node/native-session-forensics/v3"
+        || typeof envelope.source_capsule_base64 !== "string"
+        || typeof raw !== "string" || Buffer.from(raw, "utf8").toString("utf8") !== raw) return false;
+    const admissionBytes = Buffer.from(raw, "utf8");
+    if (admissionBytes.length === 0 || admissionBytes.length > 4 * 1024 * 1024) return false;
+    const admission = sessionPolicyJson(raw);
+    const source = admission.source_capsule;
+    const receipt = envelope.admission_receipt;
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(admissionBytes.length));
+    const admissionHash = createHash("sha256").update("franken-node/native-session-admission/v1\0")
+      .update(length).update(admissionBytes).digest("hex");
+    return keys(source, ["capsule_digest", "graph_input_hash", "capsule_bytes"])
+      && object(receipt) && receipt.schema_version === "franken-node/native-session-admission-receipt/v1"
+      && ["session_nonce", "product_root_key_id"].every((field) =>
+        receipt[field] === facts[field] && admission[field] === facts[field])
+      && receipt.admission_sha256 === admissionHash && facts.admission_sha256 === admissionHash
+      && facts.graph_report.capsule_digest === source.capsule_digest
+      && facts.graph_report.graph_input_hash === source.graph_input_hash
+      && facts.source_capsule.capsule_bytes === source.capsule_bytes;
+  } catch {
+    return false;
+  }
+}
+
 async function readGraphReportDigest(path) {
   let file;
   try {
@@ -358,14 +390,14 @@ function nativeArchiveValid(facts, anchor) {
       "historical_completeness"].every((key) => facts[key] === false);
 }
 
-function nativeSessionValid(facts, anchor) {
+function nativeSessionValid(facts, anchor, graphReportRequested = false) {
   const sourceBacked = object(facts) && facts.schema_version === "franken-node/native-session-forensics/v3";
   if (!keys(facts, ["schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
     "project_root", "entrypoint", "security_epoch", "admitted_at", "observed_at", "outcome_kind",
     "process_observation", "effect_observation", "containment_empty_observed", "completed_provider_calls",
     "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
     "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness",
-    ...(sourceBacked ? ["source_capsule"] : [])])
+    ...(sourceBacked ? ["source_capsule"] : []), ...(graphReportRequested ? ["graph_report"] : [])])
       || !["franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2",
         "franken-node/native-session-forensics/v3"].includes(facts.schema_version)
       || facts.scope !== "authenticated_supervisor_observations"
@@ -385,6 +417,9 @@ function nativeSessionValid(facts, anchor) {
   if (project === null || entry === null || entry.length <= project.length
       || project.some((part, index) => part !== entry[index])) return false;
   if (sourceBacked && !sourceCapsuleValid(facts.source_capsule, 40 * 1024 * 1024 + 12, 32 * 1024 * 1024)) return false;
+  if (graphReportRequested && (!sourceBacked || !sourceGraphCommitmentValid(facts.graph_report)
+      || facts.graph_report.graph_input_hash !== facts.source_capsule.graph_input_hash
+      || facts.graph_report.observation_count !== facts.source_capsule.input_count)) return false;
   const journal = facts.durable_journal;
   if (facts.schema_version === "franken-node/native-session-forensics/v1") {
     if (journal !== null) return false;
@@ -680,7 +715,7 @@ function fleetFactsValid(facts, trusted, bytes, coordinator) {
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   revocationAnchor, provenanceAnchor, evaluationTime, maxAge, incidentAnchor, expectedBaseline,
   graphReportRequested = false) {
-  if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
+  if (format === "native-session-forensics") return nativeSessionValid(facts, anchor, graphReportRequested);
   if (format === "native-session-cold-archive") return nativeArchiveValid(facts, anchor);
   if (format === "publisher-source-trust") {
     return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge,
@@ -808,9 +843,10 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * signature and matching run data. Missing proof or downgraded scope fails.
  * trustedRuntimePublicKeyHex additionally requires the original product-root
  * and session signatures; it does not establish guest execution or cleanup.
- * graphReport accepts a bounded regular SourceGraphReport file for incident
- * and publisher-source formats. Its returned digest must match the caller-read
- * bytes. Incident graph and capsule identities bind to the exact native capture.
+ * graphReport accepts a bounded regular SourceGraphReport file for incident,
+ * native-session-forensics and publisher-source formats. Its returned digest
+ * must match the caller-read bytes. Graph and capsule identities bind to the
+ * exact native capture or signed pre-entry admission, including caller pins.
  * This preserves origin scope and never establishes parser/resolver semantics.
  * Counterfactual incidents require an independent incident exporter key and
  * caller-pinned raw lowercase baseline integrity hash. The primary key and
@@ -920,8 +956,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     throw new VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust");
   }
   if (graphReport !== undefined) {
-    if (!["incident-bundle", "publisher-source", "publisher-source-trust"].includes(format)) {
-      throw new VerifierError("INPUT_INVALID", "graph reports require an incident or publisher-source format");
+    if (!["incident-bundle", "native-session-forensics", "publisher-source", "publisher-source-trust"].includes(format)) {
+      throw new VerifierError("INPUT_INVALID", "graph reports require an incident, native-session-forensics or publisher-source format");
     }
     if (typeof graphReport !== "string" || graphReport.length === 0 || graphReport.includes("\0")
         || Buffer.from(graphReport, "utf8").toString("utf8") !== graphReport) {
@@ -1026,7 +1062,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       if (graphReport !== undefined) {
         const source = format === "publisher-source-trust" ? result.facts.source : result.facts;
         if (source.graph_report.report_sha256 !== graphReportDigest
-            || (format === "incident-bundle" && !incidentGraphMatches(source, bytes))) {
+            || (format === "incident-bundle" && !incidentGraphMatches(source, bytes))
+            || (format === "native-session-forensics" && !nativeSessionGraphMatches(source, bytes))) {
           return reject(new VerifierError("PROTOCOL_INVALID", "graph commitment does not match the requested inputs"));
         }
       }

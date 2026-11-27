@@ -1609,6 +1609,67 @@ const nativePins = (fixture) => ({
   expected_session_nonce: fixture.bundle.admission_receipt.session_nonce,
   expected_admission_sha256: fixture.bundle.admission_receipt.admission_sha256,
 });
+// Independently signed source-backed admissions exercise the same witness at
+// pending, durable-interruption and terminal stages. The graph is retained
+// evidence, never a claim that native execution completed or was replayed.
+const nativeGraphPending = nativeFixture(18_446_744_073_709_551_615n,
+  "/removed/project", graphSourceBytes);
+const nativeGraphInterrupted = nativeJournal(nativeOutcome(
+  nativeFixture(7n, "/removed/project", graphSourceBytes), nativeInterrupted(), {
+    completed_provider_calls: 1, indeterminate_provider_calls: 1, journal_complete: true,
+  }), [nativeAdmit(0), nativeReturn(0), nativeAdmit(1)], true);
+const nativeGraphCompleted = nativeOutcome(nativeFixture(7n, "/removed/project", graphSourceBytes), {
+  observed_at: "2026-11-14T12:00:01Z", kind: "completed", process: "worker_reaped",
+  containment_empty_observed: true, effects: { kind: "final_ledger_observed", effect_count: 3,
+    allowed_count: 2, denied_count: 0, failed_count: 1, chain_head_hash: "sha256:" + "a".repeat(64),
+    ledger_sha256: "b".repeat(64) },
+}, { final_ledger_effect_count: 3, failed_effect_count: 1 });
+for (const [name, fixture] of [["pending_max_epoch", nativeGraphPending],
+  ["pending_journal", nativeJournal(clone(nativeGraphPending), [])],
+  ["interrupted_journal", nativeGraphInterrupted], ["completed", nativeGraphCompleted]]) {
+  const withGraph = clone(fixture);
+  withGraph.facts.graph_report = clone(graphCommitment);
+  addNative(`native_graph_witness_${name}`, withGraph, "verified", {
+    graph_report_path: graphReportPath, ...nativePins(fixture),
+  });
+}
+const nativeGraphUnpinned = clone(nativeGraphPending);
+nativeGraphUnpinned.facts.graph_report = clone(graphCommitment);
+addNative("native_graph_witness_unpinned", nativeGraphUnpinned, "verified", { graph_report_path: graphReportPath });
+for (const [name, fixture, reportPath, expected, pins] of [
+  ["v1_without_sources", nativePending, graphReportPath, "GRAPH_REPORT_MISSING", {}],
+  ["v2_without_sources", nativeDurable, graphReportPath, "GRAPH_REPORT_MISSING", {}],
+  ["foreign_capsule", nativeSourcePending, graphReportPath, "GRAPH_REPORT_INVALID", {}],
+  ["changed_report", nativeGraphPending, changedGraphReportPath, "GRAPH_REPORT_INVALID", {}],
+  ["invalid_report", nativeGraphPending, invalidIncidentGraphPath, "GRAPH_REPORT_INVALID", {}],
+  ["ambiguous_report", nativeGraphPending, ambiguousIncidentGraphPath, "GRAPH_REPORT_INVALID", {}],
+  ["missing_file", nativeGraphPending, "absent-native-graph.json", "GRAPH_REPORT_IO", {}],
+  ["wrong_nonce", nativeGraphPending, graphReportPath, "EXPECTED_NATIVE_IDENTITY_MISMATCH", {
+    ...nativePins(nativeGraphPending), expected_session_nonce: "0199abcd-1234-7000-8000-123456789abd",
+  }],
+  ["wrong_admission", nativeGraphPending, graphReportPath, "EXPECTED_NATIVE_IDENTITY_MISMATCH", {
+    ...nativePins(nativeGraphPending), expected_admission_sha256: "0".repeat(64),
+  }],
+]) addNative(`native_graph_witness_${name}`, fixture, expected, { graph_report_path: reportPath, ...pins });
+for (const [name, fixture, mutate, expected] of [
+  ["admission_signature", nativeGraphPending,
+    (bundle) => { bundle.admission_receipt.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID"],
+  ["outcome_signature", nativeGraphCompleted,
+    (bundle) => { bundle.outcome.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID"],
+  ["source_bytes", nativeGraphPending, (bundle) => {
+    const bytes = Buffer.from(bundle.source_capsule_base64, "base64");
+    bytes[bytes.length - 1] ^= 1;
+    bundle.source_capsule_base64 = bytes.toString("base64");
+  }, "SOURCE_CAPSULE_INVALID"],
+  ["foreign_journal", nativeGraphInterrupted,
+    (bundle) => { bundle.journal_jsonl = nativeDurable.bundle.journal_jsonl; }, "IDENTITY_INVALID"],
+]) {
+  const changed = clone(fixture);
+  mutate(changed.bundle);
+  addNative(`native_graph_witness_rejects_${name}`, changed, expected, {
+    graph_report_path: graphReportPath, ...nativePins(fixture),
+  });
+}
 for (const [name, fixture] of [["pending", nativePending], ["journal", nativeDurable],
   ["source", nativeSourcePending], ["panic", nativePanic]]) {
   addNative(`native_expected_identity_${name}`, fixture, "verified", nativePins(fixture));

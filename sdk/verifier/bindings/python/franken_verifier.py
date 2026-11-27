@@ -279,6 +279,8 @@ class SourceCapsuleSummary(TypedDict):
 class _NativeSessionSourceFacts(TypedDict, total=False):
     # Required by v3 and absent from v1/v2; checked before returning a result.
     source_capsule: SourceCapsuleSummary
+    # Present only for a requested witness over an authenticated v3 capsule.
+    graph_report: SourceGraphCommitment
 
 
 class NativeSessionColdArchiveFacts(TypedDict):
@@ -763,6 +765,40 @@ def _incident_graph_matches(facts: dict[str, Any], data: bytes) -> bool:
         return False
 
 
+def _native_session_graph_matches(facts: dict[str, Any], data: bytes) -> bool:
+    """Bind graph facts to exact signed admission bytes, without opening sources."""
+    try:
+        envelope = json.loads(data.decode("utf-8"), object_pairs_hook=_object)
+        raw = envelope["admission_json"]
+        if (envelope["schema_version"] != "franken-node/native-session-forensics/v3"
+                or not isinstance(envelope["source_capsule_base64"], str)
+                or not isinstance(raw, str)):
+            return False
+        admission_bytes = raw.encode("utf-8")
+        if not 0 < len(admission_bytes) <= 4 * 1024 * 1024:
+            return False
+        admission = json.loads(raw, object_pairs_hook=_object)
+        source, receipt = admission["source_capsule"], envelope["admission_receipt"]
+        admission_hash = hashlib.sha256(
+            b"franken-node/native-session-admission/v1\0"
+            + len(admission_bytes).to_bytes(8, "big") + admission_bytes
+        ).hexdigest()
+        return (
+            isinstance(source, dict) and set(source) == {"capsule_digest", "graph_input_hash", "capsule_bytes"}
+            and isinstance(receipt, dict)
+            and receipt["schema_version"] == "franken-node/native-session-admission-receipt/v1"
+            and all(receipt[field] == facts[field] == admission[field]
+                    for field in ("session_nonce", "product_root_key_id"))
+            and receipt["admission_sha256"] == admission_hash == facts["admission_sha256"]
+            and facts["graph_report"]["capsule_digest"] == source["capsule_digest"]
+            and facts["graph_report"]["graph_input_hash"] == source["graph_input_hash"]
+            and type(source["capsule_bytes"]) is int
+            and facts["source_capsule"]["capsule_bytes"] == source["capsule_bytes"]
+        )
+    except (UnicodeError, ValueError, TypeError, KeyError, RecursionError):
+        return False
+
+
 def _read_graph_report_digest(path: str) -> str:
     """Pin the bounded caller-read bytes before the verifier opens the path."""
     try:
@@ -895,7 +931,7 @@ def _native_archive_valid(facts: Any, anchor: str) -> bool:
     )
 
 
-def _native_session_valid(facts: Any, anchor: str) -> bool:
+def _native_session_valid(facts: Any, anchor: str, graph_report_requested: bool = False) -> bool:
     source_backed = isinstance(facts, dict) and facts.get("schema_version") == "franken-node/native-session-forensics/v3"
     if (not isinstance(facts, dict) or set(facts) != {
             "schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
@@ -904,6 +940,7 @@ def _native_session_valid(facts: Any, anchor: str) -> bool:
             "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
             "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness",
             *({"source_capsule"} if source_backed else set()),
+            *({"graph_report"} if graph_report_requested else set()),
         }
             or facts["schema_version"] not in ("franken-node/native-session-forensics/v1",
                                                "franken-node/native-session-forensics/v2",
@@ -925,6 +962,12 @@ def _native_session_valid(facts: Any, anchor: str) -> bool:
     if project is None or entry is None or len(entry) <= len(project) or entry[:len(project)] != project:
         return False
     if source_backed and not _source_capsule_valid(facts["source_capsule"], 40 * 1024 * 1024 + 12, 32 * 1024 * 1024):
+        return False
+    if graph_report_requested and (
+        not source_backed or not _source_graph_commitment_valid(facts["graph_report"])
+        or facts["graph_report"]["graph_input_hash"] != facts["source_capsule"]["graph_input_hash"]
+        or facts["graph_report"]["observation_count"] != facts["source_capsule"]["input_count"]
+    ):
         return False
     journal = facts["durable_journal"]
     if facts["schema_version"] == "franken-node/native-session-forensics/v1":
@@ -1212,7 +1255,7 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  max_age: str | None = None, incident_anchor: str | None = None,
                  expected_baseline: str | None = None, graph_report_requested: bool = False) -> bool:
     if format == "native-session-forensics":
-        return _native_session_valid(facts, anchor)
+        return _native_session_valid(facts, anchor, graph_report_requested)
     if format == "native-session-cold-archive":
         return _native_archive_valid(facts, anchor)
     if format == "publisher-source-trust":
@@ -1432,9 +1475,11 @@ def verify_artifact(
     """Authenticate raw artifact bytes using an explicit trusted executable/key.
 
     ``graph_report`` supplies a bounded regular SourceGraphReport JSON file for
-    incident-bundle or publisher-source formats. The returned commitment must
-    match the caller-read report bytes and authenticated capsule. Incidents bind
-    it to their exact retained native capture without changing origin scope.
+    incident-bundle, native-session-forensics or publisher-source formats. The
+    returned commitment must match the caller-read report and authenticated
+    capsule. Incidents bind it to their exact retained native capture; native
+    sessions bind it to their signed pre-entry admission and optional identity
+    pins without changing supervisor-observation scope.
     This does not reconstruct parser/resolver semantics or execute sources.
     Supported formats and proof scopes are in ``_SCOPES``. Capsule verification
     re-derives signed content hashes; incident verification checks recorded
@@ -1569,8 +1614,8 @@ def verify_artifact(
         raise VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust")
     graph_report_path = None
     if graph_report is not None:
-        if format not in ("incident-bundle", "publisher-source", "publisher-source-trust"):
-            raise VerifierError("INPUT_INVALID", "graph reports require an incident or publisher-source format")
+        if format not in ("incident-bundle", "native-session-forensics", "publisher-source", "publisher-source-trust"):
+            raise VerifierError("INPUT_INVALID", "graph reports require an incident, native-session-forensics or publisher-source format")
         try:
             graph_report_path = os.fspath(graph_report)
             if not isinstance(graph_report_path, str) or not graph_report_path or "\0" in graph_report_path:
@@ -1695,7 +1740,8 @@ def verify_artifact(
     if graph_report_path is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
         if (source["graph_report"]["report_sha256"] != graph_report_digest
-                or (format == "incident-bundle" and not _incident_graph_matches(source, data))):
+                or (format == "incident-bundle" and not _incident_graph_matches(source, data))
+                or (format == "native-session-forensics" and not _native_session_graph_matches(source, data))):
             raise VerifierError("PROTOCOL_INVALID", "graph commitment does not match the requested inputs")
     if format == "native-session-cold-archive":
         if result["facts"]["archive_sha256"] != result["artifact_sha256"]:

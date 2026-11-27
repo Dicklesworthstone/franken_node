@@ -75,7 +75,7 @@ let graphPositive = 0;
 let graphNegative = 0;
 let incidentGraphPositive = 0;
 let incidentGraphNegative = 0;
-for (const source of cases.filter((item) => item.graph_report_path !== undefined)) {
+for (const source of cases.filter((item) => item.graph_report_path !== undefined && item.format !== "native-session-forensics")) {
   if (source.format !== "incident-bundle" && source.format !== "publisher-source" && source.format !== "publisher-source-trust") {
     throw new Error("graph witness matrix has an unsupported format");
   }
@@ -327,6 +327,7 @@ for (const observation of cases.filter((item) => item.format === "native-session
   try {
     const verified = await verifyArtifact(Buffer.from(observation.input_hex, "hex"), observation.anchor,
       { verifier: resolve("verifier"), format: "native-session-forensics",
+        graphReport: observation.graph_report_path,
         expectedSessionNonce: observation.expected_session_nonce,
         expectedAdmissionSha256: observation.expected_admission_sha256 });
     if (observation.expected !== "verified" || verified.format !== "native-session-forensics"
@@ -358,6 +359,18 @@ for (const observation of cases.filter((item) => item.format === "native-session
       const inputCount: number = source.input_count;
       assert.equal(reconstructed, false);
       assert(inputCount > 0);
+      if (observation.graph_report_path !== undefined) {
+        const graph = verified.facts.graph_report;
+        assert(graph !== undefined);
+        const rehashed: true = graph.graph_hash_recomputed;
+        const semantics: false = graph.graph_semantics_reconstructed;
+        assert.equal(rehashed, true);
+        assert.equal(semantics, false);
+        assert.equal(graph.graph_input_hash, source.graph_input_hash);
+        assert.equal(graph.observation_count, inputCount);
+      } else {
+        assert.equal(verified.facts.graph_report, undefined);
+      }
       if (verified.facts.durable_journal !== null) {
         const retained: number = verified.facts.durable_journal.record_count;
         assert(retained > 0);

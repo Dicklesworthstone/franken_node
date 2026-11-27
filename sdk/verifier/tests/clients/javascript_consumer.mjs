@@ -791,6 +791,83 @@ for (const path of ["", null, false, 7, [], {}, "private\0report", "\ud800"]) {
   (error) => error instanceof VerifierError && error.code === "GRAPH_REPORT_INVALID" && error.exitCode === null);
   graphClientCases += 1;
 }
+const nativeGraphAdmission = {
+  session_nonce: "0199abcd-1234-7000-8000-123456789abc", product_root_key_id: "ed25519:" + cases[0].anchor,
+  source_capsule: { capsule_digest: "sha256:" + "c".repeat(64),
+    graph_input_hash: "sha256:" + "d".repeat(64), capsule_bytes: 128 },
+};
+const nativeGraphRaw = JSON.stringify(nativeGraphAdmission);
+function nativeGraphInput(action, raw = nativeGraphRaw) {
+  const bytes = Buffer.from(raw), length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(bytes.length));
+  return Buffer.from(JSON.stringify({
+    protocol_control: "native_v3_graph_witness_" + action,
+    expected_graph_report_path: graphWitnessPath,
+    schema_version: "franken-node/native-session-forensics/v3", admission_json: raw,
+    admission_receipt: {
+      schema_version: "franken-node/native-session-admission-receipt/v1",
+      session_nonce: nativeGraphAdmission.session_nonce, product_root_key_id: nativeGraphAdmission.product_root_key_id,
+      admission_sha256: createHash("sha256").update("franken-node/native-session-admission/v1\0")
+        .update(length).update(bytes).digest("hex"),
+    },
+    source_capsule_base64: "Y2Fwc3VsZQ==", outcome: null,
+  }));
+}
+const nativeGraphOptions = { verifier: resolve("fake_verifier"), format: "native-session-forensics",
+  graphReport: graphWitnessPath };
+const nativeGraphReceipt = JSON.parse(nativeGraphInput("valid")).admission_receipt;
+for (const pinned of [false, true]) {
+  writeFileSync(graphWitnessPath, graphWitnessBytes);
+  const verified = await verifyArtifact(nativeGraphInput(pinned ? "forwarded" : "valid"), cases[0].anchor,
+    { ...nativeGraphOptions, ...(pinned ? { expectedSessionNonce: nativeGraphReceipt.session_nonce,
+      expectedAdmissionSha256: nativeGraphReceipt.admission_sha256 } : {}) });
+  assert.equal(verified.scope, "authenticated_supervisor_observations");
+  assert.equal(verified.facts.graph_report.report_sha256, createHash("sha256").update(graphWitnessBytes).digest("hex"));
+  assert.equal(verified.facts.graph_report.graph_hash_recomputed, true);
+  assert.equal(verified.facts.graph_report.graph_semantics_reconstructed, false);
+  assert.equal(verified.facts.source_capsule.graph_hash_recomputed, false);
+  assert.equal(verified.facts.outcome_kind, "interrupted");
+  assert.equal(verified.facts.replay_certified || verified.facts.quiescence_certified
+    || verified.facts.historical_completeness, false);
+  graphProtocolCases += 1;
+}
+for (const control of [...graphWitnessControls, "wrong_source_graph", "wrong_source_length",
+  "wrong_admission", "wrong_session", "downgrade", "wrong_scope", "replay_claim", "quiescence_claim", "history_claim"]) {
+  writeFileSync(graphWitnessPath, graphWitnessBytes);
+  await assert.rejects(verifyArtifact(nativeGraphInput(control), cases[0].anchor, nativeGraphOptions),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID"
+      && !error.message.includes(graphWitnessPath), "native graph " + control);
+  graphProtocolCases += 1;
+}
+writeFileSync(graphWitnessPath, graphWitnessBytes);
+for (const raw of ["{}", "{",
+  nativeGraphRaw.replace('"source_capsule":', '"source_capsule":{},"source_capsule":'),
+  nativeGraphRaw.replace('"source_capsule":', '"source_capsule":{},"source_\\u0063apsule":'),
+  nativeGraphRaw.replace('"capsule_bytes":128', '"capsule_bytes":129'),
+  nativeGraphRaw.replace('"capsule_bytes":128', '"capsule_bytes":128,"unsigned_claim":true'),
+]) {
+  await assert.rejects(verifyArtifact(nativeGraphInput("valid", raw), cases[0].anchor, nativeGraphOptions),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
+}
+for (const input of [
+  Buffer.from(nativeGraphInput("valid").toString().replace('"admission_json":', '"admission_json":"{}","admission_json":')),
+  Buffer.from(nativeGraphInput("valid").toString().replace('native-session-admission-receipt/v1', 'untrusted/v1')),
+]) {
+  await assert.rejects(verifyArtifact(input, cases[0].anchor, nativeGraphOptions),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+  graphProtocolCases += 1;
+}
+await assert.rejects(verifyArtifact(nativeGraphInput("unsolicited"), cases[0].anchor,
+  { verifier: resolve("fake_verifier"), format: "native-session-forensics" }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID");
+graphProtocolCases += 1;
+for (const path of ["", null, false, 7, [], {}, "private\0report", "\ud800"]) {
+  await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+    { verifier: resolve("does-not-exist"), format: "native-session-forensics", graphReport: path }),
+    (error) => error instanceof VerifierError && error.code === "GRAPH_REPORT_INVALID" && error.exitCode === null);
+  graphClientCases += 1;
+}
 const graphFiles = mkdtempSync(join(tmpdir(), "franken-graph-input-"));
 const oversizedGraph = join(graphFiles, "PRIVATE-oversized-report.json");
 const graphDescriptor = openSync(oversizedGraph, "w");

@@ -127,6 +127,30 @@ export async function auditIncidentGraph(
   return verified.facts.graph_report.report_sha256;
 }
 
+export async function auditNativeSessionGraph(
+  data: Uint8Array, rootAnchor: string, sessionNonce: string, admissionSha256: string,
+  reportPath: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, rootAnchor, {
+    verifier: executable, format: "native-session-forensics", graphReport: reportPath,
+    expectedSessionNonce: sessionNonce, expectedAdmissionSha256: admissionSha256,
+  });
+  if (verified.format !== "native-session-forensics"
+      || verified.facts.schema_version !== "franken-node/native-session-forensics/v3"
+      || verified.facts.graph_report === undefined) {
+    throw new Error("original native admission and requested graph commitment required");
+  }
+  const recomputed: true = verified.facts.graph_report.graph_hash_recomputed;
+  const semantics: false = verified.facts.graph_report.graph_semantics_reconstructed;
+  const replay: false = verified.facts.replay_certified;
+  const quiescence: false = verified.facts.quiescence_certified;
+  const history: false = verified.facts.historical_completeness;
+  if (!recomputed || semantics || replay || quiescence || history) {
+    throw new Error("graph commitments cannot certify native execution or complete history");
+  }
+  return verified.facts.graph_report.report_sha256;
+}
+
 export async function auditCounterfactualIncident(
   data: Uint8Array, receiptAnchor: string, incidentAnchor: string, expectedBaseline: string,
   signature: string, runAnchor: string, runtimeAnchor: string, executable: string,

@@ -975,6 +975,101 @@ for path in ("", False, 7, [], {}, b"private-report.json", "private\0report", "\
     else:
         raise AssertionError("invalid incident graph path reached the verifier")
     graph_client_cases += 1
+native_graph_admission = {
+    "session_nonce": "0199abcd-1234-7000-8000-123456789abc", "product_root_key_id": "ed25519:" + cases[0]["anchor"],
+    "source_capsule": {"capsule_digest": "sha256:" + "c" * 64,
+                       "graph_input_hash": "sha256:" + "d" * 64, "capsule_bytes": 128},
+}
+native_graph_raw = json.dumps(native_graph_admission, separators=(",", ":"))
+
+
+def native_graph_input(action: str, raw: str = native_graph_raw) -> bytes:
+    admission_bytes = raw.encode("utf-8")
+    return json.dumps({
+        "protocol_control": "native_v3_graph_witness_" + action,
+        "expected_graph_report_path": graph_witness_path,
+        "schema_version": "franken-node/native-session-forensics/v3", "admission_json": raw,
+        "admission_receipt": {
+            "schema_version": "franken-node/native-session-admission-receipt/v1",
+            "session_nonce": native_graph_admission["session_nonce"],
+            "product_root_key_id": native_graph_admission["product_root_key_id"],
+            "admission_sha256": hashlib.sha256(b"franken-node/native-session-admission/v1\0"
+                + len(admission_bytes).to_bytes(8, "big") + admission_bytes).hexdigest(),
+        },
+        "source_capsule_base64": "Y2Fwc3VsZQ==", "outcome": None,
+    }).encode()
+
+
+native_graph_options = {"verifier": root / "fake_verifier", "format": "native-session-forensics",
+                        "graph_report": Path(graph_witness_path)}
+native_graph_receipt = json.loads(native_graph_input("valid"))["admission_receipt"]
+for pinned in (False, True):
+    Path(graph_witness_path).write_bytes(graph_witness_bytes)
+    pins = ({"expected_session_nonce": native_graph_receipt["session_nonce"],
+             "expected_admission_sha256": native_graph_receipt["admission_sha256"]} if pinned else {})
+    verified = verify_artifact(native_graph_input("forwarded" if pinned else "valid"), cases[0]["anchor"],
+                               **native_graph_options, **pins)
+    facts = verified["facts"]
+    assert verified["scope"] == "authenticated_supervisor_observations"
+    assert facts["graph_report"]["report_sha256"] == hashlib.sha256(graph_witness_bytes).hexdigest()
+    assert facts["graph_report"]["graph_hash_recomputed"] is True
+    assert facts["graph_report"]["graph_semantics_reconstructed"] is False
+    assert facts["source_capsule"]["graph_hash_recomputed"] is False
+    assert facts["outcome_kind"] == "interrupted"
+    assert all(facts[field] is False for field in ("replay_certified", "quiescence_certified", "historical_completeness"))
+    graph_protocol_cases += 1
+for control in graph_witness_controls + ["wrong_source_graph", "wrong_source_length", "wrong_admission",
+        "wrong_session", "downgrade", "wrong_scope", "replay_claim", "quiescence_claim", "history_claim"]:
+    Path(graph_witness_path).write_bytes(graph_witness_bytes)
+    try:
+        verify_artifact(native_graph_input(control), cases[0]["anchor"], **native_graph_options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID" and graph_witness_path not in str(error), (control, error.code)
+    else:
+        raise AssertionError("unbound native graph commitment accepted: " + control)
+    graph_protocol_cases += 1
+Path(graph_witness_path).write_bytes(graph_witness_bytes)
+for raw in ("{}", "{",
+    native_graph_raw.replace('"source_capsule":', '"source_capsule":{},"source_capsule":'),
+    native_graph_raw.replace('"source_capsule":', '"source_capsule":{},"source_\\u0063apsule":'),
+    native_graph_raw.replace('"capsule_bytes":128', '"capsule_bytes":129'),
+    native_graph_raw.replace('"capsule_bytes":128', '"capsule_bytes":128,"unsigned_claim":true'),
+):
+    try:
+        verify_artifact(native_graph_input("valid", raw), cases[0]["anchor"], **native_graph_options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID"
+    else:
+        raise AssertionError("ambiguous or mismatched native admission accepted")
+    graph_protocol_cases += 1
+for data in (
+    native_graph_input("valid").replace(b'"admission_json":', b'"admission_json":"{}","admission_json":'),
+    native_graph_input("valid").replace(b"native-session-admission-receipt/v1", b"untrusted/v1"),
+):
+    try:
+        verify_artifact(data, cases[0]["anchor"], **native_graph_options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID"
+    else:
+        raise AssertionError("ambiguous native envelope or foreign receipt schema accepted")
+    graph_protocol_cases += 1
+try:
+    verify_artifact(native_graph_input("unsolicited"), cases[0]["anchor"],
+                    verifier=root / "fake_verifier", format="native-session-forensics")
+except VerifierError as error:
+    assert error.code == "PROTOCOL_INVALID"
+else:
+    raise AssertionError("unsolicited native graph commitment accepted")
+graph_protocol_cases += 1
+for path in ("", False, 7, [], {}, b"private-report.json", "private\0report", "\ud800"):
+    try:
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=root / "does-not-exist",
+                        format="native-session-forensics", graph_report=path)
+    except VerifierError as error:
+        assert error.code == "GRAPH_REPORT_INVALID" and error.exit_code is None, (path, error.code)
+    else:
+        raise AssertionError("invalid native graph path reached the verifier")
+    graph_client_cases += 1
 graph_files = Path(tempfile.mkdtemp(prefix="franken-graph-input-"))
 oversized_graph = graph_files / "PRIVATE-oversized-report.json"
 with oversized_graph.open("wb") as graph_file:

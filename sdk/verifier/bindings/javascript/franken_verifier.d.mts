@@ -23,7 +23,7 @@ export interface VerifierOptions {
   expectedSourceArtifactSha256?: string;
   /** Optional authenticated graph commitment. Requires expectedManifestSha256; does not reconstruct the graph. */
   expectedGraphInputHash?: string;
-  /** Bounded regular SourceGraphReport file for incident-bundle or publisher-source formats. Binds caller-read bytes and authenticated sources without upgrading origin scope or reconstructing resolver semantics. */
+  /** Bounded regular SourceGraphReport file for incident-bundle, native-session-forensics or publisher-source formats. Binds caller-read bytes and authenticated sources without upgrading proof scope or reconstructing resolver semantics. */
   graphReport?: string;
   /** Independently retained native admission nonce. Requires expectedAdmissionSha256; native-session-forensics only. */
   expectedSessionNonce?: string;
@@ -193,13 +193,15 @@ export type NativeSessionForensicsFacts = {
   quiescence_certified: false;
   historical_completeness: false;
 } & (
-  { schema_version: "franken-node/native-session-forensics/v1"; durable_journal: null; source_capsule?: never }
-  | { schema_version: "franken-node/native-session-forensics/v2"; durable_journal: NativeSessionEffectJournalFacts; source_capsule?: never }
+  { schema_version: "franken-node/native-session-forensics/v1"; durable_journal: null; source_capsule?: never; graph_report?: never }
+  | { schema_version: "franken-node/native-session-forensics/v2"; durable_journal: NativeSessionEffectJournalFacts; source_capsule?: never; graph_report?: never }
   | {
     schema_version: "franken-node/native-session-forensics/v3";
     durable_journal: NativeSessionEffectJournalFacts | null;
     /** Authenticated original content; does not certify replay or recompute the graph. */
     source_capsule: PublisherSourceCapsule;
+    /** Requested witness bound to the signed pre-entry capsule, not resolver or execution certification. */
+    graph_report?: SourceGraphCommitment;
   }
 ) & (
   {

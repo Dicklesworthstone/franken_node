@@ -243,10 +243,11 @@ private export itself contains the retained source code.
 
 ### Verify a retained source-graph report
 
-Rust and CLI callers can also supply the graph report captured for the admitted
-source capsule. This works before any terminal outcome exists and after a worker
-is interrupted. The report must describe the exact sources already authenticated
-by the original admission; the verifier never recaptures the current project.
+Rust, CLI, Python, JavaScript and TypeScript callers can also supply the graph
+report captured for the admitted source capsule. This works before any terminal
+outcome exists and after a worker is interrupted. The report must describe the
+exact sources already authenticated by the original admission; the verifier never
+recaptures the current project.
 
 ```sh
 franken-verifier verify --format native-session-forensics \
@@ -276,6 +277,40 @@ let verified = native_session::verify_native_session_forensics_with_graph_report
 )?;
 ```
 
+JavaScript and TypeScript use the existing `graphReport` option together with
+the independently enrolled product root and, optionally, the retained admission
+identity. Python accepts `graph_report` as a string or `Path`:
+
+```javascript
+const verified = await verifyArtifact(exportBytes, trustedProductRoot, {
+  verifier: trustedVerifierExecutable,
+  format: "native-session-forensics",
+  graphReport: "captured-source-graph.json",
+  expectedSessionNonce: retainedSessionNonce,
+  expectedAdmissionSha256: retainedAdmissionSha256,
+});
+const graph = verified.facts.graph_report;
+```
+
+```python
+verified = verify_artifact(
+    export_bytes, trusted_product_root,
+    verifier=trusted_verifier_executable,
+    format="native-session-forensics",
+    graph_report=Path("captured-source-graph.json"),
+    expected_session_nonce=retained_session_nonce,
+    expected_admission_sha256=retained_admission_sha256,
+)
+graph = verified["facts"]["graph_report"]
+```
+
+These clients hash the bounded report bytes before invoking the trusted verifier
+and require its returned digest to match. They also bind the graph and capsule
+commitments to the exact original admission bytes, receipt identity and source
+summary. A replaced witness, a mismatched response, an unsolicited graph field
+or an omitted requested graph field is rejected. The paired identity options are
+forwarded and checked without learning either pin from the candidate export.
+
 This verifies the report's strict schema, canonical graph commitment, retained
 input observations, module and resolution targets, edges, and source byte
 commitments against the pre-entry capsule. It adds `graph_report` with a
@@ -299,10 +334,10 @@ report fails with `GRAPH_REPORT_INVALID`; unavailable or nonregular report files
 fail with `GRAPH_REPORT_IO`, and oversized CLI files with `INPUT_TOO_LARGE`.
 Missing or damaged v3 source data still fails its original schema or source
 check. An explicit graph requirement never falls back to byte-only success.
-Omitting `--graph-report` preserves the existing output without a
-`graph_report` field. Native-session graph verification is currently exposed
-through Rust and the CLI; the Python, JavaScript and TypeScript clients do not
-expose this native graph option.
+Omitting `--graph-report`, `graphReport` or `graph_report` preserves the existing
+output without a `graph_report` field. In TypeScript the field is available only
+on v3 source-backed facts, and its optional type requires callers to check that
+the explicitly requested commitment is present.
 
 ## Bounded, unambiguous parsing
 
