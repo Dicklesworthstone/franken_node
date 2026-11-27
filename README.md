@@ -1640,6 +1640,14 @@ Forensic discovery merges authenticated hot and cold observations, checks
 remaining files after interrupted retirement, and reports conflicting or
 corrupt evidence. Archived sessions do not re-enter the live drain census.
 
+Rerunning `compact --archive-dir <dir>` also completes interrupted retirement
+of previously archived sessions. It authenticates the retained archive and every
+remaining sidecar, refuses active leases or held drain obligations, and syncs
+the evidence directories before reporting reclaimed capacity. The JSON and
+human reports distinguish `retired_archived_sessions` and
+`retired_archived_sidecars` from newly archived sessions; `--max-sessions`
+bounds both groups together.
+
 Archive files are limited to 64 MiB; use `--max-sessions` for smaller batches.
 Protected retention is also bounded and refuses overflow without retiring hot
 evidence. Legacy v1 archives remain independently verifiable, but cannot restore

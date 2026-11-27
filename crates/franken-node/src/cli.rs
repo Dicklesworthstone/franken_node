@@ -3849,7 +3849,7 @@ pub struct OpsSessionInventoryCompactArgs {
     #[arg(long = "archive-dir")]
     pub archive_dir: Option<PathBuf>,
 
-    /// Maximum number of clean completed sessions to archive in this invocation.
+    /// Maximum newly archived sessions plus previously archived sessions whose interrupted retirement is completed.
     #[arg(long = "max-sessions")]
     pub max_sessions: Option<usize>,
 

@@ -7141,6 +7141,13 @@ pub struct NativeSessionInventoryCompactReport {
     pub recovered_signed_outcomes: usize,
     pub finalized_orphaned_pending: usize,
     pub archived_clean_sessions: usize,
+    /// Previously archived sessions whose interrupted hot-file retirement
+    /// completed in this invocation; these are not newly archived DB rows.
+    #[serde(default)]
+    pub retired_archived_sessions: usize,
+    /// Actual per-session files removed while resuming prior retirement.
+    #[serde(default)]
+    pub retired_archived_sidecars: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7714,6 +7721,263 @@ pub fn inspect_native_session_inventory_status_at(
     })
 }
 
+fn archived_session_sidecar_paths(
+    protected_root: &Path,
+    nonce: &str,
+    capture_path: &Path,
+) -> Result<[PathBuf; 6]> {
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    if capture_path.parent() != Some(capture_directory.as_path()) {
+        bail!("archived session retirement capture is outside its protected directory");
+    }
+    Ok([
+        admission_record_path(protected_root, nonce),
+        admission_receipt_path(protected_root, nonce),
+        outcome_receipt_path(protected_root, nonce),
+        supervisor_lease::path(protected_root, nonce),
+        super::native_session_journal::native_session_effect_journal_path(protected_root, nonce),
+        capture_path.to_path_buf(),
+    ])
+}
+
+fn archive_retirement_directories(protected_root: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(product_root) = protected_root.parent() {
+        validate_existing_forensic_directory(product_root)?;
+    }
+    validate_existing_forensic_directory(protected_root)?;
+    let mut directories = Vec::new();
+    for name in [
+        ADMISSION_RECORD_DIRECTORY,
+        ADMISSION_RECEIPT_DIRECTORY,
+        OUTCOME_RECEIPT_DIRECTORY,
+        supervisor_lease::DIRECTORY,
+        super::native_session_journal::NATIVE_SESSION_EFFECT_JOURNAL_DIRECTORY,
+        RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH,
+    ] {
+        let directory = protected_root.join(name);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(_) => {
+                validate_existing_forensic_directory(&directory)?;
+                directories.push(directory);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("inspect archived session retirement directory");
+            }
+        }
+    }
+    Ok(directories)
+}
+
+fn sync_archive_retirement_directories(directories: &[PathBuf]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags, open};
+
+        // Sync all evidence directories, including ones whose last file was
+        // removed by an earlier failed attempt. Only syncing this attempt's
+        // unlinks would leave that previous retirement barrier unfinished.
+        for directory in directories {
+            validate_existing_forensic_directory(directory)?;
+            let file = std::fs::File::from(open(
+                directory,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            file.sync_all()
+                .context("sync archived session retirement directory")?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = directories;
+    Ok(())
+}
+
+fn finish_archive_retirement<T>(
+    directories: &[PathBuf],
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let result = operation();
+    let durability = sync_archive_retirement_directories(directories);
+    match (result, durability) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(sync_error)) => Err(error.context(format!(
+            "archived sidecar retirement also failed its durability barrier: {sync_error:#}"
+        ))),
+    }
+}
+
+fn retire_archived_session_sidecars(
+    protected_root: &Path,
+    nonce: &str,
+    capture_path: &Path,
+    surviving_captures: &BTreeSet<PathBuf>,
+) -> Result<usize> {
+    let mut removed = 0;
+    for path in archived_session_sidecar_paths(protected_root, nonce, capture_path)? {
+        if path.as_path() == capture_path && surviving_captures.contains(capture_path) {
+            continue;
+        }
+        let directory = path
+            .parent()
+            .context("archived session sidecar has no parent")?;
+        match std::fs::symlink_metadata(directory) {
+            Ok(_) => validate_existing_forensic_directory(directory)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("inspect archived session sidecar parent"),
+        }
+        if validate_private_path_if_present(&path)? {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("retire archived native-session sidecar {}", path.display())
+                    });
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+enum ArchiveRetirementLease {
+    Retain,
+    Retire(Option<supervisor_lease::SupervisorLease>),
+}
+
+fn probe_archive_retirement_lease(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<ArchiveRetirementLease> {
+    let admission_sha256 = admission_digest(admission)?;
+    match supervisor_lease::probe(
+        protected_root,
+        &supervisor_lease::Binding {
+            session_nonce: &admission.session_nonce,
+            product_root_key_id: &admission.product_root_key_id,
+            admission_sha256: &admission_sha256,
+        },
+        key,
+    )? {
+        supervisor_lease::Probe::Live => Ok(ArchiveRetirementLease::Retain),
+        supervisor_lease::Probe::Orphaned(lease) => Ok(ArchiveRetirementLease::Retire(Some(lease))),
+        supervisor_lease::Probe::Unproven => {
+            // Partial retirement may already have removed the marker. An
+            // existing marker on an unsupported platform remains unproven;
+            // absence never substitutes for a terminal outcome or archive.
+            if validate_private_path_if_present(&supervisor_lease::path(
+                protected_root,
+                &admission.session_nonce,
+            ))? {
+                Ok(ArchiveRetirementLease::Retain)
+            } else {
+                Ok(ArchiveRetirementLease::Retire(None))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ArchivedSidecarRetirement {
+    sessions: usize,
+    sidecars: usize,
+}
+
+/// Resume a previous compaction while holding the inventory writer lock.
+/// A readable absent row and a verified protected archive authorize only
+/// retirement of matching per-session files, never a new outcome or lease.
+fn resume_archived_sidecar_retirement(
+    protected_root: &Path,
+    records: &[NativeSessionInventoryRecord],
+    protected_sessions: &BTreeSet<String>,
+    key: &ed25519_dalek::VerifyingKey,
+    max_sessions: usize,
+) -> Result<ArchivedSidecarRetirement> {
+    if max_sessions == 0 {
+        return Ok(ArchivedSidecarRetirement::default());
+    }
+    let archived = read_retained_cold_archives(protected_root, key)?;
+    if archived.entries.is_empty() {
+        return Ok(ArchivedSidecarRetirement::default());
+    }
+    let directories = archive_retirement_directories(protected_root)?;
+    let admitted: BTreeSet<&str> = records
+        .iter()
+        .map(|record| record.admission.session_nonce.as_str())
+        .collect();
+    let surviving_captures: BTreeSet<PathBuf> = records
+        .iter()
+        .map(|record| record.admission.identity_capture_path.clone())
+        .collect();
+    let mut candidates = Vec::new();
+    let mut inspected_bytes = 0usize;
+    for (nonce, (archive_path, entry)) in &archived.entries {
+        if candidates.len() >= max_sessions {
+            break;
+        }
+        if admitted.contains(nonce.as_str()) || protected_sessions.contains(nonce) {
+            continue;
+        }
+        let mut residue_present = false;
+        for path in archived_session_sidecar_paths(
+            protected_root,
+            nonce,
+            &entry.admission.identity_capture_path,
+        )? {
+            residue_present |= validate_private_path_if_present(&path)?;
+        }
+        if !residue_present {
+            continue;
+        }
+        if surviving_captures.contains(&entry.admission.identity_capture_path) {
+            bail!("archived session retirement conflicts with an admitted identity capture");
+        }
+        let ArchiveRetirementLease::Retire(_lease) =
+            probe_archive_retirement_lease(protected_root, &entry.admission, key)?
+        else {
+            continue;
+        };
+        validate_archived_hot_residue(protected_root, key, entry, &mut inspected_bytes)?;
+        candidates.push((archive_path, entry));
+    }
+    // Validate the entire selected batch before removing any evidence. Keep
+    // every selected cold source durable, even after an earlier failed sync.
+    let mut synced_archives = BTreeSet::new();
+    for (archive_path, _) in &candidates {
+        if synced_archives.insert(*archive_path) {
+            sync_retained_cold_archive(protected_root, archive_path)?;
+        }
+    }
+    finish_archive_retirement(&directories, || {
+        let mut retired = ArchivedSidecarRetirement::default();
+        let mut inspected_bytes = 0usize;
+        for (_, entry) in candidates {
+            // Reacquire just one owner at a time to bound open descriptors.
+            // Hold it through unlinking; a newly live owner remains untouched.
+            let ArchiveRetirementLease::Retire(_lease) =
+                probe_archive_retirement_lease(protected_root, &entry.admission, key)?
+            else {
+                continue;
+            };
+            validate_archived_hot_residue(protected_root, key, entry, &mut inspected_bytes)?;
+            let removed = retire_archived_session_sidecars(
+                protected_root,
+                &entry.session_nonce,
+                &entry.admission.identity_capture_path,
+                &surviving_captures,
+            )?;
+            if removed > 0 {
+                retired.sessions += 1;
+                retired.sidecars += removed;
+            }
+        }
+        Ok(retired)
+    })
+}
+
 fn validate_cold_archive_export_directory(protected_root: &Path, directory: &Path) -> Result<()> {
     fn prospective_canonical_path(path: &Path) -> Result<PathBuf> {
         let absolute = std::path::absolute(path)?;
@@ -7764,7 +8028,9 @@ fn validate_cold_archive_export_directory(protected_root: &Path, directory: &Pat
 /// 3. When `archive_dir` is supplied, seals authenticated clean completed exit-0
 ///    non-incident sessions into an Ed25519-signed Merkle cold-archive bundle,
 ///    verifies the persisted bundle from disk, and atomically removes only those
-///    verified clean rows from `native_sessions`.
+///    verified clean rows from `native_sessions`. Previously archived sessions
+///    whose rows are already absent resume exact hot-sidecar retirement first,
+///    sharing the requested session bound with newly archived sessions.
 pub fn compact_native_session_inventory_at(
     protected_root: &Path,
     request: &NativeSessionInventoryCompactRequest,
@@ -7813,6 +8079,8 @@ pub fn compact_native_session_inventory_at(
             recovered_signed_outcomes: 0,
             finalized_orphaned_pending: 0,
             archived_clean_sessions: 0,
+            retired_archived_sessions: 0,
+            retired_archived_sidecars: 0,
             archive_path: None,
             archive_merkle_root_sha256: None,
             after: before.clone(),
@@ -7846,6 +8114,8 @@ pub fn compact_native_session_inventory_at(
     let mut recovered_signed_outcomes = 0_usize;
     let mut finalized_orphaned_pending = 0_usize;
     let mut archived_clean_sessions = 0_usize;
+    let mut retired_archived_sessions = 0_usize;
+    let mut retired_archived_sidecars = 0_usize;
     let mut archive_path_out: Option<PathBuf> = None;
     let mut archive_merkle_root_out: Option<String> = None;
 
@@ -8009,6 +8279,16 @@ pub fn compact_native_session_inventory_at(
         // supervisor receipt, and never archive/delete unproven rows.
         let authority = authenticate_inventory_records(protected_root, &all_records)?;
         let max_archive = request.max_sessions_to_archive.unwrap_or(usize::MAX);
+        let retired = resume_archived_sidecar_retirement(
+            protected_root,
+            &all_records,
+            &protected_sessions,
+            &verifying_key,
+            max_archive,
+        )?;
+        retired_archived_sessions = retired.sessions;
+        retired_archived_sidecars = retired.sidecars;
+        let max_archive = max_archive.saturating_sub(retired_archived_sessions);
         let mut entries = Vec::new();
         let mut leaves = Vec::new();
         for record in all_records {
@@ -8162,6 +8442,7 @@ pub fn compact_native_session_inventory_at(
                     )
                 })
                 .collect();
+            let retirement_directories = archive_retirement_directories(protected_root)?;
             let surviving_captures: BTreeSet<PathBuf> = retry_snapshot_conflict(|| {
                 let connection = open_inventory_unlocked(protected_root, false)?
                     .context("native-session inventory disappeared before row deletion")?;
@@ -8182,51 +8463,20 @@ pub fn compact_native_session_inventory_at(
                     .collect())
             })?;
 
-            // Retire per-session hot sidecars for the already-verified cold-archived
-            // clean sessions so `check_admission_record_capacity` reclaims slots and
-            // forensic reconciliation sees zero orphaned captures or missing-DB records.
-            // Content-addressed `source-capsules/` may be shared and are never removed.
-            let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
-            let mut touched_dirs = BTreeSet::new();
-            let mut retire_private_file = |path: &Path| -> Result<()> {
-                if validate_private_path_if_present(path)? {
-                    match std::fs::remove_file(path) {
-                        Ok(()) => {
-                            if let Some(parent) = path.parent() {
-                                touched_dirs.insert(parent.to_path_buf());
-                            }
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!("retire archived native-session sidecar {}", path.display())
-                            });
-                        }
-                    }
-                }
-                Ok(())
-            };
-            for (nonce, capture_path) in &archived_sessions {
-                retire_private_file(&admission_record_path(protected_root, nonce))?;
-                retire_private_file(&admission_receipt_path(protected_root, nonce))?;
-                retire_private_file(&outcome_receipt_path(protected_root, nonce))?;
-                retire_private_file(&supervisor_lease::path(protected_root, nonce))?;
-                retire_private_file(
-                    &super::native_session_journal::native_session_effect_journal_path(
+            // New and interrupted retirements share the same bounded private
+            // paths and directory durability barrier. Shared source capsules
+            // are never removed, and surviving admissions keep their captures.
+            finish_archive_retirement(&retirement_directories, || {
+                for (nonce, capture_path) in &archived_sessions {
+                    retire_archived_session_sidecars(
                         protected_root,
                         nonce,
-                    ),
-                )?;
-                if capture_path.parent() == Some(capture_directory.as_path())
-                    && !surviving_captures.contains(capture_path)
-                {
-                    retire_private_file(capture_path)?;
+                        capture_path,
+                        &surviving_captures,
+                    )?;
                 }
-            }
-            #[cfg(unix)]
-            for dir in &touched_dirs {
-                std::fs::File::open(dir)?.sync_all()?;
-            }
+                Ok(())
+            })?;
 
             archived_clean_sessions = archived_sessions.len();
             archive_path_out = Some(final_path);
@@ -8252,6 +8502,8 @@ pub fn compact_native_session_inventory_at(
         recovered_signed_outcomes,
         finalized_orphaned_pending,
         archived_clean_sessions,
+        retired_archived_sessions,
+        retired_archived_sidecars,
         before_reserved_bytes = before.reserved_bytes,
         after_reserved_bytes = after.reserved_bytes,
         "completed native-session inventory compaction"
@@ -8263,6 +8515,8 @@ pub fn compact_native_session_inventory_at(
         recovered_signed_outcomes,
         finalized_orphaned_pending,
         archived_clean_sessions,
+        retired_archived_sessions,
+        retired_archived_sidecars,
         archive_path: archive_path_out,
         archive_merkle_root_sha256: archive_merkle_root_out,
         before,
@@ -15043,6 +15297,245 @@ mod tests {
         };
         reseal_test_cold_archive(root, &mut bundle);
         (admission, bundle)
+    }
+
+    fn retain_archive_then_remove_row(
+        root: &Path,
+        admission: &NativeSessionAdmission,
+        bundle: &NativeSessionColdArchiveBundle,
+    ) -> PathBuf {
+        let key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap()
+                .verifying_key();
+        let bytes = serde_json::to_vec_pretty(bundle).unwrap();
+        let retained = retain_cold_archive(root, &bytes, bundle, &key).unwrap();
+        let connection = open_inventory(root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "DELETE FROM native_sessions WHERE session_nonce = ?1;",
+            &[SqliteValue::Text(admission.session_nonce.clone().into())],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        protect_sidecars(root).unwrap();
+        retained
+    }
+
+    #[test]
+    fn compact_resumes_archived_retirement_reclaims_capacity_and_shares_session_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (archived, bundle) = clean_test_cold_archive(&root, 101);
+        let retained = retain_archive_then_remove_row(&root, &archived, &bundle);
+        let retained_bytes = std::fs::read(&retained).unwrap();
+        let (fresh, _) = clean_test_cold_archive(&root, 102);
+        let paths = archived_session_sidecar_paths(
+            &root,
+            &archived.session_nonce,
+            &archived.identity_capture_path,
+        )
+        .unwrap();
+        let expected_sidecars = paths.iter().filter(|path| path.exists()).count();
+        assert!(expected_sidecars >= 4);
+        let capacity = || {
+            check_admission_record_capacity(
+                &root.join(ADMISSION_RECORD_DIRECTORY),
+                1,
+                0,
+                2,
+                MAX_RETAINED_ADMISSION_BYTES,
+            )
+        };
+        assert!(
+            capacity().is_err(),
+            "the orphaned admission still occupies a slot"
+        );
+        let mut request = compaction_request(Some(temp.path().join("archive")), false);
+        request.max_sessions_to_archive = Some(1);
+        let resumed = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(resumed.retired_archived_sessions, 1);
+        assert_eq!(resumed.retired_archived_sidecars, expected_sidecars);
+        assert_eq!(resumed.archived_clean_sessions, 0);
+        assert!(resumed.archive_path.is_none());
+        assert_eq!(resumed.after.retained_sessions, 1);
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(
+            capacity().is_ok(),
+            "retirement must reclaim the bounded admission slot"
+        );
+        assert_eq!(
+            read_inventory_at(&root, None).unwrap().records[0]
+                .admission
+                .session_nonce,
+            fresh.session_nonce,
+        );
+
+        let next = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(next.retired_archived_sessions, 0);
+        assert_eq!(next.retired_archived_sidecars, 0);
+        assert_eq!(next.archived_clean_sessions, 1);
+        assert_eq!(next.after.retained_sessions, 0);
+        let repeat = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(repeat.retired_archived_sessions, 0);
+        assert_eq!(repeat.retired_archived_sidecars, 0);
+        assert_eq!(repeat.archived_clean_sessions, 0);
+        assert!(repeat.archive_path.is_none());
+        assert_eq!(std::fs::read(retained).unwrap(), retained_bytes);
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "{:?}",
+            forensics.source_errors
+        );
+        assert_eq!(forensics.records.len(), 2);
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &archived.identity_capture_path)
+                .unwrap(),
+            bundle.entries[0].identity_capture,
+        );
+    }
+
+    #[test]
+    fn compact_resumes_partial_retirement_only_with_protected_cold_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, bundle) = clean_test_cold_archive(&root, 103);
+        let retained = retain_archive_then_remove_row(&root, &admission, &bundle);
+        let body = admission_record_path(&root, &admission.session_nonce);
+        let paths = archived_session_sidecar_paths(
+            &root,
+            &admission.session_nonce,
+            &admission.identity_capture_path,
+        )
+        .unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            if path != &body && path != &admission.identity_capture_path && path.exists() {
+                std::fs::rename(path, temp.path().join(format!("already-retired-{index}")))
+                    .unwrap();
+            }
+        }
+        let request = compaction_request(Some(temp.path().join("archive")), false);
+        let external_copy = temp.path().join("unavailable-protected-archive.json");
+        std::fs::rename(&retained, &external_copy).unwrap();
+        let unproven = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(unproven.retired_archived_sessions, 0);
+        assert!(body.exists());
+        assert!(admission.identity_capture_path.exists());
+
+        std::fs::rename(external_copy, &retained).unwrap();
+        let resumed = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(resumed.retired_archived_sessions, 1);
+        assert_eq!(resumed.retired_archived_sidecars, 2);
+        assert_eq!(resumed.archived_clean_sessions, 0);
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &admission.identity_capture_path)
+                .unwrap(),
+            bundle.entries[0].identity_capture,
+        );
+    }
+
+    #[test]
+    fn compact_validates_the_complete_retirement_batch_before_unlinking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (first, first_bundle) = clean_test_cold_archive(&root, 104);
+        retain_archive_then_remove_row(&root, &first, &first_bundle);
+        let (second, second_bundle) = clean_test_cold_archive(&root, 105);
+        retain_archive_then_remove_row(&root, &second, &second_bundle);
+        let mut admissions = [first, second];
+        admissions.sort_by(|left, right| left.session_nonce.cmp(&right.session_nonce));
+        let first_paths = archived_session_sidecar_paths(
+            &root,
+            &admissions[0].session_nonce,
+            &admissions[0].identity_capture_path,
+        )
+        .unwrap();
+        let first_files: Vec<_> = first_paths
+            .iter()
+            .filter(|path| path.exists())
+            .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+            .collect();
+        let corrupted_body = admission_record_path(&root, &admissions[1].session_nonce);
+        std::fs::write(&corrupted_body, b"{}").unwrap();
+        let error = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(temp.path().join("archive")), false),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("hot admission body disagrees"));
+        for (path, expected) in first_files {
+            assert_eq!(std::fs::read(path).unwrap(), expected);
+        }
+        assert_eq!(std::fs::read(corrupted_body).unwrap(), b"{}");
+        assert!(admissions[1].identity_capture_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_preserves_archived_residue_while_a_supervisor_lease_is_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, bundle) = clean_test_cold_archive(&root, 106);
+        retain_archive_then_remove_row(&root, &admission, &bundle);
+        let key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap()
+                .verifying_key();
+        let ArchiveRetirementLease::Retire(Some(owner)) =
+            probe_archive_retirement_lease(&root, &admission, &key).unwrap()
+        else {
+            panic!("completed fixture must leave an unlocked authenticated lease");
+        };
+        let request = compaction_request(Some(temp.path().join("archive")), false);
+        let blocked = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(blocked.retired_archived_sessions, 0);
+        assert_eq!(blocked.retired_archived_sidecars, 0);
+        assert!(admission_record_path(&root, &admission.session_nonce).exists());
+        assert!(admission.identity_capture_path.exists());
+        drop(owner);
+        let resumed = compact_native_session_inventory_at(&root, &request).unwrap();
+        assert_eq!(resumed.retired_archived_sessions, 1);
+        assert!(!admission.identity_capture_path.exists());
+    }
+
+    #[test]
+    fn compact_preserves_archived_residue_while_a_fleet_census_holds_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, bundle) = clean_test_cold_archive(&root, 107);
+        let history = vec![maintenance_action("interrupted-archive-hold", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &admission.project_root,
+            "node-a",
+            "prod",
+            &checkpoint,
+            &history,
+        )
+        .unwrap();
+        let held = finish_drain_at(
+            &root,
+            &admission.project_root,
+            "node-a",
+            "prod",
+            &checkpoint,
+        )
+        .unwrap();
+        assert!(held.checkpoint.fence_held);
+        retain_archive_then_remove_row(&root, &admission, &bundle);
+        let compacted = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(temp.path().join("archive")), false),
+        )
+        .unwrap();
+        assert_eq!(compacted.retired_archived_sessions, 0);
+        assert_eq!(compacted.retired_archived_sidecars, 0);
+        assert!(admission_record_path(&root, &admission.session_nonce).exists());
+        assert!(admission.identity_capture_path.exists());
     }
 
     #[test]

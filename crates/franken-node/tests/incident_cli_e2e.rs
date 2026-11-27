@@ -1429,8 +1429,14 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
         verified.baseline.signer_public_key_hex
     );
     assert_eq!(verified.operator_id, "incident-counterfactual-e2e");
-    assert_eq!((verified.executor, verified.mode, verified.result_count), ("synthetic", "single", 1));
-    assert_eq!(verified.report_sha256, hex::encode(Sha256::digest(&output.stdout)));
+    assert_eq!(
+        (verified.executor, verified.mode, verified.result_count),
+        ("synthetic", "single", 1)
+    );
+    assert_eq!(
+        verified.report_sha256,
+        hex::encode(Sha256::digest(&output.stdout))
+    );
     assert_eq!(
         verified.counterfactual_digest,
         report["counterfactual_digest"].as_str().unwrap()
@@ -1439,7 +1445,10 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
         verified.promotion_contract_digest,
         report["promotion_contract_digest"].as_str().unwrap()
     );
-    assert_eq!(verified.expected_loss_delta, rollout["expected_loss_delta"].as_i64().unwrap());
+    assert_eq!(
+        verified.expected_loss_delta,
+        rollout["expected_loss_delta"].as_i64().unwrap()
+    );
     assert!(verified.valid_until_epoch_ms > verified.valid_from_epoch_ms);
     assert!(verified.run_origin.is_none() && verified.runtime_origin.is_none());
     assert!(!verified.guest_execution_verified && !verified.rollout_authorized);
@@ -3764,6 +3773,7 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
 #[test]
 fn native_incident_capture_and_coverage_survive_clean_session_compaction() {
     use sha2::{Digest as _, Sha256};
+    use std::io::Write as _;
 
     let state_home = tempfile::tempdir().expect("isolated runtime evidence state");
     let (workspace, run) = native_replay_workspace_with_arguments_in_state_home(
@@ -3783,11 +3793,45 @@ fn native_incident_capture_and_coverage_survive_clean_session_compaction() {
             .expect("original protected runtime identity"),
     );
     assert!(capture_path.is_file());
+    let original_capture: serde_json::Value =
+        serde_json::from_slice(&fs::read(&capture_path).unwrap()).unwrap();
+    let session_nonce = original_capture["session_nonce"]
+        .as_str()
+        .expect("original signed session nonce");
+    let inventory_root = capture_path
+        .parent()
+        .and_then(Path::parent)
+        .expect("protected identity capture directory");
+    let session_filename = format!(
+        "{}.json",
+        hex::encode(Sha256::digest(session_nonce.as_bytes()))
+    );
+    // Preserve exact original evidence before the real CLI removes the SQLite
+    // row. Restoring these files below models interruption after row deletion;
+    // the inode-bound lease is deliberately not copied or fabricated.
+    let original_hot_files: Vec<_> = [
+        inventory_root
+            .join("session-admission-records")
+            .join(&session_filename),
+        inventory_root
+            .join("session-admissions")
+            .join(&session_filename),
+        inventory_root
+            .join("session-outcomes")
+            .join(&session_filename),
+        capture_path.clone(),
+    ]
+    .into_iter()
+    .map(|path| {
+        let bytes = fs::read(&path).expect("original protected session evidence");
+        (path, bytes)
+    })
+    .collect();
     let invoke = |args: &[&str]| {
         run_cli_in_workspace_with_state_home(workspace.path(), args, Some(state_home.path()))
     };
     let archive_dir = state_home.path().join("operator-archive");
-    let compact = invoke(&[
+    let compact_args = [
         "ops",
         "session-inventory",
         "compact",
@@ -3800,10 +3844,13 @@ fn native_incident_capture_and_coverage_survive_clean_session_compaction() {
         "--reason",
         "retain recorded native execution after reclaiming hot admission capacity",
         "--json",
-    ]);
+    ];
+    let compact = invoke(&compact_args);
     assert!(compact.status.success(), "{compact:?}");
     let compact: serde_json::Value = serde_json::from_slice(&compact.stdout).unwrap();
     assert_eq!(compact["archived_clean_sessions"], 1);
+    assert_eq!(compact["retired_archived_sessions"], 0);
+    assert_eq!(compact["retired_archived_sidecars"], 0);
     assert_eq!(compact["after"]["retained_sessions"], 0);
     assert!(
         !capture_path.exists(),
@@ -3832,6 +3879,50 @@ fn native_incident_capture_and_coverage_survive_clean_session_compaction() {
         state_home.path().join("moved-operator-export.json"),
     )
     .unwrap();
+
+    for (path, bytes) in &original_hot_files {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
+            .expect("restore interrupted hot retirement");
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    let (admission_path, admission_bytes) = &original_hot_files[0];
+    fs::write(admission_path, b"{}").unwrap();
+    let conflict = invoke(&compact_args);
+    assert!(!conflict.status.success(), "{conflict:?}");
+    assert!(
+        original_hot_files.iter().all(|(path, _)| path.is_file()),
+        "one conflicting residual must prevent the batch from deleting evidence"
+    );
+    fs::write(admission_path, admission_bytes).unwrap();
+
+    let recovered = invoke(&compact_args);
+    assert!(recovered.status.success(), "{recovered:?}");
+    let recovered: serde_json::Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(recovered["archived_clean_sessions"], 0);
+    assert_eq!(recovered["retired_archived_sessions"], 1);
+    assert_eq!(
+        recovered["retired_archived_sidecars"],
+        original_hot_files.len()
+    );
+    assert_eq!(recovered["after"]["retained_sessions"], 0);
+    assert!(recovered["archive_path"].is_null());
+    assert!(original_hot_files.iter().all(|(path, _)| !path.exists()));
+    let repeated = invoke(&compact_args);
+    assert!(repeated.status.success(), "{repeated:?}");
+    let repeated: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["archived_clean_sessions"], 0);
+    assert_eq!(repeated["retired_archived_sessions"], 0);
+    assert_eq!(repeated["retired_archived_sidecars"], 0);
+    assert_eq!(fs::read(&protected_archive).unwrap(), archive_bytes);
 
     let coverage = invoke(&["ops", "incident-coverage", "--json"]);
     assert!(coverage.status.success(), "{coverage:?}");

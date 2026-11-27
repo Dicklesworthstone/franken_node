@@ -34823,6 +34823,11 @@ fn handle_ops_session_inventory(command: &cli::OpsSessionInventoryCommand) -> Re
                         report.archived_clean_sessions,
                     );
                     println!(
+                        "  retired_archived_sessions={} retired_archived_sidecars={}",
+                        report.retired_archived_sessions,
+                        report.retired_archived_sidecars,
+                    );
+                    println!(
                         "  reserved_bytes={} -> {} ({:.2}% -> {:.2}%)",
                         report.before.reserved_bytes,
                         report.after.reserved_bytes,
