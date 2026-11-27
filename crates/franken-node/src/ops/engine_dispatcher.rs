@@ -10358,10 +10358,6 @@ impl EngineDispatcher {
         manifests: &mut Vec<RunPackageManifest>,
         package_bin: Option<&str>,
     ) -> std::result::Result<PathBuf, String> {
-        use crate::supply_chain::module_resolution_graph::{
-            COMMONJS_FILE_EXTENSIONS, CommonJsDirectoryStep, commonjs_directory_steps,
-        };
-
         let manifest = read_run_package_manifest(dir, dir, manifests, package_bin)?;
         if let Some(name) = package_bin {
             let selected = manifest
@@ -10387,10 +10383,23 @@ impl EngineDispatcher {
             return Ok(dir.join(relative));
         }
 
-        let main = manifest
-            .as_ref()
-            .and_then(|manifest| manifest.main.as_deref())
-            .filter(|main| !main.is_empty());
+        Self::resolve_commonjs_package_entry(
+            dir,
+            manifest.as_ref().and_then(|manifest| manifest.main.as_deref()),
+        )
+    }
+
+    /// Select the CommonJS package entry for both native execution and the
+    /// Node reference leg. Callers bind the winning file to their project root.
+    pub(crate) fn resolve_commonjs_package_entry(
+        dir: &Path,
+        main: Option<&str>,
+    ) -> std::result::Result<PathBuf, String> {
+        use crate::supply_chain::module_resolution_graph::{
+            COMMONJS_FILE_EXTENSIONS, CommonJsDirectoryStep, commonjs_directory_steps,
+        };
+
+        let main = main.filter(|main| !main.is_empty());
         let main_path = main
             .map(|main| {
                 let relative = Path::new(main);

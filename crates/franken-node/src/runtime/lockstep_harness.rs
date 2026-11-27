@@ -135,14 +135,12 @@ struct PipeDrainResult {
 }
 
 impl LockstepHarness {
-    const DIRECTORY_ENTRY_CANDIDATES: [&'static str; 3] = ["index.js", "index.mjs", "index.cjs"];
-    const BUN_DIRECTORY_ENTRY_CANDIDATES: [&'static str; 5] = [
-        "index.ts",
-        "index.tsx",
-        "index.js",
-        "index.mjs",
-        "index.cjs",
+    // The pinned Bun 1.3.14 donor probes module fields and indexes in import order, but
+    // package.json main (including its directory index) uses require order.
+    const BUN_MODULE_EXTENSIONS: &[&str] = &[
+        ".tsx", ".jsx", ".mts", ".ts", ".mjs", ".js", ".cts", ".cjs", ".json",
     ];
+    const BUN_MAIN_EXTENSIONS: &[&str] = &[".js", ".cjs", ".cts", ".tsx", ".ts", ".jsx", ".json"];
 
     pub fn new(runtimes: Vec<String>) -> Self {
         Self {
@@ -194,22 +192,6 @@ impl LockstepHarness {
         matches!(runtime, "node" | "bun")
     }
 
-    fn directory_entry_candidates(runtime: &str) -> &'static [&'static str] {
-        if runtime == "bun" {
-            &Self::BUN_DIRECTORY_ENTRY_CANDIDATES
-        } else {
-            &Self::DIRECTORY_ENTRY_CANDIDATES
-        }
-    }
-
-    fn entrypoint_extensions(runtime: &str) -> &'static [&'static str] {
-        if runtime == "bun" {
-            &["ts", "tsx", "js", "mjs", "cjs"]
-        } else {
-            &["js", "mjs", "cjs"]
-        }
-    }
-
     fn resolve_runtime_binary(runtime: &str) -> String {
         Self::resolve_runtime_binary_with(runtime, &|configured_hint| {
             // bd-zi9hj: no `franken-engine` CLI binary ships anywhere (the
@@ -258,15 +240,16 @@ impl LockstepHarness {
     }
 
     fn resolve_directory_entrypoint(runtime: &str, project_dir: &Path) -> Result<PathBuf> {
-        let package_json_path = project_dir.join("package.json");
-        let mut unresolved_main: Option<String> = None;
+        let root = project_dir.canonicalize().with_context(|| {
+            format!(
+                "failed resolving lockstep project root {}",
+                project_dir.display()
+            )
+        })?;
+        let package_json_path = root.join("package.json");
+        let mut main: Option<String> = None;
+        let mut module: Option<String> = None;
         if package_json_path.exists() {
-            let root = project_dir.canonicalize().with_context(|| {
-                format!(
-                    "failed resolving lockstep project root {}",
-                    project_dir.display()
-                )
-            })?;
             let resolved = package_json_path.canonicalize().with_context(|| {
                 format!(
                     "failed resolving package manifest {}",
@@ -282,108 +265,187 @@ impl LockstepHarness {
             let package_json = std::fs::read(&resolved).with_context(|| {
                 format!("failed reading package manifest {}", resolved.display())
             })?;
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&package_json).with_context(|| {
-                    format!(
-                        "invalid package manifest JSON while resolving lockstep entrypoint: {}",
-                        resolved.display()
-                    )
-                })?;
-
-            if let Some(main) = manifest
+            let json = package_json
+                .strip_prefix(&[0xef, 0xbb, 0xbf])
+                .unwrap_or(&package_json);
+            let manifest: serde_json::Value = serde_json::from_slice(json).with_context(|| {
+                format!(
+                    "invalid package manifest JSON while resolving lockstep entrypoint: {}",
+                    resolved.display()
+                )
+            })?;
+            main = manifest
                 .get("main")
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if let Some(resolved) = Self::resolve_entry_candidate(project_dir, main, runtime) {
-                    return Ok(resolved);
-                }
-                unresolved_main = Some(main.to_string());
+                .map(str::to_owned);
+            if runtime == "bun" {
+                module = manifest
+                    .get("module")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
             }
         }
 
-        for candidate in Self::directory_entry_candidates(runtime) {
-            let path = project_dir.join(candidate);
-            if path.is_file() && Self::path_within_project(project_dir, &path) {
+        if runtime == "node" {
+            // A declared main is a literal filename. Keep its whitespace and
+            // refuse disallowed spellings even when an index is available.
+            let main = main.as_deref().filter(|value| !value.is_empty());
+            if let Some(value) = main
+                && value.contains(['\\', '\0'])
+            {
+                anyhow::bail!(
+                    "package.json main `{value}` did not resolve under {}: expected a project-relative path",
+                    project_dir.display()
+                );
+            }
+            let target = crate::ops::engine_dispatcher::EngineDispatcher::resolve_commonjs_package_entry(
+                &root, main,
+            )
+            .map_err(anyhow::Error::msg)
+            .with_context(|| match main {
+                Some(value) => format!("package.json main `{value}` did not resolve under {} and no fallback entrypoint was found", root.display()),
+                None => format!("no executable JS entrypoint found under {}", root.display()),
+            })?;
+            // Validate the *winning* path. Searching onward after a disallowed
+            // winner would silently run a different program in the reference leg.
+            let resolved = target
+                .canonicalize()
+                .context("resolve selected Node entrypoint")?;
+            anyhow::ensure!(
+                resolved.starts_with(&root) && resolved.is_file(),
+                "no executable JS entrypoint found inside {}: selected file {} is outside the project or not regular",
+                root.display(),
+                resolved.display()
+            );
+            return Ok(resolved);
+        }
+
+        for (value, extensions) in [
+            (module.as_deref(), Self::BUN_MODULE_EXTENSIONS),
+            (main.as_deref(), Self::BUN_MAIN_EXTENSIONS),
+        ] {
+            if let Some(value) = value.filter(|value| !value.is_empty())
+                && let Some(path) = Self::resolve_bun_entry_candidate(&root, value, extensions)?
+            {
                 return Ok(path);
             }
         }
-
-        if let Some(main) = unresolved_main {
-            anyhow::bail!(
-                "package.json main `{main}` did not resolve under {} and no fallback entrypoint was found ({})",
-                project_dir.display(),
-                Self::directory_entry_candidates(runtime).join(", ")
-            );
-        }
-
-        anyhow::bail!(
-            "no executable JS entrypoint found under {} (checked package.json main and {})",
-            project_dir.display(),
-            Self::directory_entry_candidates(runtime).join(", ")
-        );
+        Self::bun_file_with_extensions(&root, &root.join("index"), Self::BUN_MODULE_EXTENSIONS)?
+            .with_context(|| format!("no executable JS entrypoint found under {}", root.display()))
     }
 
-    fn resolve_entry_candidate(
-        project_dir: &Path,
+    fn resolve_bun_entry_candidate(
+        root: &Path,
         raw_target: &str,
-        runtime: &str,
-    ) -> Option<PathBuf> {
-        let normalized = raw_target.trim().trim_start_matches("./");
-        if normalized.is_empty() {
-            return None;
+        extensions: &[&str],
+    ) -> Result<Option<PathBuf>> {
+        let relative = Path::new(raw_target);
+        anyhow::ensure!(
+            !raw_target.contains(['\\', '\0'])
+                && relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_) | Component::CurDir)),
+            "Bun package entry {raw_target:?} must be a relative path inside the project"
+        );
+        if raw_target.is_empty() {
+            return Ok(None);
+        }
+        let mut base = root.to_path_buf();
+        for part in relative.components() {
+            if let Component::Normal(name) = part {
+                base.push(name);
+            }
         }
 
-        // Reject path traversal in untrusted package.json main field:
-        // absolute paths, ".." segments, backslashes, and embedded NULs.
-        if normalized.starts_with('/')
-            || normalized.contains('\\')
-            || normalized.contains('\0')
-            || normalized.split('/').any(|seg| seg == "..")
-        {
-            return None;
-        }
-
-        let candidate = project_dir.join(normalized);
-        if candidate.is_file() && Self::path_within_project(project_dir, &candidate) {
-            return Some(candidate);
-        }
-
-        if candidate.extension().is_none() {
-            for extension in Self::entrypoint_extensions(runtime) {
-                let with_extension = candidate.with_extension(extension);
-                if with_extension.is_file()
-                    && Self::path_within_project(project_dir, &with_extension)
-                {
-                    return Some(with_extension);
+        // A terminal slash selects a directory. Otherwise Bun tries the exact
+        // file, appends suffixes to the whole name, then substitutes TS source
+        // for a JS spelling before looking for a directory index.
+        if base != root && !raw_target.ends_with('/') {
+            if let Some(path) = Self::bun_file(root, &base)? {
+                return Ok(Some(path));
+            }
+            if let Some(path) = Self::bun_file_with_extensions(root, &base, extensions)? {
+                return Ok(Some(path));
+            }
+            let aliases: &[&str] = match base.extension().and_then(|suffix| suffix.to_str()) {
+                Some("js" | "jsx") => &["ts", "tsx", "mts"],
+                Some("mjs") => &["mts"],
+                // Bun 1.3.14 does not remap .cjs to .cts; newer donors can
+                // disagree. The project corpus runner passes the raw operand.
+                _ => &[],
+            };
+            for extension in aliases {
+                if let Some(path) = Self::bun_file(root, &base.with_extension(extension))? {
+                    return Ok(Some(path));
                 }
             }
         }
 
-        if candidate.is_dir() {
-            if !Self::path_within_project(project_dir, &candidate) {
-                return None;
-            }
-            for entry in Self::directory_entry_candidates(runtime) {
-                let nested = candidate.join(entry);
-                if nested.is_file() && Self::path_within_project(project_dir, &nested) {
-                    return Some(nested);
-                }
-            }
-        }
-
-        None
+        Self::bun_file_with_extensions(root, &base.join("index"), extensions)
     }
 
-    fn path_within_project(project_dir: &Path, candidate: &Path) -> bool {
-        let Ok(root) = project_dir.canonicalize() else {
-            return false;
+    fn bun_file_with_extensions(
+        root: &Path,
+        base: &Path,
+        extensions: &[&str],
+    ) -> Result<Option<PathBuf>> {
+        for extension in extensions {
+            let mut candidate = base.as_os_str().to_owned();
+            candidate.push(extension);
+            if let Some(path) = Self::bun_file(root, Path::new(&candidate))? {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    fn bun_file(root: &Path, candidate: &Path) -> Result<Option<PathBuf>> {
+        let resolved = match candidate.canonicalize() {
+            Ok(resolved) => resolved,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("resolve Bun entrypoint {}", candidate.display()));
+            }
         };
-        let Ok(resolved) = candidate.canonicalize() else {
-            return false;
-        };
-        resolved.starts_with(&root)
+        anyhow::ensure!(
+            resolved.starts_with(root),
+            "Bun entrypoint {} is outside the project",
+            candidate.display()
+        );
+        let metadata = std::fs::metadata(&resolved)?;
+        if metadata.is_dir() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Bun entrypoint {} is not a regular file",
+            resolved.display()
+        );
+        // Launching the selected JSON file directly succeeds in Bun, but the
+        // same file selected as a directory entry is rejected before execution.
+        // Keep that distinction for Bun's non-executable package-entry loaders.
+        let extension = resolved
+            .extension()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        anyhow::ensure!(
+            ![
+                "json", "jsonc", "json5", "toml", "yaml", "yml", "txt", "css", "node"
+            ]
+            .iter()
+            .any(|loader| extension.eq_ignore_ascii_case(loader)),
+            "Bun cannot run {} as a package directory entry",
+            resolved.display()
+        );
+        Ok(Some(resolved))
     }
 
     /// Spawns the specified runtimes concurrently, intercepts their outputs,
@@ -2257,6 +2319,86 @@ mod tests {
     }
 
     #[test]
+    fn node_directory_selection_uses_literal_main_and_commonjs_suffix_order() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(root.join("index.js"), "throw new Error('wrong entry');").unwrap();
+        std::fs::write(
+            root.join("program.prod.js"),
+            "throw new Error('trimmed name');",
+        )
+        .unwrap();
+        std::fs::write(root.join(" program.prod .json"), "{}").unwrap();
+        std::fs::write(root.join(" program.prod .js"), "console.log('literal');").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            "\u{feff}{\"main\":\" program.prod \"}",
+        )
+        .unwrap();
+        let selected = LockstepHarness::resolve_runtime_target("node", root).unwrap();
+        assert_eq!(
+            selected,
+            root.canonicalize().unwrap().join(" program.prod .js")
+        );
+
+        std::fs::create_dir(root.join("cli")).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"main":"./cli/"}"#).unwrap();
+        std::fs::write(root.join("cli/index.json"), "{}").unwrap();
+        // A nested manifest would restart LOAD_AS_DIRECTORY; Node instead
+        // tries LOAD_INDEX at this stage and picks the JSON file.
+        std::fs::write(root.join("cli/package.json"), r#"{"main":"other.cjs"}"#).unwrap();
+        std::fs::write(
+            root.join("cli/other.cjs"),
+            "throw new Error('wrong nested entry');",
+        )
+        .unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("cli/index.json")
+        );
+    }
+
+    #[test]
+    fn node_directory_does_not_infer_esm_or_cjs_suffixes() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        for name in ["entry.mjs", "entry.cjs", "index.mjs", "index.cjs"] {
+            std::fs::write(
+                root.join(name),
+                "console.log('must be explicitly selected');",
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("package.json"), r#"{"main":"entry"}"#).unwrap();
+        assert!(LockstepHarness::resolve_runtime_target("node", root).is_err());
+        std::fs::write(root.join("index.json"), "{}").unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("index.json")
+        );
+        std::fs::write(root.join("package.json"), r#"{"main":"entry.mjs"}"#).unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("entry.mjs")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_directory_refuses_escaping_winner_even_when_fallback_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(outside.path().join("entry.js"), "console.log('outside');").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("entry.js"), root.join("selected.js"))
+            .unwrap();
+        std::fs::write(root.join("index.js"), "console.log('different program');").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"main":"selected"}"#).unwrap();
+        let error = LockstepHarness::resolve_runtime_target("node", root).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the project"));
+    }
+
+    #[test]
     fn resolve_runtime_target_falls_back_to_directory_index() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let expected = temp_dir.path().join("index.mjs");
@@ -2312,6 +2454,91 @@ mod tests {
         let resolved =
             LockstepHarness::resolve_runtime_target("bun", temp_dir.path()).expect("resolve");
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn bun_directory_uses_module_main_and_index_lookup_orders() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        for name in [
+            "mod.prod.jsx",
+            "mod.prod.js",
+            " main .tsx",
+            " main .js",
+            "index.ts",
+            "index.jsx",
+            "index.tsx",
+        ] {
+            std::fs::write(root.join(name), "console.log('entry');").unwrap();
+        }
+        for (manifest, expected) in [
+            (r#"{"module":"mod.prod","main":" main "}"#, "mod.prod.jsx"),
+            (r#"{"module":"missing","main":" main "}"#, " main .js"),
+            (r#"{"main":"missing"}"#, "index.tsx"),
+        ] {
+            std::fs::write(root.join("package.json"), format!("\u{feff}{manifest}")).unwrap();
+            assert_eq!(
+                LockstepHarness::resolve_runtime_target("bun", &root).unwrap(),
+                root.join(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn bun_directory_refuses_selected_data_even_when_a_runnable_fallback_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(root.join("index.js"), "console.log('different program');").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"module":"data","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("data.json"), "{}").unwrap();
+        let error = LockstepHarness::resolve_runtime_target("bun", root).unwrap_err();
+        assert!(format!("{error:#}").contains("data.json as a package directory entry"));
+        // An explicit file operand still belongs to the runtime.
+        let file = root.join("data.json");
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("bun", &file).unwrap(),
+            file
+        );
+    }
+
+    #[test]
+    fn bun_directory_resolves_js_source_aliases_and_trailing_slashes() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("bin")).unwrap();
+        for name in [
+            "app.tsx",
+            "app.ts",
+            "server.mts",
+            "legacy.cts",
+            "bin.js",
+            "bin/index.ts",
+            "index.js",
+        ] {
+            std::fs::write(root.join(name), "console.log('entry');").unwrap();
+        }
+        for (main, expected) in [
+            ("app.js", "app.ts"),
+            ("server.mjs", "server.mts"),
+            ("legacy.cjs", "index.js"),
+            ("bin", "bin.js"),
+            ("./bin/", "bin/index.ts"),
+            ("store.json", "index.js"),
+        ] {
+            std::fs::write(
+                root.join("package.json"),
+                serde_json::json!({"main":main}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                LockstepHarness::resolve_runtime_target("bun", &root).unwrap(),
+                root.join(expected)
+            );
+        }
     }
 
     #[test]
@@ -2397,63 +2624,39 @@ mod tests {
     // ── path traversal regression ─────────────────────────────────────
 
     #[test]
-    fn resolve_entry_candidate_rejects_path_traversal() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        // ".." segments
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "../../etc/passwd", "node")
-                .is_none(),
-            "must reject .. traversal"
-        );
-        // absolute path
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "/etc/passwd", "node")
-                .is_none(),
-            "must reject absolute path"
-        );
-        // backslash
-        assert!(
-            LockstepHarness::resolve_entry_candidate(
-                temp_dir.path(),
-                "..\\..\\etc\\passwd",
-                "node"
-            )
-            .is_none(),
-            "must reject backslash traversal"
-        );
-        // embedded ".." in deeper path
-        assert!(
-            LockstepHarness::resolve_entry_candidate(
-                temp_dir.path(),
-                "dist/../../../etc/passwd",
-                "node"
-            )
-            .is_none(),
-            "must reject embedded .. traversal"
-        );
+    fn bun_rejects_invalid_package_paths_even_with_a_fallback() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(root.join("index.js"), "console.log('fallback');").unwrap();
+        for target in [
+            "../../outside.js",
+            "/tmp/outside.js",
+            "..\\..\\outside.js",
+            "dist/../../../outside.js",
+            "index\0.js",
+        ] {
+            let manifest = serde_json::json!({"main": target});
+            std::fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+            assert!(
+                LockstepHarness::resolve_runtime_target("bun", root).is_err(),
+                "{target:?}"
+            );
+        }
     }
 
     #[test]
-    fn resolve_entry_candidate_rejects_empty_after_normalization() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), " ./ ", "node").is_none()
-        );
-        assert!(LockstepHarness::resolve_entry_candidate(temp_dir.path(), "", "node").is_none());
-    }
-
-    #[test]
-    fn resolve_entry_candidate_rejects_null_byte_target() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp_dir.path().join("index.js"), "console.log('ok');")
-            .expect("write fallback entry");
-
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "index\0.js", "node")
-                .is_none(),
-            "embedded NUL in package main must fail closed"
-        );
+    fn bun_empty_or_unresolvable_package_entry_needs_an_index() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::create_dir(root.join("dist")).unwrap();
+        for target in ["", " ./ ", "dist"] {
+            let manifest = serde_json::json!({"main": target});
+            std::fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+            assert!(
+                LockstepHarness::resolve_runtime_target("bun", root).is_err(),
+                "{target:?}"
+            );
+        }
     }
 
     #[test]
@@ -2488,17 +2691,6 @@ mod tests {
         assert!(message.contains("did not resolve"));
     }
 
-    #[test]
-    fn resolve_entry_candidate_rejects_directory_without_nested_entrypoint() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(temp_dir.path().join("dist")).expect("create dist");
-
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "dist", "node").is_none(),
-            "directory main without index candidate must not resolve"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn resolve_runtime_target_rejects_symlinked_package_manifest_outside_project() {
@@ -2526,10 +2718,14 @@ mod tests {
         let link_path = temp_dir.path().join("entry.js");
         std::os::unix::fs::symlink(&outside_entry, &link_path).expect("symlink");
 
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "entry.js", "node").is_none(),
-            "must reject symlinked entrypoint outside project"
-        );
+        std::fs::write(temp_dir.path().join("index.js"), "console.log('fallback');").unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"module":"entry.js"}"#,
+        )
+        .unwrap();
+        let error = LockstepHarness::resolve_runtime_target("bun", temp_dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the project"));
     }
 
     #[cfg(unix)]

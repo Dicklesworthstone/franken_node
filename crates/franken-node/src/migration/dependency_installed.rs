@@ -268,6 +268,7 @@ impl Inspector<'_> {
                 self.report,
                 &manifest,
                 &workspaces::manifest_path(path),
+                None,
             )?;
             for finding in &mut self.report.findings[start..] {
                 finding.installed_as = installed_as.into();

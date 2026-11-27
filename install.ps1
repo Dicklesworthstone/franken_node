@@ -7,7 +7,8 @@
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.ps1))) -Version v0.1.0 -EasyMode
 #
 # Options:
-#   -Version vX.Y.Z   Install a specific release tag (default: latest)
+#   -Version vX.Y.Z   Require the candidate to report the selected release version
+#                    (default: latest release, or unpinned with a custom ArtifactUrl)
 #   -Dest DIR         Install dir (default: %USERPROFILE%\.local\bin)
 #   -EasyMode         Add the install dir to your User PATH
 #   -Verify           Also verify after install (candidates are always checked)
@@ -74,7 +75,7 @@ function Get-InstallFileHash {
 }
 
 function Assert-InstallBinary {
-  param([string]$Path, [ValidateRange(1, 10000)][int]$TimeoutMillis = 10000)
+  param([string]$Path, [ValidateRange(1, 10000)][int]$TimeoutMillis = 10000, [string]$ExpectedVersion)
   # Native nonzero exits do not throw in Windows PowerShell. Check ExitCode
   # explicitly, and never let an interactive/broken candidate hang an upgrade.
   $process = New-Object System.Diagnostics.Process
@@ -83,25 +84,57 @@ function Assert-InstallBinary {
   $process.StartInfo.UseShellExecute = $false
   $process.StartInfo.CreateNoWindow = $true
   $process.StartInfo.RedirectStandardInput = $true
+  $process.StartInfo.RedirectStandardOutput = [bool]$ExpectedVersion
+  $started = $false
   try {
     if (-not $process.Start()) { throw "Could not start candidate: $Path" }
+    $started = $true
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $process.StandardInput.Close()
-    if (-not $process.WaitForExit($TimeoutMillis)) {
-      if ([System.Environment]::Version.Major -ge 5) { $process.Kill($true) }
-      else { $process.Kill() }
-      if (-not $process.WaitForExit(1000)) { throw "Candidate cleanup is unproven: $Path" }
+    if ($ExpectedVersion) {
+      $number = $ExpectedVersion -creplace '^v', ''
+      $expected = "$BinaryName $number"
+      # Allow LF or CRLF, plus one byte to detect trailing output. Never buffer
+      # the entire stdout stream, and charge every read to the probe deadline.
+      $buffer = New-Object byte[] ([System.Text.Encoding]::UTF8.GetByteCount($expected) + 3)
+      $output = $process.StandardOutput.BaseStream
+      $count = 0
+      while ($count -lt $buffer.Length) {
+        $read = $output.ReadAsync($buffer, $count, $buffer.Length - $count)
+        if (-not $read.Wait([int][Math]::Max(0, $TimeoutMillis - $clock.ElapsedMilliseconds))) {
+          throw "Candidate version probe timed out: $Path"
+        }
+        if ($read.Result -eq 0) { break }
+        $count += $read.Result
+      }
+      if ($count -eq $buffer.Length) { throw "Candidate does not report the exact release $expected" }
+    }
+    if (-not $process.WaitForExit([int][Math]::Max(0, $TimeoutMillis - $clock.ElapsedMilliseconds))) {
       throw "Candidate version probe timed out: $Path"
     }
     if ($process.ExitCode -ne 0) {
       throw "Candidate version probe exited $($process.ExitCode): $Path"
     }
+    if ($ExpectedVersion) {
+      $actual = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $count)
+      if (-not ([string]::Equals($actual, "$expected`n", [StringComparison]::Ordinal) -or
+                [string]::Equals($actual, "$expected`r`n", [StringComparison]::Ordinal))) {
+        throw "Candidate does not report the exact release $expected"
+      }
+    }
   } finally {
-    $process.Dispose()
+    try {
+      if ($started -and -not $process.HasExited) {
+        if ([System.Environment]::Version.Major -ge 5) { $process.Kill($true) }
+        else { $process.Kill() }
+        if (-not $process.WaitForExit(1000)) { throw "Candidate cleanup is unproven: $Path" }
+      }
+    } finally { $process.Dispose() }
   }
 }
 
 function Install-VerifiedBinary {
-  param([string]$Source, [string]$Destination, [switch]$PostVerify)
+  param([string]$Source, [string]$Destination, [switch]$PostVerify, [string]$ExpectedVersion)
   Assert-RegularInstallFile $Source
   $destinationRoot = [System.IO.Path]::GetFullPath($Destination)
   if (-not (Test-Path -LiteralPath $destinationRoot)) {
@@ -134,7 +167,7 @@ function Install-VerifiedBinary {
     if ((Get-InstallFileHash $staged) -ne $sourceHash) {
       throw "Staged candidate differs from its source; previous installation preserved"
     }
-    try { Assert-InstallBinary $staged }
+    try { Assert-InstallBinary $staged -ExpectedVersion $ExpectedVersion }
     catch { throw "Candidate cannot run; previous installation preserved. $($_.Exception.Message)" }
     if ((Get-InstallFileHash $staged) -ne $sourceHash) {
       throw "Candidate changed during validation; previous installation preserved"
@@ -148,7 +181,7 @@ function Install-VerifiedBinary {
     try {
       if ($PostVerify) {
         Write-Info "Running self-test..."
-        Assert-InstallBinary $installedPath
+        Assert-InstallBinary $installedPath -ExpectedVersion $ExpectedVersion
       }
       if ((Get-InstallFileHash $installedPath) -ne $sourceHash) {
         throw "Installed candidate changed during verification"
@@ -317,7 +350,7 @@ if ($candidates.Count -ne 1) {
 
 # Install
 try {
-  $installed = Install-VerifiedBinary -Source $candidates[0].FullName -Destination $Dest -PostVerify:$Verify
+  $installed = Install-VerifiedBinary -Source $candidates[0].FullName -Destination $Dest -PostVerify:$Verify -ExpectedVersion $Version
 } catch {
   Write-Err "Installation failed: $($_.Exception.Message)"
   exit 1

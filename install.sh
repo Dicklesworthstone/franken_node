@@ -14,7 +14,8 @@
 #   --dest DIR          Install the binary directly into DIR (overrides --prefix).
 #   --method MODE       auto (default) tries a checksum-verified GitHub release,
 #                       then falls back to a source build. Values: auto|release|source.
-#   --node-ref REF      Git ref for the franken_node source bootstrap (default: main).
+#   --node-ref REF      Source revision (default: requested --version tag, else main).
+#                       If both are supplied they must select the same commit.
 #   --engine-ref REF    Git ref for the franken_engine source bootstrap (default: main).
 #                       Other Cargo siblings use packaging/source-siblings.tsv.
 #   --offline TARBALL   Install a local tarball and its .sha256 sidecar, without network.
@@ -53,7 +54,7 @@ DEFAULT_PREFIX="${HOME}/.local"
 PREFIX="${DEFAULT_PREFIX}"
 DEST=""
 METHOD="auto"
-NODE_REF="${FRANKEN_NODE_REF:-main}"
+NODE_REF="${FRANKEN_NODE_REF:-}"
 ENGINE_REF="${FRANKEN_ENGINE_REF:-main}"
 OFFLINE_TARBALL=""
 EASY=0
@@ -261,11 +262,17 @@ preflight_checks() {
   fi
 }
 
+reports_release_version() {
+  # Clap emits exactly this line. Compare the complete output, so a prefix
+  # match cannot confuse a prerelease or a different patch with the request.
+  "$1" --version 2>/dev/null | cmp -s - <(printf '%s %s\n' "$BINARY_NAME" "${2#v}")
+}
+
 check_already_installed() {
   [ "$FORCE_INSTALL" -eq 1 ] && return 1
   [ -z "$VERSION" ] && return 1
   [ -x "$DEST_DIR/$BINARY_NAME" ] || return 1
-  "$DEST_DIR/$BINARY_NAME" --version 2>/dev/null | grep -qF "${VERSION#v}"
+  reports_release_version "$DEST_DIR/$BINARY_NAME" "$VERSION"
 }
 
 # ── Verification ──────────────────────────────────────────────────────────────
@@ -330,8 +337,14 @@ install_binary() {
   # Explicit guards matter: Bash disables errexit inside the release fallback's
   # if/&& call chain. A failed install/mv must never be followed by a success log.
   install -m 0755 "$1" "$staged" || die "cannot stage binary; existing installation preserved"
-  "$staged" --version >/dev/null 2>&1 \
-    || die "candidate cannot run on this host; existing installation preserved"
+  local expected_version="${2:-$VERSION}"
+  if [ -n "$expected_version" ]; then
+    reports_release_version "$staged" "$expected_version" \
+      || die "candidate does not report $BINARY_NAME ${expected_version#v}; existing installation preserved"
+  else
+    "$staged" --version >/dev/null 2>&1 \
+      || die "candidate cannot run on this host; existing installation preserved"
+  fi
   if [ "$ENABLE_PROCESS_SPAWN" -eq 1 ]; then
     "$staged" doctor process-spawn-readiness --json >/dev/null \
       || die "process-spawn support requested, but candidate readiness failed; existing installation preserved"
@@ -372,7 +385,7 @@ extract_and_install() {
     || die "cannot read bounded release binary"
   bytes="$(wc -c < "$payload")" || die "cannot size release binary"
   [ "$bytes" -gt 0 ] && [ "$bytes" -le "$MAX_BINARY_BYTES" ] || die "release binary size limit exceeded"
-  install_binary "$payload"
+  install_binary "$payload" "${2:-$VERSION}"
 }
 
 try_release_target() {
@@ -384,7 +397,7 @@ try_release_target() {
   download_file "$url" "$archive" || { warn "asset not found: $asset"; return 1; }
   verify_checksum "$archive" "${url}.sha256" || return 1
   verify_sigstore "$archive" "${url}.sigstore.json"
-  extract_and_install "$archive"
+  extract_and_install "$archive" "$tag"
 }
 
 install_from_release() {
@@ -433,8 +446,22 @@ install_from_source() {
   local src="${WORK_DIR}/source" node_dir engine_dir built bootstrap receipt after_receipt node_sha engine_sha
   node_dir="${src}/${REPO}"; engine_dir="${src}/${ENGINE_REPO}"
   mkdir -p "$src" || die "cannot reserve source workspace"
-  info "Source bootstrap: ${REPO}@${NODE_REF} + ${ENGINE_REPO}@${ENGINE_REF} (side-by-side)"
-  clone_ref "$REPO" "$node_dir" "$NODE_REF" || die "failed to clone ${REPO}@${NODE_REF}"
+  local node_ref="${NODE_REF:-main}" tag_ref="refs/tags/$VERSION"
+  if [ -n "$VERSION" ] && { [ -z "$NODE_REF" ] || [ "$NODE_REF" = "$VERSION" ]; }; then
+    node_ref="$tag_ref"
+  fi
+  info "Source bootstrap: ${REPO}@${node_ref} + ${ENGINE_REPO}@${ENGINE_REF} (side-by-side)"
+  clone_ref "$REPO" "$node_dir" "$node_ref" || die "failed to clone ${REPO}@${node_ref}"
+  if [ -n "$VERSION" ] && [ "$node_ref" != "$tag_ref" ]; then
+    # Accept an explicit source SHA or branch only at the requested tag.
+    git -C "$node_dir" fetch --no-tags --depth 1 origin "$tag_ref" \
+      || die "cannot resolve requested release tag $VERSION"
+    local tag_sha
+    tag_sha="$(git -C "$node_dir" rev-parse --verify 'FETCH_HEAD^{commit}')" \
+      || die "cannot identify requested release commit"
+    [ "$(git -C "$node_dir" rev-parse HEAD)" = "$tag_sha" ] \
+      || die "source ref $node_ref does not select release tag $VERSION"
+  fi
   # Use the selected checkout's own dependency lock, not today's floating
   # sibling branches or a global /dp workspace. Old revisions without this
   # contract fail explicitly rather than receiving an invented dependency set.

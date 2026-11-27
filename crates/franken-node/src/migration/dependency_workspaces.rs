@@ -196,6 +196,7 @@ pub(super) fn manifest_findings(
     report: &mut DependencyAdmission,
     manifest: &Value,
     source: &str,
+    root_manager: Option<WorkspaceSelectionMode>,
 ) -> Result<()> {
     let Some(scripts) = manifest.get("scripts") else {
         return Ok(());
@@ -207,9 +208,15 @@ pub(super) fn manifest_findings(
         let command = command
             .as_str()
             .context("package script command must be a string")?;
-        if ["preinstall", "install", "postinstall", "prepare"].contains(&script.as_str())
-            && !command.trim().is_empty()
-        {
+        // Root install/ci dispatches additional events. A workspace member or
+        // registry dependency does not inherit the root's lifecycle.
+        let install_hook = match script.as_str() {
+            "preinstall" | "install" | "postinstall" | "prepare" => true,
+            "preprepare" | "postprepare" => root_manager.is_some(),
+            "prepublish" => root_manager == Some(WorkspaceSelectionMode::Npm),
+            _ => false,
+        };
+        if install_hook && !command.trim().is_empty() {
             report.finding(DependencyFinding {
                 code: "install_script".into(), source: format!("{source}#scripts.{script}"),
                 package: manifest.get("name").and_then(Value::as_str).unwrap_or_default().into(),

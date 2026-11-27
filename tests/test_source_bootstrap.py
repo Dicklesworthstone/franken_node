@@ -477,6 +477,33 @@ cp "$WORK_DIR/source-inputs.tsv" {shlex.quote(str(self.saved_receipt))}
         self.assertIn("source/franken_node/target", provenance[2])
         self.assertIn("frankentui\t" + self.pins["frankentui"], self.saved_receipt.read_text())
 
+    def test_pinned_auto_source_fallback_builds_only_the_tagged_commit(self):
+        self.installer_fixture()
+        self.candidate.write_text('#!/bin/sh\n[ "$1" = --version ] || exit 1\necho "franken-node 0.2.0"\n')
+        remote = str(self.remotes / "franken_node.git")
+        git(self.workspace, "tag", "-a", "v0.2.0", "-m", "release", env=self.env)
+        self.commit_workspace()
+        git(self.workspace, "push", remote, "main", "refs/tags/v0.2.0", env=self.env)
+        script = f"""source {shlex.quote(str(ROOT / 'install.sh'))}
+download_file() {{ return 22; }}
+main --version v0.2.0 --engine-ref {self.pins['franken_engine']} --force --quiet \
+  --dest {shlex.quote(str(self.install_dir))} "$@"
+"""
+        def install(*args):
+            return subprocess.run(["bash", "-c", script, "installer", *args],
+                                  env={**self.install_env, "HOME": str(self.root), "TMPDIR": str(self.root),
+                                       "FRANKEN_NODE_REF": ""}, capture_output=True, text=True, timeout=25)
+
+        result = install("--node-ref", "main")
+        self.assert_failure(result, "does not select release tag")
+        self.assertFalse(self.args_log.exists())
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+        for selector in ((), ("--node-ref", self.node_pin)):
+            with self.subTest(selector=selector):
+                self.assert_success(install(*selector))
+                self.assertEqual(self.env_log.read_text().splitlines()[0], self.node_pin)
+                self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.candidate.read_bytes())
+
     def test_source_installer_compile_failure_never_replaces_working_binary(self):
         self.installer_fixture()
         self.assert_failure(self.install_source(extra_env={"TEST_BUILD_FAIL": "1"}), "source build failed")

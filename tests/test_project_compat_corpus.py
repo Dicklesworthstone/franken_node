@@ -59,6 +59,27 @@ class CorpusTests(unittest.TestCase):
         categories = {case["category"] for case in corpus["cases"]}
         self.assertTrue({"commonjs", "esm", "package-resolution", "filesystem-integration"} <= categories)
 
+    @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "requires POSIX and Node reference")
+    def test_directory_launches_match_reference_observations(self):
+        runner.reject_runtime_overrides()
+        corpus = runner.load_corpus(runner.DEFAULT_CORPUS.with_name("directory-entry.corpus.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            for case in corpus["cases"]:
+                for role in ("node", "bun"):
+                    if not shutil.which(role):
+                        continue
+                    with self.subTest(case=case["id"], runtime=role):
+                        base = Path(tmp) / case["id"] / role
+                        runner.stage(case, base / "project")
+                        operand = "." if case["entry"] == "." else "./" + case["entry"]
+                        receipt = runner.supervise(
+                            [str(runner.executable(role)), operand],
+                            base / "execution", cwd=base / "project",
+                            wall_time_ms=10000, max_output_bytes=1024 * 1024,
+                        )
+                        self.assertEqual(runner.differences(receipt, case["expected"]), [],
+                                         Path(receipt["stderr_path"]).read_text(errors="replace"))
+
     def test_pinned_npm_publication_bytes_and_lock_identity(self):
         cases = runner.load_corpus(NPM_CORPUS)["cases"]
         self.assertEqual({case["id"] for case in cases}, set(NPM_PINS))
