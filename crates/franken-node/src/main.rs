@@ -11580,8 +11580,343 @@ fn emit_init_error_json(message: &str) -> Result<()> {
     Ok(())
 }
 
-fn init_fail(json: bool, error: impl std::fmt::Display) -> Result<()> {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DetectedProjectArchetype {
+    archetype_id: &'static str,
+    slug: &'static str,
+    label: &'static str,
+    detected_signals: Vec<String>,
+    detected_entrypoint: Option<String>,
+    recommended_run_command: Option<String>,
+}
+
+const MAX_ARCHETYPE_MANIFEST_BYTES: u64 = 256 * 1024;
+
+fn is_regular_non_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
+}
+
+fn read_bounded_project_manifest(path: &Path) -> Option<serde_json::Value> {
+    use std::io::Read as _;
+
+    if !is_regular_non_symlink(path) {
+        return None;
+    }
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        std::fs::File::from(
+            open(
+                path,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .ok()?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_ARCHETYPE_MANIFEST_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_ARCHETYPE_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_ARCHETYPE_MANIFEST_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn manifest_has_dependency(manifest: &serde_json::Value, dep_name: &str) -> Option<&'static str> {
+    ["dependencies", "devDependencies", "peerDependencies"]
+        .into_iter()
+        .find(|&section| {
+            manifest
+                .get(section)
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|deps| deps.contains_key(dep_name))
+        })
+}
+
+fn manifest_has_workspaces(manifest: &serde_json::Value) -> bool {
+    match manifest.get("workspaces") {
+        Some(serde_json::Value::Array(items)) => !items.is_empty(),
+        Some(serde_json::Value::Object(map)) => map
+            .get("packages")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty()),
+        _ => false,
+    }
+}
+
+fn manifest_bin_entrypoint(manifest: &serde_json::Value) -> Option<String> {
+    match manifest.get("bin") {
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty() && !trimmed.contains(['\0', '\n', '\r']))
+                .then(|| trimmed.to_string())
+        }
+        Some(serde_json::Value::Object(map)) => {
+            let mut entries: Vec<(&String, &str)> = map
+                .iter()
+                .filter_map(|(k, v)| {
+                    let s = v.as_str()?.trim();
+                    (!s.is_empty() && !s.contains(['\0', '\n', '\r'])).then_some((k, s))
+                })
+                .collect();
+            entries.sort_by_key(|(a, _)| *a);
+            entries.first().map(|(_, path)| (*path).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn detect_project_entrypoint(root: &Path, manifest: Option<&serde_json::Value>) -> Option<String> {
+    if let Some(pkg) = manifest {
+        if let Some(main_field) = pkg.get("main").and_then(serde_json::Value::as_str) {
+            let trimmed = main_field.trim();
+            if !trimmed.is_empty() && !trimmed.contains(['\0', '\n', '\r']) {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(bin_entry) = manifest_bin_entrypoint(pkg) {
+            return Some(bin_entry);
+        }
+    }
+    for candidate in ["index.js", "index.mjs", "src/index.js", "server.js"] {
+        if is_regular_non_symlink(&root.join(candidate)) {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+fn detect_project_archetype(root: &Path, profile: &str) -> DetectedProjectArchetype {
+    let package_json_path = root.join("package.json");
+    let has_package_json = is_regular_non_symlink(&package_json_path);
+    let manifest = if has_package_json {
+        read_bounded_project_manifest(&package_json_path)
+    } else {
+        None
+    };
+    let detected_entrypoint = detect_project_entrypoint(root, manifest.as_ref());
+    let recommended_run_command = if let Some(entry) = &detected_entrypoint {
+        Some(format!("franken-node run {entry} --policy {profile}"))
+    } else if has_package_json {
+        Some(format!("franken-node run . --policy {profile}"))
+    } else {
+        None
+    };
+
+    let mut monorepo_signals = Vec::new();
+    for marker in ["turbo.json", "nx.json", "pnpm-workspace.yaml"] {
+        if is_regular_non_symlink(&root.join(marker)) {
+            monorepo_signals.push(format!("marker:{marker}"));
+        }
+    }
+    if manifest.as_ref().is_some_and(manifest_has_workspaces) {
+        monorepo_signals.push("package.json:workspaces".to_string());
+    }
+    if !monorepo_signals.is_empty() {
+        return DetectedProjectArchetype {
+            archetype_id: "A-4",
+            slug: "monorepo",
+            label: "Monorepo",
+            detected_signals: monorepo_signals,
+            detected_entrypoint,
+            recommended_run_command,
+        };
+    }
+
+    let mut serverless_signals = Vec::new();
+    for marker in [
+        "serverless.yml",
+        "serverless.yaml",
+        "serverless.ts",
+        "serverless.js",
+        "vercel.json",
+    ] {
+        if is_regular_non_symlink(&root.join(marker)) {
+            serverless_signals.push(format!("marker:{marker}"));
+        }
+    }
+    if !serverless_signals.is_empty() {
+        return DetectedProjectArchetype {
+            archetype_id: "A-5",
+            slug: "serverless",
+            label: "Serverless",
+            detected_signals: serverless_signals,
+            detected_entrypoint,
+            recommended_run_command,
+        };
+    }
+
+    if let Some(pkg) = manifest.as_ref() {
+        if let Some(section) = manifest_has_dependency(pkg, "express") {
+            return DetectedProjectArchetype {
+                archetype_id: "A-1",
+                slug: "express_api",
+                label: "Express API",
+                detected_signals: vec![format!("package.json:{section}.express")],
+                detected_entrypoint,
+                recommended_run_command,
+            };
+        }
+
+        let mut react_signals = Vec::new();
+        if let Some(section) = manifest_has_dependency(pkg, "react-scripts") {
+            react_signals.push(format!("package.json:{section}.react-scripts"));
+        }
+        if let Some(section) = manifest_has_dependency(pkg, "vite") {
+            react_signals.push(format!("package.json:{section}.vite"));
+        }
+        if let Some(section) = manifest_has_dependency(pkg, "react") {
+            react_signals.push(format!("package.json:{section}.react"));
+        }
+        let has_vite_config = [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mts",
+            "vite.config.mjs",
+            "vite.config.cjs",
+        ]
+        .into_iter()
+        .find(|marker| is_regular_non_symlink(&root.join(marker)));
+        if let Some(marker) = has_vite_config {
+            react_signals.push(format!("marker:{marker}"));
+        }
+        let has_react_spa = manifest_has_dependency(pkg, "react-scripts").is_some()
+            || manifest_has_dependency(pkg, "vite").is_some()
+            || (manifest_has_dependency(pkg, "react").is_some()
+                && (has_vite_config.is_some() || is_regular_non_symlink(&root.join("index.html"))));
+        if has_react_spa {
+            return DetectedProjectArchetype {
+                archetype_id: "A-2",
+                slug: "react_spa",
+                label: "React SPA",
+                detected_signals: react_signals,
+                detected_entrypoint,
+                recommended_run_command,
+            };
+        }
+
+        if manifest_bin_entrypoint(pkg).is_some() {
+            return DetectedProjectArchetype {
+                archetype_id: "A-3",
+                slug: "cli_tool",
+                label: "CLI Tool",
+                detected_signals: vec!["package.json:bin".to_string()],
+                detected_entrypoint,
+                recommended_run_command,
+            };
+        }
+
+        return DetectedProjectArchetype {
+            archetype_id: "A-0",
+            slug: "generic_node",
+            label: "Generic Node.js",
+            detected_signals: vec!["marker:package.json".to_string()],
+            detected_entrypoint,
+            recommended_run_command,
+        };
+    }
+
+    let mut fallback_signals = Vec::new();
+    if has_package_json {
+        fallback_signals.push("marker:package.json:unreadable_or_invalid_json".to_string());
+    }
+    DetectedProjectArchetype {
+        archetype_id: "NONE",
+        slug: "unclassified",
+        label: "Unclassified",
+        detected_signals: fallback_signals,
+        detected_entrypoint,
+        recommended_run_command,
+    }
+}
+
+fn fmp_recovery_suggestion_for_init_error(message: &str) -> &'static str {
+    if message.contains("already contains generated files")
+        || message.contains("refusing to overwrite")
+    {
+        "Re-run with `--overwrite` or `--backup-existing` to update existing config files."
+    } else if message.contains("mutually exclusive") {
+        "Pass only one of `--overwrite` or `--backup-existing`."
+    } else if message.contains("`init --scan` requires state bootstrapping") {
+        "Remove `--no-state` when running `franken-node init --scan`."
+    } else if message.contains("regular file") || message.contains("symlink") {
+        "Replace special files or symlinks at target config paths with regular files before running `franken-node init`."
+    } else {
+        "Check directory permissions and configuration flags, then re-run `franken-node init --profile balanced`."
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FmpPathwayTelemetryLine {
+    // Standard structured-log fields for existing JSONL consumers.
+    timestamp: String,
+    level: &'static str,
+    event_code: &'static str,
+    message: String,
+    trace_id: String,
+    span_id: String,
+    surface: &'static str,
+    // bd-34d5 FMP-001..004 contract fields.
+    code: &'static str,
+    step: &'static str,
+    archetype: String,
+    elapsed_ms: u64,
+    timestamp_utc: String,
+    metadata: serde_json::Value,
+}
+
+fn emit_init_fmp_failure_telemetry(
+    trace_id: &str,
+    archetype: &str,
+    elapsed_ms: u64,
+    message: &str,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let recovery = fmp_recovery_suggestion_for_init_error(message);
+    let event = FmpPathwayTelemetryLine {
+        timestamp: now.clone(),
+        level: "error",
+        event_code: "FMP-004",
+        message: format!("onboarding pathway step init failed: {message}"),
+        trace_id: trace_id.to_string(),
+        span_id: "fmp-init".to_string(),
+        surface: "CLI-INIT",
+        code: "FMP-004",
+        step: "init",
+        archetype: archetype.to_string(),
+        elapsed_ms,
+        timestamp_utc: now,
+        metadata: serde_json::json!({
+            "error": message,
+            "recovery": recovery,
+        }),
+    };
+    if let Ok(encoded) = serde_json::to_string(&event) {
+        eprintln!("{encoded}");
+    }
+}
+
+fn init_fail_with_telemetry(
+    json: bool,
+    structured_logs_jsonl: bool,
+    trace_id: &str,
+    archetype: &str,
+    elapsed_ms: u64,
+    error: impl std::fmt::Display,
+) -> Result<()> {
     let message = format!("{error:#}");
+    if structured_logs_jsonl {
+        emit_init_fmp_failure_telemetry(trace_id, archetype, elapsed_ms, &message);
+    }
     if json {
         emit_init_error_json(&message)?;
         fail_closed_after_json();
@@ -11607,6 +11942,10 @@ struct InitReport {
     /// bootstrap (registry signing key, authorized API keys). Empty when the
     /// caller-supplied config already satisfied both boundaries.
     bootstrap_synthesis: config::BootstrapSynthesis,
+    /// Deterministic project archetype detected from workspace marker files
+    /// (`bd-34d5`: A-1 Express API, A-2 React SPA, A-3 CLI Tool, A-4 Monorepo,
+    /// A-5 Serverless, plus Generic Node.js / Unclassified fallbacks).
+    project_archetype: DetectedProjectArchetype,
 }
 
 fn validate_init_flags(overwrite: bool, backup_existing: bool) -> Result<()> {
@@ -11790,9 +12129,9 @@ fn build_init_report(
     resolved: &config::ResolvedConfig,
     file_actions: Vec<InitFileAction>,
     trust_scan: Option<TrustScanReport>,
-    wrote_to_stdout: bool,
     stdout_config_toml: Option<String>,
     bootstrap_synthesis: config::BootstrapSynthesis,
+    project_archetype: DetectedProjectArchetype,
 ) -> InitReport {
     InitReport {
         schema_version: INIT_CLI_SCHEMA_VERSION,
@@ -11804,13 +12143,14 @@ fn build_init_report(
             .source_path
             .as_ref()
             .map(|path| path.display().to_string()),
-        wrote_to_stdout,
+        wrote_to_stdout: stdout_config_toml.is_some(),
         stdout_config_toml,
         file_actions,
         trust_scan,
         merge_decision_count: resolved.decisions.len(),
         merge_decisions: resolved.decisions.clone(),
         bootstrap_synthesis,
+        project_archetype,
     }
 }
 
@@ -11820,6 +12160,20 @@ fn render_init_report_human(report: &InitReport, verbose: bool) -> String {
         "franken-node init: profile={} trace_id={}",
         report.selected_profile, report.trace_id
     ));
+    lines.push(format!(
+        "project_archetype={} ({}) id={} signals={}",
+        report.project_archetype.slug,
+        report.project_archetype.label,
+        report.project_archetype.archetype_id,
+        if report.project_archetype.detected_signals.is_empty() {
+            "<none>".to_string()
+        } else {
+            report.project_archetype.detected_signals.join(",")
+        }
+    ));
+    if let Some(cmd) = &report.project_archetype.recommended_run_command {
+        lines.push(format!("recommended_next_step={cmd}"));
+    }
     lines.push(format!(
         "source={}",
         report
@@ -20161,7 +20515,7 @@ fn init_structured_log_line(
     }
 }
 
-fn render_init_structured_logs_jsonl(report: &InitReport) -> Result<String> {
+fn render_init_structured_logs_jsonl(report: &InitReport, elapsed_ms: u64) -> Result<String> {
     let mut lines = String::new();
 
     // Event: init started
@@ -20197,6 +20551,36 @@ fn render_init_structured_logs_jsonl(report: &InitReport) -> Result<String> {
         "complete",
     );
     lines.push_str(&serde_json::to_string(&complete_line)?);
+    lines.push('\n');
+
+    // Event: bd-34d5 pathway step_completed telemetry
+    let fmp_line = FmpPathwayTelemetryLine {
+        timestamp: report.generated_at_utc.clone(),
+        level: "info",
+        event_code: "FMP-002",
+        message: format!(
+            "onboarding pathway step init completed: archetype={} profile={}",
+            report.project_archetype.slug, report.selected_profile
+        ),
+        trace_id: report.trace_id.clone(),
+        span_id: "fmp-init".to_string(),
+        surface: "CLI-INIT",
+        code: "FMP-002",
+        step: "init",
+        archetype: report.project_archetype.slug.to_string(),
+        elapsed_ms,
+        timestamp_utc: report.generated_at_utc.clone(),
+        metadata: serde_json::json!({
+            "archetype_id": report.project_archetype.archetype_id,
+            "archetype_label": report.project_archetype.label,
+            "detected_signals": report.project_archetype.detected_signals,
+            "detected_entrypoint": report.project_archetype.detected_entrypoint,
+            "recommended_run_command": report.project_archetype.recommended_run_command,
+            "profile": report.selected_profile,
+            "file_actions": report.file_actions.len(),
+        }),
+    };
+    lines.push_str(&serde_json::to_string(&fmp_line)?);
     lines.push('\n');
 
     Ok(lines)
@@ -20250,6 +20634,9 @@ fn render_run_structured_logs_jsonl(
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     receipt: &RunExecutionReceipt,
     trace_id: &str,
+    archetype: &DetectedProjectArchetype,
+    elapsed_ms: u64,
+    execution_error: Option<&str>,
 ) -> Result<String> {
     let mut lines = String::new();
     let now = chrono::Utc::now().to_rfc3339();
@@ -20278,8 +20665,33 @@ fn render_run_structured_logs_jsonl(
     lines.push_str(&serde_json::to_string(&preflight_line)?);
     lines.push('\n');
 
-    // If blocked, don't emit further events
+    // If blocked, emit FMP-004 pathway_failed and stop further events
     if preflight.verdict.is_blocked() {
+        let fmp_failed = FmpPathwayTelemetryLine {
+            timestamp: now.clone(),
+            level: "error",
+            event_code: "FMP-004",
+            message: format!(
+                "onboarding pathway step run blocked by policy preflight: policy={} archetype={}",
+                preflight.policy_mode, archetype.slug
+            ),
+            trace_id: trace_id.to_string(),
+            span_id: "fmp-run".to_string(),
+            surface: "CLI-RUN",
+            code: "FMP-004",
+            step: "run",
+            archetype: archetype.slug.to_string(),
+            elapsed_ms,
+            timestamp_utc: now,
+            metadata: serde_json::json!({
+                "error": "run preflight blocked by active trust policy",
+                "policy": preflight.policy_mode,
+                "archetype_id": archetype.archetype_id,
+                "recovery": "Inspect policy diagnostics with `franken-node doctor --json` or `franken-node trust list`, then re-run.",
+            }),
+        };
+        lines.push_str(&serde_json::to_string(&fmp_failed)?);
+        lines.push('\n');
         return Ok(lines);
     }
 
@@ -20636,6 +21048,96 @@ fn render_run_structured_logs_jsonl(
     );
     lines.push_str(&serde_json::to_string(&receipt_line)?);
     lines.push('\n');
+
+    // bd-34d5: emit mutually exclusive FMP-002+FMP-003 (success) or FMP-004 (failure)
+    if execution_error.is_none() && dispatch.exit_code == Some(0) {
+        let fmp_step = FmpPathwayTelemetryLine {
+            timestamp: now.clone(),
+            level: "info",
+            event_code: "FMP-002",
+            message: format!(
+                "onboarding pathway step run completed: archetype={} policy={} runtime={}",
+                archetype.slug, preflight.policy_mode, dispatch.runtime
+            ),
+            trace_id: trace_id.to_string(),
+            span_id: "fmp-run".to_string(),
+            surface: "CLI-RUN",
+            code: "FMP-002",
+            step: "run",
+            archetype: archetype.slug.to_string(),
+            elapsed_ms,
+            timestamp_utc: now.clone(),
+            metadata: serde_json::json!({
+                "archetype_id": archetype.archetype_id,
+                "policy": preflight.policy_mode,
+                "runtime": dispatch.runtime,
+                "exit_code": dispatch.exit_code,
+                "receipt_id": receipt.core.receipt_id,
+            }),
+        };
+        lines.push_str(&serde_json::to_string(&fmp_step)?);
+        lines.push('\n');
+
+        let fmp_succeeded = FmpPathwayTelemetryLine {
+            timestamp: now.clone(),
+            level: "info",
+            event_code: "FMP-003",
+            message: format!(
+                "onboarding pathway succeeded with active policy={}: archetype={} receipt_id={}",
+                preflight.policy_mode, archetype.slug, receipt.core.receipt_id
+            ),
+            trace_id: trace_id.to_string(),
+            span_id: "fmp-pathway".to_string(),
+            surface: "CLI-RUN",
+            code: "FMP-003",
+            step: "run",
+            archetype: archetype.slug.to_string(),
+            elapsed_ms,
+            timestamp_utc: now,
+            metadata: serde_json::json!({
+                "archetype_id": archetype.archetype_id,
+                "archetype_label": archetype.label,
+                "policy": preflight.policy_mode,
+                "runtime": dispatch.runtime,
+                "receipt_id": receipt.core.receipt_id,
+                "violation_count": receipt.core.violation_count,
+            }),
+        };
+        lines.push_str(&serde_json::to_string(&fmp_succeeded)?);
+        lines.push('\n');
+    } else {
+        let error_desc = execution_error
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("application exited with code {:?}", dispatch.exit_code));
+        let fmp_failed = FmpPathwayTelemetryLine {
+            timestamp: now.clone(),
+            level: "error",
+            event_code: "FMP-004",
+            message: format!(
+                "onboarding pathway step run failed: archetype={} error={error_desc}",
+                archetype.slug
+            ),
+            trace_id: trace_id.to_string(),
+            span_id: "fmp-run".to_string(),
+            surface: "CLI-RUN",
+            code: "FMP-004",
+            step: "run",
+            archetype: archetype.slug.to_string(),
+            elapsed_ms,
+            timestamp_utc: now,
+            metadata: serde_json::json!({
+                "error": error_desc,
+                "archetype_id": archetype.archetype_id,
+                "policy": preflight.policy_mode,
+                "runtime": dispatch.runtime,
+                "exit_code": dispatch.exit_code,
+                "receipt_id": receipt.core.receipt_id,
+                "recovery": "Inspect the execution receipt and captured diagnostics with `franken-node doctor --json`, then resolve policy or runtime errors before re-running.",
+            }),
+        };
+        lines.push_str(&serde_json::to_string(&fmp_failed)?);
+        lines.push('\n');
+    }
 
     Ok(lines)
 }
@@ -49256,9 +49758,24 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => {
+            let init_started = std::time::Instant::now();
             let json = args.json;
+            let structured_logs_jsonl_early = args.structured_logs_jsonl;
+            let trace_id_early = args.trace_id.clone();
+            let fail_init = |archetype: &str, err: String| {
+                let elapsed_ms =
+                    u64::try_from(init_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                init_fail_with_telemetry(
+                    json,
+                    structured_logs_jsonl_early,
+                    &trace_id_early,
+                    archetype,
+                    elapsed_ms,
+                    err,
+                )
+            };
             if let Err(err) = args.validate_paths() {
-                return init_fail(json, err);
+                return fail_init("unclassified", format!("{err:#}"));
             }
             let cli::InitArgs {
                 profile,
@@ -49267,25 +49784,32 @@ fn main() -> Result<()> {
                 overwrite,
                 backup_existing,
                 scan,
-                json,
+                json: _,
                 structured_logs_jsonl,
                 trace_id,
                 state_dir,
                 no_state,
             } = args;
 
+            let bootstrap_root = state_dir
+                .as_deref()
+                .or(out_dir.as_deref())
+                .unwrap_or_else(|| Path::new("."));
+            let mut project_archetype =
+                detect_project_archetype(bootstrap_root, profile.as_deref().unwrap_or("balanced"));
+
             if let Err(err) = validate_init_flags(overwrite, backup_existing) {
-                return init_fail(json, err);
+                return fail_init(project_archetype.slug, format!("{err:#}"));
             }
             if scan && no_state {
-                return init_fail(
-                    json,
-                    "`init --scan` requires state bootstrapping; remove `--no-state`",
+                return fail_init(
+                    project_archetype.slug,
+                    "`init --scan` requires state bootstrapping; remove `--no-state`".to_string(),
                 );
             }
             let profile_override = match parse_profile_override(profile.as_deref()) {
                 Ok(profile) => profile,
-                Err(err) => return init_fail(json, err),
+                Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
             };
             // `init` is the bootstrap surface: it must succeed even when the
             // operator has no existing config (the very purpose of the command
@@ -49303,8 +49827,8 @@ fn main() -> Result<()> {
             ) {
                 Ok(resolved) => resolved,
                 Err(err) => {
-                    return init_fail(
-                        json,
+                    return fail_init(
+                        project_archetype.slug,
                         format!("failed resolving configuration for init: {err}"),
                     );
                 }
@@ -49312,17 +49836,29 @@ fn main() -> Result<()> {
             let config_toml = match resolved.config.to_toml() {
                 Ok(toml) => toml,
                 Err(err) => {
-                    return init_fail(json, format!("failed serializing resolved config: {err}"));
+                    return fail_init(
+                        project_archetype.slug,
+                        format!("failed serializing resolved config: {err}"),
+                    );
                 }
             };
 
             let mut wrote_to_stdout = false;
             let mut stdout_config_toml: Option<String> = None;
             let mut file_actions = Vec::new();
-            let bootstrap_root = state_dir
-                .as_deref()
-                .or(out_dir.as_deref())
-                .unwrap_or_else(|| Path::new("."));
+            let resolved_profile_str = resolved.selected_profile.to_string();
+            if project_archetype.recommended_run_command.is_some() {
+                project_archetype.recommended_run_command =
+                    if let Some(entry) = &project_archetype.detected_entrypoint {
+                        Some(format!(
+                            "franken-node run {entry} --policy {resolved_profile_str}"
+                        ))
+                    } else {
+                        Some(format!(
+                            "franken-node run . --policy {resolved_profile_str}"
+                        ))
+                    };
+            }
             // The config lands where the state does. State bootstrap signs the
             // trust-card registry with the (possibly just synthesized) registry
             // key, so a config that is only printed leaves a workspace no later
@@ -49336,7 +49872,7 @@ fn main() -> Result<()> {
                 if let Err(err) = std::fs::create_dir_all(out_dir).with_context(|| {
                     format!("failed creating init output dir {}", out_dir.display())
                 }) {
-                    return init_fail(json, err);
+                    return fail_init(project_archetype.slug, format!("{err:#}"));
                 }
                 let (config_path, profile_path) = init_target_paths(out_dir);
 
@@ -49347,8 +49883,8 @@ fn main() -> Result<()> {
                         .map(|path| path.display().to_string())
                         .collect::<Vec<_>>();
                     if !existing.is_empty() {
-                        return init_fail(
-                            json,
+                        return fail_init(
+                            project_archetype.slug,
                             format!(
                                 "init target already contains generated files: {} (use --overwrite or --backup-existing)",
                                 existing.join(", ")
@@ -49363,7 +49899,7 @@ fn main() -> Result<()> {
                 if backup_existing {
                     for path in [&config_path, &profile_path] {
                         if let Err(err) = open_init_backup_source(path) {
-                            return init_fail(json, err);
+                            return fail_init(project_archetype.slug, format!("{err:#}"));
                         }
                     }
                 }
@@ -49377,7 +49913,7 @@ fn main() -> Result<()> {
                     &backup_suffix,
                 ) {
                     Ok(action) => file_actions.push(action),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
                 match apply_init_write_policy(
                     &profile_path,
@@ -49387,7 +49923,7 @@ fn main() -> Result<()> {
                     &backup_suffix,
                 ) {
                     Ok(action) => file_actions.push(action),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
             } else {
                 wrote_to_stdout = true;
@@ -49398,15 +49934,15 @@ fn main() -> Result<()> {
             if !no_state {
                 match bootstrap_state_directory(
                     bootstrap_root,
-                    &resolved.selected_profile.to_string(),
+                    &resolved_profile_str,
                     &resolved.config.trust,
                 ) {
                     Ok(state_actions) => file_actions.extend(state_actions),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
                 match provision_trust_scan_remotecap(bootstrap_root, now_unix_secs()) {
                     Ok(remotecap_actions) => file_actions.extend(remotecap_actions),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
                 match provision_receipt_signing_key(
                     bootstrap_root,
@@ -49417,13 +49953,13 @@ fn main() -> Result<()> {
                         .as_deref(),
                 ) {
                     Ok(receipt_key_action) => file_actions.extend(receipt_key_action),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
             }
             let trust_scan = if scan {
                 match run_trust_scan(bootstrap_root, false, false, false) {
                     Ok(report) => Some(report),
-                    Err(err) => return init_fail(json, err),
+                    Err(err) => return fail_init(project_archetype.slug, format!("{err:#}")),
                 }
             } else {
                 None
@@ -49434,16 +49970,18 @@ fn main() -> Result<()> {
                 &resolved,
                 file_actions,
                 trust_scan,
-                wrote_to_stdout,
                 stdout_config_toml.clone(),
                 bootstrap_synthesis,
+                project_archetype,
             );
 
+            let init_elapsed_ms =
+                u64::try_from(init_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             if structured_logs_jsonl
-                && let Err(err) =
-                    render_init_structured_logs_jsonl(&report).map(|logs| eprint!("{logs}"))
+                && let Err(err) = render_init_structured_logs_jsonl(&report, init_elapsed_ms)
+                    .map(|logs| eprint!("{logs}"))
             {
-                return init_fail(json, err);
+                return fail_init(report.project_archetype.slug, format!("{err:#}"));
             }
 
             if json {
@@ -49459,6 +49997,7 @@ fn main() -> Result<()> {
         }
 
         Command::Run(args) => {
+            let run_started = args.structured_logs_jsonl.then(std::time::Instant::now);
             let json = args.json;
             if let Err(err) = args.validate_paths() {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
@@ -50272,9 +50811,31 @@ fn main() -> Result<()> {
             };
 
             if structured_logs_jsonl {
+                let run_project_root = if app_path.is_dir() {
+                    app_path.as_path()
+                } else {
+                    app_path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."))
+                };
+                let run_archetype =
+                    detect_project_archetype(run_project_root, &preflight.policy_mode);
+                let run_elapsed_ms = run_started
+                    .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                let exec_err_text = execution_error.as_ref().map(ToString::to_string);
                 eprint!(
                     "{}",
-                    render_run_structured_logs_jsonl(&preflight, &dispatch, &receipt, &trace_id)?
+                    render_run_structured_logs_jsonl(
+                        &preflight,
+                        &dispatch,
+                        &receipt,
+                        &trace_id,
+                        &run_archetype,
+                        run_elapsed_ms,
+                        exec_err_text.as_deref(),
+                    )?
                 );
             }
 

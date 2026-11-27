@@ -867,3 +867,365 @@ fn unknown_network_policy_key_is_rejected_not_ignored() {
         "the unknown key must be named: {stdout}"
     );
 }
+
+fn parse_stderr_jsonl(stderr: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
+}
+
+/// bd-34d5: `init` deterministically detects all 5 standard project archetypes
+/// (Express API, React SPA, CLI Tool, Monorepo, Serverless) plus Generic
+/// Node.js and Unclassified fallbacks, reports actionable next-step commands,
+/// and emits structured FMP-002 / FMP-004 pathway telemetry under
+/// `--structured-logs-jsonl`.
+#[test]
+fn init_detects_all_five_project_archetypes_and_emits_fmp_telemetry() {
+    let bin = franken_node_binary();
+
+    struct Case<'a> {
+        name: &'a str,
+        files: &'a [(&'a str, &'a str)],
+        expected_id: &'a str,
+        expected_slug: &'a str,
+        expected_label: &'a str,
+        expected_signal: &'a str,
+        expected_cmd_contains: Option<&'a str>,
+    }
+
+    let cases = [
+        Case {
+            name: "express_api",
+            files: &[
+                (
+                    "package.json",
+                    r#"{"name":"api","main":"server.js","dependencies":{"express":"^4.21.0"}}"#,
+                ),
+                ("server.js", "console.log('ok');"),
+            ],
+            expected_id: "A-1",
+            expected_slug: "express_api",
+            expected_label: "Express API",
+            expected_signal: "package.json:dependencies.express",
+            expected_cmd_contains: Some("franken-node run server.js --policy balanced"),
+        },
+        Case {
+            name: "react_spa",
+            files: &[
+                (
+                    "package.json",
+                    r#"{"name":"spa","devDependencies":{"vite":"^5.0.0","react":"^18.3.0"}}"#,
+                ),
+                ("vite.config.ts", "export default {};"),
+            ],
+            expected_id: "A-2",
+            expected_slug: "react_spa",
+            expected_label: "React SPA",
+            expected_signal: "package.json:devDependencies.vite",
+            expected_cmd_contains: Some("franken-node run . --policy balanced"),
+        },
+        Case {
+            name: "cli_tool",
+            files: &[(
+                "package.json",
+                r#"{"name":"my-cli","bin":{"my-cli":"bin/cli.js"}}"#,
+            )],
+            expected_id: "A-3",
+            expected_slug: "cli_tool",
+            expected_label: "CLI Tool",
+            expected_signal: "package.json:bin",
+            expected_cmd_contains: Some("franken-node run bin/cli.js --policy balanced"),
+        },
+        Case {
+            name: "monorepo",
+            files: &[
+                ("turbo.json", r#"{"tasks":{}}"#),
+                (
+                    "package.json",
+                    r#"{"name":"mono","workspaces":["packages/*"]}"#,
+                ),
+            ],
+            expected_id: "A-4",
+            expected_slug: "monorepo",
+            expected_label: "Monorepo",
+            expected_signal: "marker:turbo.json",
+            expected_cmd_contains: Some("franken-node run . --policy balanced"),
+        },
+        Case {
+            name: "serverless",
+            files: &[
+                ("serverless.yml", "service: demo\n"),
+                ("package.json", r#"{"name":"fn","main":"handler.js"}"#),
+            ],
+            expected_id: "A-5",
+            expected_slug: "serverless",
+            expected_label: "Serverless",
+            expected_signal: "marker:serverless.yml",
+            expected_cmd_contains: Some("franken-node run handler.js --policy balanced"),
+        },
+        Case {
+            name: "generic_node",
+            files: &[
+                ("package.json", r#"{"name":"plain"}"#),
+                ("index.js", "console.log(1);"),
+            ],
+            expected_id: "A-0",
+            expected_slug: "generic_node",
+            expected_label: "Generic Node.js",
+            expected_signal: "marker:package.json",
+            expected_cmd_contains: Some("franken-node run index.js --policy balanced"),
+        },
+        Case {
+            name: "unclassified_empty",
+            files: &[],
+            expected_id: "NONE",
+            expected_slug: "unclassified",
+            expected_label: "Unclassified",
+            expected_signal: "",
+            expected_cmd_contains: None,
+        },
+    ];
+
+    for case in cases {
+        let tmp = TempDir::new().expect("tempdir");
+        for (rel, body) in case.files {
+            let path = tmp.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, body).unwrap();
+        }
+        let trace_id = format!("bd-34d5-{}", case.name);
+        let output = Command::new(&bin)
+            .args([
+                "init",
+                "--profile",
+                "balanced",
+                "--out-dir",
+                ".",
+                "--no-state",
+                "--json",
+                "--structured-logs-jsonl",
+                "--trace-id",
+                &trace_id,
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("invoke init");
+        assert!(
+            output.status.success(),
+            "case {} failed: stderr={}",
+            case.name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse init report");
+        let arch = &report["project_archetype"];
+        assert_eq!(arch["archetype_id"], case.expected_id, "case {}", case.name);
+        assert_eq!(arch["slug"], case.expected_slug, "case {}", case.name);
+        assert_eq!(arch["label"], case.expected_label, "case {}", case.name);
+        if !case.expected_signal.is_empty() {
+            let signals = arch["detected_signals"].as_array().expect("signals array");
+            assert!(
+                signals
+                    .iter()
+                    .any(|s| s.as_str() == Some(case.expected_signal)),
+                "case {} missing signal {}: {signals:?}",
+                case.name,
+                case.expected_signal
+            );
+        }
+        match case.expected_cmd_contains {
+            Some(expected_cmd) => assert_eq!(
+                arch["recommended_run_command"].as_str(),
+                Some(expected_cmd),
+                "case {}",
+                case.name
+            ),
+            None => assert!(
+                arch["recommended_run_command"].is_null(),
+                "case {} expected no recommended command: {arch}",
+                case.name
+            ),
+        }
+
+        let logs = parse_stderr_jsonl(&output.stderr);
+        let fmp = logs
+            .iter()
+            .find(|ev| ev["code"] == "FMP-002" && ev["event_code"] == "FMP-002")
+            .unwrap_or_else(|| panic!("case {} missing FMP-002 event: {logs:?}", case.name));
+        assert_eq!(fmp["step"], "init");
+        assert_eq!(fmp["archetype"], case.expected_slug);
+        assert_eq!(fmp["trace_id"], trace_id);
+        assert!(fmp["elapsed_ms"].is_u64());
+        assert!(fmp["timestamp_utc"].is_string());
+        assert_eq!(fmp["metadata"]["archetype_id"], case.expected_id);
+    }
+}
+
+#[test]
+fn init_failure_emits_fmp_004_with_actionable_recovery_telemetry() {
+    let bin = franken_node_binary();
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"name":"api","dependencies":{"express":"^4.21.0"}}"#,
+    )
+    .unwrap();
+
+    // First init succeeds.
+    let first = Command::new(&bin)
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--out-dir",
+            ".",
+            "--no-state",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("first init");
+    assert!(first.status.success());
+
+    // Second init without --overwrite fails closed AND emits FMP-004 with recovery.
+    let second = Command::new(&bin)
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--out-dir",
+            ".",
+            "--no-state",
+            "--json",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            "bd-34d5-fail-trace",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("second init");
+    assert_init_json_error(&second, "init target already contains generated files");
+
+    let logs = parse_stderr_jsonl(&second.stderr);
+    let fmp_fail = logs
+        .iter()
+        .find(|ev| ev["code"] == "FMP-004" && ev["event_code"] == "FMP-004")
+        .unwrap_or_else(|| panic!("missing FMP-004 event on init failure: {logs:?}"));
+    assert_eq!(fmp_fail["step"], "init");
+    assert_eq!(fmp_fail["archetype"], "express_api");
+    assert_eq!(fmp_fail["trace_id"], "bd-34d5-fail-trace");
+    assert!(
+        fmp_fail["metadata"]["recovery"]
+            .as_str()
+            .is_some_and(|r| r.contains("--overwrite")),
+        "FMP-004 must carry an actionable recovery suggestion: {fmp_fail}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_archetype_detection_ignores_fifo_and_symlink_package_json_without_blocking() {
+    let tmp = TempDir::new().expect("tempdir");
+    let fifo = tmp.path().join("package.json");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .expect("create FIFO package.json without writer");
+
+    let mut cmd = assert_cmd::Command::new(franken_node_binary());
+    cmd.current_dir(tmp.path())
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--out-dir",
+            ".",
+            "--no-state",
+            "--json",
+        ])
+        .timeout(std::time::Duration::from_secs(3));
+    let out = cmd.assert().success();
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("JSON report");
+    assert_eq!(report["project_archetype"]["slug"], "unclassified");
+}
+
+#[test]
+fn init_then_run_structured_logs_emit_fmp_002_and_fmp_003_without_fmp_004() {
+    let bin = franken_node_binary();
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"cli-demo","bin":{"demo":"cli.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("cli.js"), "console.log('cli-ok');\n").unwrap();
+
+    let init = Command::new(&bin)
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--json",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            "bd-34d5-e2e",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("invoke init");
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let init_report: serde_json::Value = serde_json::from_slice(&init.stdout).expect("init json");
+    assert_eq!(init_report["project_archetype"]["slug"], "cli_tool");
+    assert_eq!(
+        init_report["project_archetype"]["recommended_run_command"],
+        "franken-node run cli.js --policy balanced"
+    );
+
+    let run = Command::new(&bin)
+        .args([
+            "run",
+            "cli.js",
+            "--policy",
+            "balanced",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            "bd-34d5-e2e",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("invoke run");
+    assert!(
+        run.status.success(),
+        "run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_logs = parse_stderr_jsonl(&run.stderr);
+    let fmp_step = run_logs
+        .iter()
+        .find(|ev| ev["code"] == "FMP-002")
+        .unwrap_or_else(|| panic!("missing FMP-002 on run: {run_logs:?}"));
+    let fmp_ok = run_logs
+        .iter()
+        .find(|ev| ev["code"] == "FMP-003")
+        .unwrap_or_else(|| panic!("missing FMP-003 on run: {run_logs:?}"));
+    assert!(
+        !run_logs.iter().any(|ev| ev["code"] == "FMP-004"),
+        "successful run must not emit FMP-004: {run_logs:?}"
+    );
+    assert_eq!(fmp_step["step"], "run");
+    assert_eq!(fmp_step["archetype"], "cli_tool");
+    assert_eq!(fmp_ok["step"], "run");
+    assert_eq!(fmp_ok["archetype"], "cli_tool");
+    assert_eq!(fmp_ok["metadata"]["policy"], "balanced");
+}
