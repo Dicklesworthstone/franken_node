@@ -448,6 +448,16 @@ impl LockstepHarness {
         Ok(Some(resolved))
     }
 
+    fn path_within_project(project_dir: &Path, candidate: &Path) -> bool {
+        let Ok(root) = project_dir.canonicalize() else {
+            return false;
+        };
+        let Ok(resolved) = candidate.canonicalize() else {
+            return false;
+        };
+        resolved.starts_with(&root)
+    }
+
     /// Spawns the specified runtimes concurrently, intercepts their outputs,
     /// and feeds the results to the Oracle.
     pub fn verify_lockstep(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
