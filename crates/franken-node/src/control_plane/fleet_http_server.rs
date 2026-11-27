@@ -45,7 +45,7 @@ use super::fleet_transport::{
     SeqlockControlPage, validate_action_record, validate_node_id, validate_node_status,
     validate_zone_id,
 };
-use super::fleet_transport_durable::DurableFleetTransport;
+use super::fleet_transport_durable::{DurableFleetTransport, FleetCertifiedMaintenanceAuthority};
 use super::fleet_transport_http::FLEET_HTTP_GUARDED_RESUME_PATH;
 use super::fleet_transport_http::{
     FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_EPOCH_BARRIER_PATH,
@@ -124,6 +124,23 @@ impl std::fmt::Debug for FleetNodeCredentials {
 }
 
 impl FleetNodeCredentials {
+    fn supervisor_roots(
+        &self,
+    ) -> Result<BTreeMap<(String, String), ed25519_dalek::VerifyingKey>, FleetTransportError> {
+        self.nodes
+            .iter()
+            .map(|node| {
+                let key = node.supervisor_public_key.ok_or_else(|| {
+                    FleetTransportError::stale_state(format!(
+                        "certified maintenance participant `{}/{}` lacks a pinned supervisor root",
+                        node.zone_id, node.node_id
+                    ))
+                })?;
+                Ok(((node.zone_id.clone(), node.node_id.clone()), key))
+            })
+            .collect()
+    }
+
     /// Load a bounded enrollment file without disclosing credential contents
     /// in errors. Invalid/empty files never fall back to shared-token mode.
     pub fn load(path: &Path) -> Result<Self, FleetTransportError> {
@@ -1207,19 +1224,41 @@ impl FleetControlPlaneService {
                 if let Err(err) = publication.validate() {
                     return invalid_record(&err).into();
                 }
+                let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
+                let epoch_commit_signer = self.epoch_commit_signer.clone();
                 let clock = self.clock;
                 self.with_transport(&budget, move |transport, authenticated| {
                     // Project the exact authenticated observations within the
                     // durable transaction, on the same serialized store thread
                     // as heartbeat acceptance. Missing enrolled nodes remain
                     // participants and cannot disappear from the guard.
-                    let receipt = transport.publish_policy_with_maintenance_guard_projected(
-                        &publication,
-                        FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
-                        MAX_GUARDED_POLICY_STALE_AFTER,
-                        clock,
-                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
-                    )?;
+                    let receipt = if publication.guard.certified_epoch.is_some() {
+                        let signer = epoch_commit_signer.as_deref().ok_or_else(|| {
+                            FleetTransportError::stale_state(
+                                "certified policy publication requires its provisioned coordinator signing key",
+                            )
+                        })?;
+                        let roots = enrollment.supervisor_roots()?;
+                        transport.publish_policy_with_certified_maintenance_guard_projected(
+                            &publication,
+                            &FleetCertifiedMaintenanceAuthority {
+                                epoch_signing_key: &epoch_signing_key,
+                                coordinator_signer: signer,
+                                enrolled_supervisors: &roots,
+                            },
+                            MAX_GUARDED_POLICY_STALE_AFTER,
+                            clock,
+                            |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
+                        )?
+                    } else {
+                        transport.publish_policy_with_maintenance_guard_projected(
+                            &publication,
+                            FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                            MAX_GUARDED_POLICY_STALE_AFTER,
+                            clock,
+                            |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
+                        )?
+                    };
                     Ok(FleetHttpResponse::json(
                         if receipt.already_published { 200 } else { 201 },
                         "ok",
@@ -1243,16 +1282,37 @@ impl FleetControlPlaneService {
                 if let Err(error) = resume.validate() {
                     return invalid_record(&error).into();
                 }
+                let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
+                let epoch_commit_signer = self.epoch_commit_signer.clone();
                 let clock = self.clock;
                 self.with_transport(&budget, move |transport, authenticated| {
-                    let receipt = transport
-                        .resume_native_sessions_with_maintenance_guard_projected(
+                    let receipt = if resume.guard.certified_epoch.is_some() {
+                        let signer = epoch_commit_signer.as_deref().ok_or_else(|| {
+                            FleetTransportError::stale_state(
+                                "certified resume requires its provisioned coordinator signing key",
+                            )
+                        })?;
+                        let roots = enrollment.supervisor_roots()?;
+                        transport.resume_native_sessions_with_certified_maintenance_guard_projected(
+                            &resume,
+                            &FleetCertifiedMaintenanceAuthority {
+                                epoch_signing_key: &epoch_signing_key,
+                                coordinator_signer: signer,
+                                enrolled_supervisors: &roots,
+                            },
+                            MAX_GUARDED_POLICY_STALE_AFTER,
+                            clock,
+                            |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
+                        )?
+                    } else {
+                        transport.resume_native_sessions_with_maintenance_guard_projected(
                             &resume,
                             FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
                             MAX_GUARDED_POLICY_STALE_AFTER,
                             clock,
                             |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
-                        )?;
+                        )?
+                    };
                     Ok(FleetHttpResponse::json(
                         if receipt.already_resumed { 200 } else { 201 },
                         "ok",

@@ -2489,6 +2489,7 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
     let mut request = GuardedFleetPolicyPublication {
         action: executable_policy_action("guarded-http-policy", "east", 1, 1000),
         guard: FleetPolicyMaintenanceGuard {
+            certified_epoch: None,
             hold_action_id: hold.action_id.clone(),
             expected_action_log: fleet_action_log_checkpoint(std::slice::from_ref(&hold)).unwrap(),
             required_nodes: [("east".to_string(), "guarded-node".to_string())].into(),

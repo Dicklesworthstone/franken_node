@@ -2404,12 +2404,22 @@ pub struct FleetPolicyMaintenanceGuard {
     pub expected_action_log: FleetActionLogCheckpoint,
     pub required_nodes: BTreeSet<(String, String)>,
     pub stale_after: Duration,
+    /// Require the coordinator to bind this mutation to an authenticated,
+    /// retained epoch and the same still-held enrolled population. The epoch
+    /// number is a reference, never caller-supplied quiescence evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified_epoch: Option<u64>,
 }
 
 impl FleetPolicyMaintenanceGuard {
     pub fn validate(&self) -> Result<(), FleetTransportError> {
         validate_action_id(&self.hold_action_id)?;
         self.expected_action_log.validate()?;
+        if self.certified_epoch == Some(0) {
+            return Err(FleetTransportError::serialization(
+                "a certified maintenance guard requires a positive committed epoch",
+            ));
+        }
         if self.stale_after.is_zero() || self.stale_after > MAX_GUARDED_POLICY_STALE_AFTER {
             return Err(FleetTransportError::stale_state(
                 "guarded policy freshness must be positive and at most 300 seconds",
@@ -2445,6 +2455,11 @@ impl GuardedFleetPolicyPublication {
         validate_action_record(&self.action)?;
         self.guard.validate()?;
         let zone = guarded_policy_zone(&self.action)?;
+        if self.guard.certified_epoch.is_some() && zone != "all" {
+            return Err(FleetTransportError::serialization(
+                "certified maintenance guards require an all-zone policy publication",
+            ));
+        }
         if self
             .guard
             .required_nodes
@@ -2497,6 +2512,7 @@ impl FleetGuardedPolicyReceipt {
         };
         if self.schema_version != FLEET_GUARDED_POLICY_RECEIPT_SCHEMA
             || self.fleet_quiescence_certified != evidence.fleet_quiescence_certified
+            || self.fleet_quiescence_certified != self.guard.certified_epoch.is_some()
             || (self.fleet_quiescence_certified
                 && self.observation_scope
                     != FleetGuardedPolicyObservationScope::EnrolledNodeObservations)
@@ -2586,6 +2602,36 @@ impl FleetGuardedPolicyReceipt {
             {
                 attestation
                     .validate_freshness_with_limit(self.accepted_at, evidence.stale_after)?;
+                if self.fleet_quiescence_certified {
+                    // This checks signature integrity, not enrollment. The
+                    // authoritative transaction separately pins each root;
+                    // a response cannot enroll its own embedded key.
+                    let root: [u8; 32] = attestation
+                        .product_root_key_id
+                        .strip_prefix("ed25519:")
+                        .and_then(|encoded| hex::decode(encoded).ok())
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or_else(|| {
+                            FleetTransportError::serialization(
+                                "certified maintenance receipt has an invalid supervisor key",
+                            )
+                        })?;
+                    let root = ed25519_dalek::VerifyingKey::from_bytes(&root).map_err(|_| {
+                        FleetTransportError::serialization(
+                            "certified maintenance receipt has an invalid supervisor key",
+                        )
+                    })?;
+                    attestation.verify(
+                        status.native_session_drain.as_ref().ok_or_else(|| {
+                            FleetTransportError::serialization(
+                                "certified maintenance receipt lacks its signed native drain",
+                            )
+                        })?,
+                        &node.node_id,
+                        &node.zone_id,
+                        &root,
+                    )?;
+                }
             }
             if node.zone_id == "all" {
                 return Err(FleetTransportError::serialization(
@@ -2681,7 +2727,7 @@ impl FleetGuardedResumeReceipt {
             accepted_at: self.accepted_at,
             observation_scope: self.observation_scope,
             already_published: false,
-            fleet_quiescence_certified: false,
+            fleet_quiescence_certified: self.evidence.fleet_quiescence_certified,
         }
         .validate()?;
         validate_guarded_json_bound(self, MAX_GUARDED_POLICY_RECEIPT_BYTES)
@@ -2825,6 +2871,200 @@ pub fn validate_guarded_fleet_policy_publication(
         ));
     }
     Ok(evidence)
+}
+
+/// Bind an authenticated retained epoch to the same currently held population.
+/// The durable owner must authenticate the epoch and its coordinator identity,
+/// project current enrollment, and evaluate the ordinary maintenance guard in
+/// the same serialized transaction that writes the policy or resume action.
+/// This pure check does not itself establish that transaction or root authority.
+///
+/// Historical supervisor observations are checked at certification time. A
+/// fresh, monotonic observation of the identical checkpoint may renew them
+/// while the exact action log and admission hold remain unchanged. It cannot
+/// substitute a new drain, project, key, participant or session population.
+/// On exact receipt recovery, `current` is the original retained acceptance
+/// evidence and retains its original observation time, never the retry time.
+pub fn validate_fleet_certified_maintenance_guard(
+    guard: &FleetPolicyMaintenanceGuard,
+    current: &FleetNativeSessionHoldEvidence,
+    committed: &FleetNativeDrainEvidence,
+    certificate: &FleetEpochQuiescenceCertificate,
+    roots: &BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
+) -> Result<FleetNativeSessionHoldEvidence, FleetTransportError> {
+    guard.validate()?;
+    let current_scope = if current.fleet_quiescence_certified {
+        FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE
+    } else {
+        "local_supervisor_maintenance_observations"
+    };
+    if guard.certified_epoch != Some(certificate.committed_epoch)
+        || certificate.schema_version != FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA
+        || certificate.pre_epoch.checked_add(1) != Some(certificate.committed_epoch)
+        || !certificate.fleet_quiescence_certified
+        || certificate.action_log_checkpoint != guard.expected_action_log
+        || certificate.certified_at != committed.observed_at
+        || certificate.certified_at > current.observed_at
+        || committed.schema_version != "franken-node/fleet-native-drain-evidence/v1"
+        || committed.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+        || !committed.fleet_quiescence_certified
+        || !committed.complete
+        || !committed.uncovered_zones.is_empty()
+        || committed.action_count != guard.expected_action_log.action_count
+        || committed.stale_after.is_zero()
+        || committed.stale_after > MAX_GUARDED_POLICY_STALE_AFTER
+        || current.schema_version != "franken-node/fleet-native-session-hold-evidence/v1"
+        || current.scope != current_scope
+        || current.hold_action_id != guard.hold_action_id
+        || current.hold_zone_id != "all"
+        || current.target != FleetNativeSessionHoldTarget::Held
+        || !current.complete
+        || current.admission_resumed
+        || !current.uncovered_zones.is_empty()
+        || current.action_count != guard.expected_action_log.action_count
+        || current.action_count == 0
+        || current.stale_after.is_zero()
+        || current.stale_after > guard.stale_after
+        || roots.is_empty()
+        || roots.len() > MAX_NODES_CAP
+        || current.nodes.len() != roots.len()
+        || committed.nodes.len() != roots.len()
+        || certificate.participants.len() != roots.len()
+        || guard
+            .required_nodes
+            .iter()
+            .any(|identity| !roots.contains_key(identity))
+    {
+        return Err(FleetTransportError::stale_state(
+            "certified maintenance requires the exact all-zone hold, action checkpoint and enrolled epoch population",
+        ));
+    }
+
+    for ((identity, root), ((historical, participant), node)) in roots.iter().zip(
+        committed
+            .nodes
+            .iter()
+            .zip(&certificate.participants)
+            .zip(&current.nodes),
+    ) {
+        let (zone_id, node_id) = identity;
+        if zone_id == "all"
+            || &historical.zone_id != zone_id
+            || &historical.node_id != node_id
+            || &participant.zone_id != zone_id
+            || &participant.node_id != node_id
+            || &node.zone_id != zone_id
+            || &node.node_id != node_id
+            || participant.stage != FleetAcknowledgementStage::EpochBarrierCertified
+            || !historical.ready
+            || historical.reason != FleetNativeDrainReadiness::Ready
+            || historical.health != Some(NodeHealth::Maintenance)
+            || historical.expected_actions.action_count == 0
+            || historical.expected_actions.action_count > committed.action_count
+            || historical.applied_actions.as_ref() != Some(&historical.expected_actions)
+            || !node.ready
+            || node.reason != FleetNativeDrainReadiness::Ready
+            || node.health != Some(NodeHealth::Maintenance)
+            || node.admission_resumed
+            || node.expected_actions != historical.expected_actions
+            || node.applied_actions.as_ref() != Some(&node.expected_actions)
+            || node.active_hold_ids != participant.active_hold_ids
+            || !node.active_hold_ids.contains(&guard.hold_action_id)
+            || node.active_hold_ids.len() > MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+            || node
+                .active_hold_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(FleetTransportError::stale_state(
+                "certified maintenance participant, applied snapshot or hold ownership changed",
+            ));
+        }
+        validate_zone_id(zone_id)?;
+        validate_node_id(node_id)?;
+        for owner in &node.active_hold_ids {
+            validate_action_id(owner)?;
+        }
+        for (last_seen, observed_at, stale_after) in [
+            (
+                historical.last_seen,
+                committed.observed_at,
+                committed.stale_after,
+            ),
+            (node.last_seen, current.observed_at, current.stale_after),
+        ] {
+            let last_seen = last_seen.ok_or_else(|| {
+                FleetTransportError::stale_state(
+                    "certified maintenance participant lacks its heartbeat",
+                )
+            })?;
+            let threshold = chrono::TimeDelta::from_std(stale_after)
+                .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
+            if last_seen > observed_at || observed_at.signed_duration_since(last_seen) >= threshold
+            {
+                return Err(FleetTransportError::stale_state(
+                    "certified maintenance participant has a stale or future heartbeat",
+                ));
+            }
+        }
+        let historical_drain = historical.native_session_drain.as_ref().ok_or_else(|| {
+            FleetTransportError::stale_state("certified epoch participant lacks its native drain")
+        })?;
+        let current_drain = node.native_session_drain.as_ref().ok_or_else(|| {
+            FleetTransportError::stale_state(
+                "current maintenance participant lacks its native drain",
+            )
+        })?;
+        let historical_attestation = historical_drain
+            .supervisor_attestation
+            .as_ref()
+            .ok_or_else(|| {
+                FleetTransportError::stale_state(
+                    "certified epoch participant lacks its supervisor signature",
+                )
+            })?;
+        let current_attestation =
+            current_drain
+                .supervisor_attestation
+                .as_ref()
+                .ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "current maintenance participant lacks its supervisor signature",
+                    )
+                })?;
+        historical_attestation.verify(historical_drain, node_id, zone_id, root)?;
+        historical_attestation
+            .validate_freshness_with_limit(committed.observed_at, committed.stale_after)?;
+        current_attestation.verify(current_drain, node_id, zone_id, root)?;
+        current_attestation
+            .validate_freshness_with_limit(current.observed_at, current.stale_after)?;
+        current_attestation.validate_successor_of(historical_attestation)?;
+        if !historical_drain.fence_held
+            || !historical_drain.population_is_terminal()
+            || historical_drain.applied_actions != historical.expected_actions
+            || !current_drain.fence_held
+            || !current_drain.population_is_terminal()
+            || current_drain.applied_actions != node.expected_actions
+            || participant.drain_id != historical_attestation.drain_id
+            || participant.generation != historical_attestation.generation
+            || participant.admitted_sessions != historical_drain.admitted_sessions
+            || participant.terminal_sessions != historical_drain.terminal_sessions
+            || participant.session_set_sha256 != historical_drain.session_set_sha256
+            || participant.checkpoint_sha256 != historical_attestation.checkpoint_sha256
+            || participant.supervisor_key_id != historical_attestation.product_root_key_id
+            || current_attestation.drain_id != historical_attestation.drain_id
+            || current_attestation.generation != historical_attestation.generation
+            || current_attestation.checkpoint_sha256 != historical_attestation.checkpoint_sha256
+        {
+            return Err(FleetTransportError::stale_state(
+                "certified maintenance requires the same uninterrupted signed drain population",
+            ));
+        }
+    }
+    let mut certified = current.clone();
+    certified.scope = FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE.to_owned();
+    certified.fleet_quiescence_certified = true;
+    Ok(certified)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -3166,6 +3406,24 @@ pub trait FleetTransport {
     /// # }
     /// ```
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError>;
+
+    /// Whether this configured transport can request independently signed
+    /// maintenance epoch boundaries. This is preflight capability only; the
+    /// coordinator still checks its provisioned signer and supervisor roots.
+    fn supports_certified_maintenance(&self) -> bool {
+        false
+    }
+
+    /// Certify or recover exactly one stable epoch operation. Unsupported
+    /// transports must fail before a rollout publishes its maintenance hold.
+    fn certify_maintenance_epoch(
+        &self,
+        _operation: &FleetEpochBarrierOperation,
+    ) -> Result<FleetCertifiedEpochBoundary, FleetTransportError> {
+        Err(FleetTransportError::not_initialized(
+            "this fleet transport does not support certified maintenance epoch operations",
+        ))
+    }
 
     /// Atomically admit an executable policy while its retained maintenance
     /// audience is freshly observed held. Optional transports must implement
@@ -5272,6 +5530,97 @@ pub struct FleetEpochQuiescenceCertificate {
     pub action_log_checkpoint: FleetActionLogCheckpoint,
     pub fleet_quiescence_certified: bool,
     pub participants: Vec<FleetEpochParticipantQuiescence>,
+}
+
+/// Retryable exact-prefix epoch operation used by certified maintenance.
+/// Transport adapters map it to the existing coordinator epoch-barrier RPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEpochBarrierOperation {
+    pub operation_id: String,
+    pub expected_action_log: FleetActionLogCheckpoint,
+    pub initiator: String,
+    pub reason: String,
+    pub trace_id: String,
+    pub stale_after: Duration,
+}
+
+impl FleetEpochBarrierOperation {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        validate_action_id(&self.operation_id)?;
+        self.expected_action_log.validate()?;
+        if self.initiator.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || self.trace_id.trim().is_empty()
+            || self.stale_after.is_zero()
+        {
+            return Err(FleetTransportError::serialization(
+                "certified maintenance epoch requires an initiator, reason, trace and positive freshness window",
+            ));
+        }
+        validate_guarded_json_bound(self, MAX_GUARDED_POLICY_REQUEST_BYTES)
+    }
+}
+
+/// Signed historical boundary returned by the configured coordinator.
+/// Supervisor and coordinator enrollment authority belongs to the transport;
+/// an embedded key never enrolls itself. Later admissions are not certified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetCertifiedEpochBoundary {
+    pub already_committed: bool,
+    pub evidence: FleetNativeDrainEvidence,
+    pub certificate: FleetEpochQuiescenceCertificate,
+    pub commit_proof: FleetEpochCommitProof,
+}
+
+impl FleetCertifiedEpochBoundary {
+    /// Check the exact stable request and signed response commitment again at
+    /// the orchestration boundary. The HTTP adapter additionally validates
+    /// every participant's held population and supervisor signature.
+    pub fn validate_for_operation(
+        &self,
+        operation: &FleetEpochBarrierOperation,
+    ) -> Result<(), FleetTransportError> {
+        operation.validate()?;
+        let certificate = &self.certificate;
+        let evidence = &self.evidence;
+        let digest = fleet_epoch_operation_request_sha256(
+            &operation.operation_id,
+            &operation.initiator,
+            &operation.reason,
+            &operation.trace_id,
+            operation.stale_after,
+            Some(&operation.expected_action_log),
+        )?;
+        if certificate.operation_id.as_deref() != Some(operation.operation_id.as_str())
+            || certificate.operation_request_sha256.as_deref() != Some(digest.as_str())
+            || certificate.action_log_checkpoint != operation.expected_action_log
+            || certificate.initiator != operation.initiator
+            || certificate.reason != operation.reason
+            || certificate.trace_id != operation.trace_id
+            || certificate.schema_version != FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA
+            || certificate.pre_epoch.checked_add(1) != Some(certificate.committed_epoch)
+            || !certificate.fleet_quiescence_certified
+            || evidence.schema_version != "franken-node/fleet-native-drain-evidence/v1"
+            || evidence.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+            || evidence.observed_at != certificate.certified_at
+            || evidence.stale_after != operation.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER)
+            || evidence.action_count == 0
+            || evidence.action_count != certificate.action_log_checkpoint.action_count
+            || !evidence.complete
+            || !evidence.fleet_quiescence_certified
+            || !evidence.uncovered_zones.is_empty()
+            || evidence.nodes.is_empty()
+            || evidence.nodes.len() > MAX_NODES_CAP
+            || evidence.nodes.len() != certificate.participants.len()
+        {
+            return Err(FleetTransportError::stale_state(
+                "certified maintenance epoch boundary does not bind the exact operation and action checkpoint",
+            ));
+        }
+        self.commit_proof.verify_integrity(evidence, certificate)
+    }
 }
 
 /// Bind the full evidence and certificate to the canonical signed epoch event.

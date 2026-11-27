@@ -34,14 +34,14 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use super::fleet_transport::{
     FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA,
     FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionLogCheckpoint,
-    FleetActionRecord, FleetEpochCommitProof,
-    FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
-    FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTransport,
-    FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
-    MAX_GUARDED_POLICY_REQUEST_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
-    MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus,
-    fleet_epoch_operation_request_sha256, validate_action_id,
-    validate_action_record, validate_node_status,
+    FleetActionRecord, FleetCertifiedEpochBoundary, FleetEpochBarrierOperation,
+    FleetEpochCommitProof, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
+    FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetNativeDrainReadiness,
+    FleetSharedState, FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_REQUEST_BYTES,
+    MAX_GUARDED_POLICY_STALE_AFTER, MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus,
+    fleet_epoch_operation_request_sha256, validate_action_id, validate_action_record,
+    validate_node_status,
 };
 use super::fleet_transport::{FleetGuardedResumeReceipt, GuardedFleetNativeSessionResume};
 
@@ -382,6 +382,43 @@ impl FleetHttpEpochBarrierResponse {
             stale_after: self.evidence.stale_after,
         })
     }
+}
+
+fn validate_guarded_policy_response(
+    request: &GuardedFleetPolicyPublication,
+    receipt: &FleetGuardedPolicyReceipt,
+) -> Result<(), FleetTransportError> {
+    receipt.validate()?;
+    if receipt.action != request.action
+        || receipt.guard.hold_action_id != request.guard.hold_action_id
+        || receipt.guard.certified_epoch != request.guard.certified_epoch
+        || receipt.observation_scope != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
+        || (!receipt.already_published && receipt.guard != request.guard)
+    {
+        return Err(FleetTransportError::stale_state(
+            "fleet coordinator returned a guarded publication receipt for a different action, owner, certified epoch, observation scope or initial request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_guarded_resume_response(
+    request: &GuardedFleetNativeSessionResume,
+    receipt: &FleetGuardedResumeReceipt,
+) -> Result<(), FleetTransportError> {
+    receipt.validate()?;
+    if receipt.request.action != request.action
+        || receipt.request.policy_action != request.policy_action
+        || receipt.request.guard.hold_action_id != request.guard.hold_action_id
+        || receipt.request.guard.certified_epoch != request.guard.certified_epoch
+        || receipt.observation_scope != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
+        || (!receipt.already_resumed && receipt.request != *request)
+    {
+        return Err(FleetTransportError::stale_state(
+            "fleet coordinator returned a guarded resume for a different action, policy, owner, certified epoch or request",
+        ));
+    }
+    Ok(())
 }
 
 /// Acknowledgement for a successful `POST`.
@@ -858,6 +895,36 @@ fn validate_node_snapshot(nodes: &mut [NodeStatus]) -> Result<(), FleetTransport
 }
 
 impl FleetTransport for HttpFleetTransport {
+    fn supports_certified_maintenance(&self) -> bool {
+        true
+    }
+
+    fn certify_maintenance_epoch(
+        &self,
+        operation: &FleetEpochBarrierOperation,
+    ) -> Result<FleetCertifiedEpochBoundary, FleetTransportError> {
+        operation.validate()?;
+        let response = self.certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            operation_id: Some(operation.operation_id.clone()),
+            expected_action_log: Some(operation.expected_action_log.clone()),
+            initiator: operation.initiator.clone(),
+            reason: operation.reason.clone(),
+            trace_id: operation.trace_id.clone(),
+            stale_after: operation.stale_after,
+        })?;
+        let boundary = FleetCertifiedEpochBoundary {
+            already_committed: response.already_committed,
+            evidence: response.evidence,
+            certificate: response.certificate,
+            commit_proof: response.commit_proof.ok_or_else(|| {
+                FleetTransportError::stale_state(
+                    "certified maintenance requires an independent coordinator commit proof",
+                )
+            })?,
+        };
+        boundary.validate_for_operation(operation)?;
+        Ok(boundary)
+    }
     fn set_operation_deadline(
         &mut self,
         deadline: Option<std::time::Instant>,
@@ -877,18 +944,7 @@ impl FleetTransport for HttpFleetTransport {
             MAX_GUARDED_POLICY_REQUEST_BYTES,
             MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
         )?;
-        receipt.validate()?;
-        if receipt.request.action != request.action
-            || receipt.request.policy_action != request.policy_action
-            || receipt.request.guard.hold_action_id != request.guard.hold_action_id
-            || receipt.observation_scope
-                != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
-            || (!receipt.already_resumed && receipt.request != *request)
-        {
-            return Err(FleetTransportError::stale_state(
-                "fleet coordinator returned a guarded resume for a different action, policy, owner or request",
-            ));
-        }
+        validate_guarded_resume_response(request, &receipt)?;
         Ok(receipt)
     }
 
@@ -924,17 +980,7 @@ impl FleetTransport for HttpFleetTransport {
             MAX_GUARDED_POLICY_REQUEST_BYTES,
             MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
         )?;
-        receipt.validate()?;
-        if receipt.action != request.action
-            || receipt.guard.hold_action_id != request.guard.hold_action_id
-            || receipt.observation_scope
-                != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
-            || (!receipt.already_published && receipt.guard != request.guard)
-        {
-            return Err(FleetTransportError::stale_state(
-                "fleet coordinator returned a guarded publication receipt for a different action, owner, observation scope or initial request",
-            ));
-        }
+        validate_guarded_policy_response(request, &receipt)?;
         Ok(receipt)
     }
 
@@ -1159,8 +1205,7 @@ mod tests {
         request.stale_after = Duration::from_secs(301);
         response.evidence.stale_after = MAX_GUARDED_POLICY_STALE_AFTER;
         response.certificate.operation_id = request.operation_id.clone();
-        response.certificate.operation_request_sha256 =
-            request.operation_request_sha256().unwrap();
+        response.certificate.operation_request_sha256 = request.operation_request_sha256().unwrap();
         let signer = super::super::fleet_transport::FleetEpochCommitSigner::new(
             "coordinator-test",
             ed25519_dalek::SigningKey::from_bytes(&[43; 32]),

@@ -43,15 +43,15 @@ use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FleetAction, FleetActionRecord,
     FleetEpochBarrierParams, FleetEpochCommitAuthorization, FleetEpochCommitProof,
     FleetEpochCommitSigner, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
-    FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
-    FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
-    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
-    MAX_NATIVE_DRAIN_ATTESTATION_AGE, NativeSessionDrainCheckpoint, NodeStatus,
-    certify_fleet_epoch_quiescence, fleet_action_log_checkpoint,
+    FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetNativeSessionHoldEvidence,
+    FleetPolicyMaintenanceGuard, FleetSharedState, FleetTransport, FleetTransportError,
+    GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES, MAX_GUARDED_POLICY_RECEIPT_BYTES,
+    MAX_GUARDED_POLICY_STALE_AFTER, MAX_NATIVE_DRAIN_ATTESTATION_AGE, NativeSessionDrainCheckpoint,
+    NodeStatus, certify_fleet_epoch_quiescence, fleet_action_log_checkpoint,
     fleet_epoch_operation_request_sha256, fleet_epoch_quiescence_manifest_hash, validate_action_id,
-    validate_action_record, validate_fleet_native_session_publication,
-    validate_fleet_policy_publication, validate_guarded_fleet_policy_publication,
-    validate_node_status,
+    validate_action_record, validate_fleet_certified_maintenance_guard,
+    validate_fleet_native_session_publication, validate_fleet_policy_publication,
+    validate_guarded_fleet_policy_publication, validate_node_status,
 };
 use super::fleet_transport::{
     FLEET_GUARDED_RESUME_RECEIPT_SCHEMA, FleetGuardedResumeReceipt,
@@ -65,6 +65,15 @@ const META_JSONL_IMPORT_KEY: &str = "legacy_jsonl_imported";
 const META_MUTATION_CONFLICT_KEY: &str = "action_node_mutation_conflict";
 const META_EPOCH_HEAD_KEY: &str = "authenticated_epoch_head";
 const EPOCH_COMMIT_SCHEMA: &str = "franken-node/fleet-durable-epoch-commit/v1";
+
+/// Provisioned authority for consuming a retained epoch at a policy boundary.
+/// These roots come from coordinator configuration, never from the request or
+/// the certificate being checked. They are read in the mutation transaction.
+pub struct FleetCertifiedMaintenanceAuthority<'a> {
+    pub epoch_signing_key: &'a EpochSigningKey,
+    pub coordinator_signer: &'a FleetEpochCommitSigner,
+    pub enrolled_supervisors: &'a BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
+}
 
 /// Coordinator-authenticated recovery state. The canonical epoch event MAC
 /// binds the entire evidence/certificate pair, including every held population.
@@ -880,7 +889,51 @@ impl DurableFleetTransport {
         now: impl Fn() -> DateTime<Utc>,
         project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
     ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        self.publish_policy_with_maintenance_guard_inner(
+            request,
+            observation_scope,
+            max_stale_after,
+            now,
+            project_nodes,
+            None,
+        )
+    }
+
+    /// Consume a publicly authorized retained epoch in the same transaction
+    /// that checks the current held population and appends the policy action.
+    pub fn publish_policy_with_certified_maintenance_guard_projected(
+        &mut self,
+        request: &GuardedFleetPolicyPublication,
+        authority: &FleetCertifiedMaintenanceAuthority<'_>,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        self.publish_policy_with_maintenance_guard_inner(
+            request,
+            FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+            max_stale_after,
+            now,
+            project_nodes,
+            Some(authority),
+        )
+    }
+
+    fn publish_policy_with_maintenance_guard_inner(
+        &mut self,
+        request: &GuardedFleetPolicyPublication,
+        observation_scope: FleetGuardedPolicyObservationScope,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+        authority: Option<&FleetCertifiedMaintenanceAuthority<'_>>,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
         request.validate()?;
+        if request.guard.certified_epoch.is_some() != authority.is_some() {
+            return Err(FleetTransportError::stale_state(
+                "certified policy publication requires provisioned epoch, coordinator and supervisor authority",
+            ));
+        }
         if max_stale_after.is_zero() {
             return Err(FleetTransportError::stale_state(
                 "guarded policy coordinator freshness must be positive",
@@ -923,9 +976,10 @@ impl DurableFleetTransport {
                 }
                 if receipt.action != request.action
                     || receipt.guard.hold_action_id != request.guard.hold_action_id
+                    || receipt.guard.certified_epoch != request.guard.certified_epoch
                 {
                     return Err(FleetTransportError::action_conflict(
-                        "guarded policy action already belongs to a different action or hold",
+                        "guarded policy action already belongs to a different action, hold or certification epoch",
                     ));
                 }
                 let actions = tx
@@ -940,6 +994,11 @@ impl DurableFleetTransport {
                     return Err(FleetTransportError::serialization(
                         "guarded policy receipt no longer matches its immutable action",
                     ));
+                }
+                if let Some(authority) = authority {
+                    self.authenticate_certified_maintenance_evidence(
+                        connection, authority, &receipt.guard, &receipt.evidence,
+                    )?;
                 }
                 receipt.already_published = true;
                 tx.commit()
@@ -958,12 +1017,17 @@ impl DurableFleetTransport {
             };
             project_nodes(&mut state.nodes)?;
             let accepted_at = now();
-            let evidence = validate_guarded_fleet_policy_publication(
+            let mut evidence = validate_guarded_fleet_policy_publication(
                 request,
                 &state,
                 accepted_at,
                 max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            if let Some(authority) = authority {
+                evidence = self.authenticate_certified_maintenance_evidence(
+                    connection, authority, &request.guard, &evidence,
+                )?;
+            }
             let observations_expire_at = fleet_observations_expire_at(
                 evidence.stale_after,
                 evidence
@@ -979,7 +1043,7 @@ impl DurableFleetTransport {
                 accepted_at,
                 observation_scope,
                 already_published: false,
-                fleet_quiescence_certified: false,
+                fleet_quiescence_certified: request.guard.certified_epoch.is_some(),
             };
             // Reject oversized or contradictory evidence before appending
             // either record. A failed commit rolls both records back together.
@@ -1015,7 +1079,56 @@ impl DurableFleetTransport {
         now: impl Fn() -> DateTime<Utc>,
         project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
     ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        self.resume_native_sessions_with_maintenance_guard_inner(
+            request,
+            observation_scope,
+            max_stale_after,
+            now,
+            project_nodes,
+            None,
+        )
+    }
+
+    /// Release only the original rollout's hold after a new certified boundary
+    /// acknowledges its policy. The epoch check and release share one snapshot.
+    pub fn resume_native_sessions_with_certified_maintenance_guard_projected(
+        &mut self,
+        request: &GuardedFleetNativeSessionResume,
+        authority: &FleetCertifiedMaintenanceAuthority<'_>,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+        self.resume_native_sessions_with_maintenance_guard_inner(
+            request,
+            FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+            max_stale_after,
+            now,
+            project_nodes,
+            Some(authority),
+        )
+    }
+
+    fn resume_native_sessions_with_maintenance_guard_inner(
+        &mut self,
+        request: &GuardedFleetNativeSessionResume,
+        observation_scope: FleetGuardedPolicyObservationScope,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+        authority: Option<&FleetCertifiedMaintenanceAuthority<'_>>,
+    ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
         request.validate()?;
+        if request.guard.certified_epoch.is_some() != authority.is_some() {
+            return Err(FleetTransportError::stale_state(
+                "certified resume requires provisioned epoch, coordinator and supervisor authority",
+            ));
+        }
+        if max_stale_after.is_zero() {
+            return Err(FleetTransportError::stale_state(
+                "guarded resume coordinator freshness must be positive",
+            ));
+        }
         self.ensure_initialized()?;
         self.with_connection(|connection| {
             let mut tx = connection.transaction()
@@ -1037,9 +1150,10 @@ impl DurableFleetTransport {
                     || receipt.request.action != request.action
                     || receipt.request.policy_action != request.policy_action
                     || receipt.request.guard.hold_action_id != request.guard.hold_action_id
+                    || receipt.request.guard.certified_epoch != request.guard.certified_epoch
                 {
                     return Err(FleetTransportError::action_conflict(
-                        "guarded resume identity belongs to a different action, policy or owner",
+                        "guarded resume identity belongs to a different action, policy, owner or certification epoch",
                     ));
                 }
                 let actions = tx.query_with_params(
@@ -1050,6 +1164,11 @@ impl DurableFleetTransport {
                     return Err(FleetTransportError::serialization(
                         "guarded resume receipt no longer matches its immutable action",
                     ));
+                }
+                if let Some(authority) = authority {
+                    self.authenticate_certified_maintenance_evidence(
+                        connection, authority, &receipt.request.guard, &receipt.evidence,
+                    )?;
                 }
                 receipt.already_resumed = true;
                 tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
@@ -1074,6 +1193,13 @@ impl DurableFleetTransport {
             let publication: FleetGuardedPolicyReceipt = serde_json::from_str(&raw)
                 .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
             publication.validate()?;
+            match (publication.guard.certified_epoch, request.guard.certified_epoch) {
+                (None, None) => {},
+                (Some(published), Some(resuming)) if resuming > published => {},
+                _ => return Err(FleetTransportError::action_conflict(
+                    "guarded resume must preserve its publication's certification mode and use a newer post-policy epoch",
+                )),
+            }
             if publication.action != request.policy_action
                 || publication.guard.hold_action_id != request.guard.hold_action_id
                 || publication.already_published
@@ -1085,6 +1211,14 @@ impl DurableFleetTransport {
                     "guarded resume changed its original publication, owner or retained participants",
                 ));
             }
+            if let Some(authority) = authority {
+                // The newer boundary does not authenticate the earlier
+                // publication's admission. Direct resume clients must preserve
+                // both authorities, even without an orchestration recovery read.
+                self.authenticate_certified_maintenance_evidence(
+                    connection, authority, &publication.guard, &publication.evidence,
+                )?;
+            }
             let mut state = FleetSharedState {
                 schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
                 actions: Self::query_actions(connection)?,
@@ -1092,9 +1226,14 @@ impl DurableFleetTransport {
             };
             project_nodes(&mut state.nodes)?;
             let accepted_at = now();
-            let evidence = validate_guarded_fleet_native_session_resume(
+            let mut evidence = validate_guarded_fleet_native_session_resume(
                 request, &state, accepted_at, max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
             )?;
+            if let Some(authority) = authority {
+                evidence = self.authenticate_certified_maintenance_evidence(
+                    connection, authority, &request.guard, &evidence,
+                )?;
+            }
             let observations_expire_at = fleet_observations_expire_at(
                 evidence.stale_after,
                 evidence
@@ -1127,6 +1266,51 @@ impl DurableFleetTransport {
             tx.commit().map_err(|error| FleetTransportError::io(error.to_string()))?;
             Ok(receipt)
         })
+    }
+
+    fn authenticate_certified_maintenance_evidence(
+        &self,
+        connection: &Connection,
+        authority: &FleetCertifiedMaintenanceAuthority<'_>,
+        guard: &FleetPolicyMaintenanceGuard,
+        current: &FleetNativeSessionHoldEvidence,
+    ) -> Result<FleetNativeSessionHoldEvidence, FleetTransportError> {
+        let epoch = guard.certified_epoch.ok_or_else(|| {
+            FleetTransportError::stale_state("certified maintenance requires a retained epoch")
+        })?;
+        let head = self.query_epoch_head(connection, authority.epoch_signing_key)?;
+        if epoch == 0 || epoch > head {
+            return Err(FleetTransportError::stale_state(
+                "certified maintenance epoch has not committed in the authenticated history",
+            ));
+        }
+        Self::validate_head_signer(
+            connection,
+            authority.epoch_signing_key,
+            head,
+            Some(authority.coordinator_signer),
+        )?;
+        let committed = Self::query_epoch_commit(connection, authority.epoch_signing_key, epoch)?;
+        let authorization = committed
+            .coordinator_authorization
+            .as_ref()
+            .ok_or_else(|| {
+                FleetTransportError::stale_state(
+                    "certified maintenance cannot consume a legacy HMAC-only epoch",
+                )
+            })?;
+        authorization.verify(
+            authority.coordinator_signer,
+            &committed.evidence,
+            &committed.certificate,
+        )?;
+        validate_fleet_certified_maintenance_guard(
+            guard,
+            current,
+            &committed.evidence,
+            &committed.certificate,
+            authority.enrolled_supervisors,
+        )
     }
 
     fn query_epoch_head(

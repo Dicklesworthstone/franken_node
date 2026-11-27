@@ -182,6 +182,7 @@ impl FleetPolicyRollout {
         required: &BTreeSet<(String, String)>,
     ) -> Result<FleetPolicyMaintenanceGuard, FleetTransportError> {
         Ok(FleetPolicyMaintenanceGuard {
+            certified_epoch: None,
             hold_action_id: self.hold_id.clone(),
             expected_action_log: fleet_action_log_checkpoint(&state.actions)?,
             required_nodes: required.clone(),

@@ -34134,6 +34134,28 @@ impl FleetTransportHandle {
 }
 
 impl PersistedFleetTransport for FleetTransportHandle {
+    fn supports_certified_maintenance(&self) -> bool {
+        match self {
+            Self::Durable(transport) => transport.supports_certified_maintenance(),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.supports_certified_maintenance(),
+        }
+    }
+
+    fn certify_maintenance_epoch(
+        &self,
+        operation: &control_plane::fleet_transport::FleetEpochBarrierOperation,
+    ) -> std::result::Result<
+        control_plane::fleet_transport::FleetCertifiedEpochBoundary,
+        FleetTransportError,
+    > {
+        match self {
+            Self::Durable(transport) => transport.certify_maintenance_epoch(operation),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.certify_maintenance_epoch(operation),
+        }
+    }
+
     fn set_operation_deadline(
         &mut self,
         deadline: Option<std::time::Instant>,
@@ -36360,6 +36382,7 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
         let request = GuardedFleetPolicyPublication {
             action: action.clone(),
             guard: FleetPolicyMaintenanceGuard {
+                certified_epoch: None,
                 hold_action_id: hold.clone(),
                 expected_action_log: fleet_action_log_checkpoint(&initial.actions)?,
                 required_nodes: initial

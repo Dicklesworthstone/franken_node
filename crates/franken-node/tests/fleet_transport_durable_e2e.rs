@@ -169,6 +169,7 @@ fn guarded_policy_request(state: &FleetSharedState, id: &str) -> GuardedFleetPol
             },
         },
         guard: FleetPolicyMaintenanceGuard {
+            certified_epoch: None,
             hold_action_id: "hold-a".to_owned(),
             expected_action_log: fleet_action_log_checkpoint(&state.actions).unwrap(),
             required_nodes: state
@@ -4207,6 +4208,7 @@ fn guarded_resume_request(
         action: maintenance_action("guarded-resume-a", "zone-a", Some("hold-a")),
         policy_action: publication.action.clone(),
         guard: FleetPolicyMaintenanceGuard {
+            certified_epoch: None,
             hold_action_id: "hold-a".to_owned(),
             expected_action_log: fleet_action_log_checkpoint(&state.actions).unwrap(),
             required_nodes: publication.guard.required_nodes.clone(),
@@ -4875,6 +4877,1141 @@ fn policy_rollout_accepts_unrelated_append_before_its_hold_and_retains_lost_part
             } else {
                 assert!(report.error.as_ref().unwrap().contains("lost or rewrote"));
             }
+        }
+    }
+}
+
+/// Certified mutations exercise the real durable store and epoch authority,
+/// including recovery after the held population has already resumed.
+mod certified_maintenance_boundaries {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use frankenengine_node::control_plane::control_epoch::EpochSigningKey;
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetEpochBarrierParams, FleetEpochCommitSigner, FleetEpochQuiescenceCertificate,
+    };
+    use frankenengine_node::control_plane::fleet_transport_durable::FleetCertifiedMaintenanceAuthority;
+
+    fn fixture() -> (FleetSharedState, DateTime<Utc>, SigningKey) {
+        let (mut state, now) = maintenance_state();
+        state.actions = vec![
+            maintenance_action("hold-a", "all", None),
+            maintenance_action("hold-b", "all", None),
+        ];
+        state.nodes.retain(|node| node.zone_id == "zone-a");
+        acknowledge_maintenance(&mut state, now);
+        let root = SigningKey::from_bytes(&[91; 32]);
+        sign_maintenance_observations(&mut state, &root, now);
+        (state, now, root)
+    }
+
+    fn roots(
+        state: &FleetSharedState,
+        root: &SigningKey,
+    ) -> BTreeMap<(String, String), VerifyingKey> {
+        state
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    (node.zone_id.clone(), node.node_id.clone()),
+                    root.verifying_key(),
+                )
+            })
+            .collect()
+    }
+
+    fn certify(
+        transport: &mut DurableFleetTransport,
+        state: &FleetSharedState,
+        authority: &FleetCertifiedMaintenanceAuthority<'_>,
+        now: DateTime<Utc>,
+        signed: bool,
+    ) -> FleetEpochQuiescenceCertificate {
+        let checkpoint = fleet_action_log_checkpoint(&state.actions).unwrap();
+        transport
+            .certify_epoch_quiescence_projected(
+                authority.epoch_signing_key,
+                signed.then_some(authority.coordinator_signer),
+                authority.enrolled_supervisors,
+                FleetEpochBarrierParams {
+                    initiator: "certified-maintenance-test",
+                    reason: "check held native population at policy boundary",
+                    now,
+                    stale_after: Duration::from_secs(30),
+                    trace_id: "certified-maintenance-test",
+                    operation_id: None,
+                    operation_request_sha256: None,
+                    expected_action_log: Some(&checkpoint),
+                },
+                || now,
+                |_| Ok(()),
+            )
+            .unwrap()
+            .1
+    }
+
+    fn publication(state: &FleetSharedState, epoch: u64) -> GuardedFleetPolicyPublication {
+        let mut request = guarded_policy_request(state, "certified-policy");
+        if let FleetAction::PolicyUpdate { zone_id, .. } = &mut request.action.action {
+            *zone_id = "all".to_owned();
+        }
+        request.guard.certified_epoch = Some(epoch);
+        request
+    }
+
+    #[test]
+    fn historical_epoch_can_publish_with_fresh_unchanged_hold_and_recover_after_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, now, root) = fixture();
+        let roots = roots(&state, &root);
+        let key = EpochSigningKey::new(&[92; 32]).unwrap();
+        let signer = FleetEpochCommitSigner::new(
+            "certified-maintenance-coordinator",
+            SigningKey::from_bytes(&[93; 32]),
+        )
+        .unwrap();
+        let authority = FleetCertifiedMaintenanceAuthority {
+            epoch_signing_key: &key,
+            coordinator_signer: &signer,
+            enrolled_supervisors: &roots,
+        };
+        let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+        let first = certify(&mut transport, &state, &authority, now, true);
+        let second = certify(
+            &mut transport,
+            &state,
+            &authority,
+            now + chrono::TimeDelta::seconds(1),
+            true,
+        );
+        assert!(second.committed_epoch > first.committed_epoch);
+
+        // The retained proof is older than the freshness window. A freshly
+        // signed successor proves the exact same held checkpoint and population.
+        let publishing_at = now + chrono::TimeDelta::seconds(40);
+        acknowledge_maintenance(&mut state, publishing_at);
+        sign_maintenance_observations(&mut state, &root, publishing_at);
+        for node in &state.nodes {
+            transport.upsert_node_status(node).unwrap();
+        }
+        let publication = publication(&state, first.committed_epoch);
+        let published = transport
+            .publish_policy_with_certified_maintenance_guard_projected(
+                &publication,
+                &authority,
+                Duration::from_secs(30),
+                || publishing_at,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(published.fleet_quiescence_certified);
+        assert!(published.evidence.fleet_quiescence_certified);
+        assert_eq!(published.guard.certified_epoch, Some(first.committed_epoch));
+
+        let mut downgraded = publication.clone();
+        downgraded.guard.certified_epoch = None;
+        assert!(
+            transport
+                .publish_policy_with_maintenance_guard_projected(
+                    &downgraded,
+                    FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                    Duration::from_secs(30),
+                    || publishing_at,
+                    |_| Ok(()),
+                )
+                .is_err()
+        );
+
+        state.actions.push(publication.action.clone());
+        let resuming_at = publishing_at + chrono::TimeDelta::seconds(1);
+        acknowledge_maintenance(&mut state, resuming_at);
+        sign_maintenance_observations(&mut state, &root, resuming_at);
+        for node in &state.nodes {
+            transport.upsert_node_status(node).unwrap();
+        }
+        let mut resume = guarded_resume_request(&state, &publication, resuming_at);
+        if let FleetAction::NativeSessionResume { zone_id, .. } = &mut resume.action.action {
+            *zone_id = "all".to_owned();
+        }
+        resume.guard.certified_epoch = Some(first.committed_epoch);
+        assert!(
+            transport
+                .resume_native_sessions_with_certified_maintenance_guard_projected(
+                    &resume,
+                    &authority,
+                    Duration::from_secs(30),
+                    || resuming_at,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "a pre-policy certificate cannot authorize resume"
+        );
+        assert_eq!(transport.list_actions().unwrap(), state.actions);
+
+        let post_policy = certify(&mut transport, &state, &authority, resuming_at, true);
+        resume.guard.certified_epoch = Some(post_policy.committed_epoch);
+        let resumed = transport
+            .resume_native_sessions_with_certified_maintenance_guard_projected(
+                &resume,
+                &authority,
+                Duration::from_secs(30),
+                || resuming_at,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(resumed.evidence.fleet_quiescence_certified);
+        assert_eq!(
+            fleet_native_session_holds(&transport.list_actions().unwrap(), "zone-a").unwrap(),
+            BTreeSet::from(["hold-b".to_owned()]),
+        );
+        drop(transport);
+
+        let mut reopened = DurableFleetTransport::new(temp.path()).unwrap();
+        reopened.initialize().unwrap();
+        let recovered_publication = reopened
+            .publish_policy_with_certified_maintenance_guard_projected(
+                &publication,
+                &authority,
+                Duration::from_secs(1),
+                || panic!("historical recovery must not claim a fresh observation"),
+                |_| panic!("historical recovery must not require an active original hold"),
+            )
+            .unwrap();
+        let recovered_resume = reopened
+            .resume_native_sessions_with_certified_maintenance_guard_projected(
+                &resume,
+                &authority,
+                Duration::from_secs(1),
+                || panic!("historical recovery must not renew an expired authorization"),
+                |_| panic!("historical recovery must use its original signed evidence"),
+            )
+            .unwrap();
+        let mut expected_publication = published;
+        expected_publication.already_published = true;
+        let mut expected_resume = resumed;
+        expected_resume.already_resumed = true;
+        assert_eq!(recovered_publication, expected_publication);
+        assert_eq!(recovered_resume, expected_resume);
+        assert_eq!(
+            reopened.list_actions().unwrap().len(),
+            state.actions.len() + 1
+        );
+
+        resume.guard.certified_epoch = None;
+        assert!(
+            reopened
+                .resume_native_sessions_with_maintenance_guard_projected(
+                    &resume,
+                    FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                    Duration::from_secs(30),
+                    || resuming_at,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "retry cannot downgrade a certified release"
+        );
+    }
+
+    #[test]
+    fn certified_resume_reauthenticates_its_original_publication_before_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, now, root) = fixture();
+        let roots = roots(&state, &root);
+        let key = EpochSigningKey::new(&[98; 32]).unwrap();
+        let signer = FleetEpochCommitSigner::new(
+            "certified-maintenance-coordinator",
+            SigningKey::from_bytes(&[99; 32]),
+        )
+        .unwrap();
+        let authority = FleetCertifiedMaintenanceAuthority {
+            epoch_signing_key: &key,
+            coordinator_signer: &signer,
+            enrolled_supervisors: &roots,
+        };
+        let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+        let first = certify(&mut transport, &state, &authority, now, true);
+        let publication = publication(&state, first.committed_epoch);
+        transport
+            .publish_policy_with_certified_maintenance_guard_projected(
+                &publication,
+                &authority,
+                Duration::from_secs(30),
+                || now,
+                |_| Ok(()),
+            )
+            .unwrap();
+        state.actions.push(publication.action.clone());
+        let resuming_at = now + chrono::TimeDelta::seconds(1);
+        acknowledge_maintenance(&mut state, resuming_at);
+        sign_maintenance_observations(&mut state, &root, resuming_at);
+        for node in &state.nodes {
+            transport.upsert_node_status(node).unwrap();
+        }
+        let second = certify(&mut transport, &state, &authority, resuming_at, true);
+        let mut resume = guarded_resume_request(&state, &publication, resuming_at);
+        if let FleetAction::NativeSessionResume { zone_id, .. } = &mut resume.action.action {
+            *zone_id = "all".to_owned();
+        }
+        resume.guard.certified_epoch = Some(second.committed_epoch);
+
+        let connection =
+            Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+        let rows = connection
+            .query_with_params(
+                "SELECT commit_json FROM fleet_epoch_commits WHERE epoch = ?1;",
+                &[SqliteValue::Text(first.committed_epoch.to_string().into())],
+            )
+            .unwrap();
+        let original = rows[0].values()[0].clone();
+        connection
+            .execute_with_params(
+                "UPDATE fleet_epoch_commits SET commit_json = ?1 WHERE epoch = ?2;",
+                &[
+                    SqliteValue::Text("{}".into()),
+                    SqliteValue::Text(first.committed_epoch.to_string().into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            transport.current_fleet_epoch(&key).unwrap(),
+            second.committed_epoch
+        );
+        assert!(
+            transport
+                .resume_native_sessions_with_certified_maintenance_guard_projected(
+                    &resume,
+                    &authority,
+                    Duration::from_secs(30),
+                    || resuming_at,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "a valid newer head cannot replace the original publication authority"
+        );
+        assert_eq!(transport.list_actions().unwrap(), state.actions);
+        assert!(
+            fleet_native_session_holds(&state.actions, "zone-a")
+                .unwrap()
+                .contains("hold-a")
+        );
+        let rows = connection
+            .query("SELECT COUNT(*) FROM fleet_guarded_native_resumes;")
+            .unwrap();
+        assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+
+        connection
+            .execute_with_params(
+                "UPDATE fleet_epoch_commits SET commit_json = ?1 WHERE epoch = ?2;",
+                &[
+                    original,
+                    SqliteValue::Text(first.committed_epoch.to_string().into()),
+                ],
+            )
+            .unwrap();
+        let receipt = transport
+            .resume_native_sessions_with_certified_maintenance_guard_projected(
+                &resume,
+                &authority,
+                Duration::from_secs(30),
+                || resuming_at,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(receipt.evidence.fleet_quiescence_certified);
+        assert!(!receipt.already_resumed);
+    }
+
+    #[test]
+    fn certified_publication_refusals_are_atomic_and_never_fall_back_to_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, now, root) = fixture();
+        let roots = roots(&state, &root);
+        let key = EpochSigningKey::new(&[94; 32]).unwrap();
+        let signer = FleetEpochCommitSigner::new(
+            "certified-maintenance-coordinator",
+            SigningKey::from_bytes(&[95; 32]),
+        )
+        .unwrap();
+        let authority = FleetCertifiedMaintenanceAuthority {
+            epoch_signing_key: &key,
+            coordinator_signer: &signer,
+            enrolled_supervisors: &roots,
+        };
+        let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+        let legacy = certify(&mut transport, &state, &authority, now, false);
+        let mut request = publication(&state, legacy.committed_epoch);
+        assert!(
+            transport
+                .publish_policy_with_certified_maintenance_guard_projected(
+                    &request,
+                    &authority,
+                    Duration::from_secs(30),
+                    || now,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "HMAC-only epochs have no independent public authorization"
+        );
+        let signed = certify(&mut transport, &state, &authority, now, true);
+        request.guard.certified_epoch = Some(signed.committed_epoch);
+
+        assert!(
+            transport
+                .publish_policy_with_maintenance_guard_projected(
+                    &request,
+                    FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                    Duration::from_secs(30),
+                    || now,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "ordinary entry points cannot consume a certified request"
+        );
+
+        let wrong_signer = FleetEpochCommitSigner::new(
+            "certified-maintenance-coordinator",
+            SigningKey::from_bytes(&[96; 32]),
+        )
+        .unwrap();
+        let wrong_authority = FleetCertifiedMaintenanceAuthority {
+            epoch_signing_key: &key,
+            coordinator_signer: &wrong_signer,
+            enrolled_supervisors: &roots,
+        };
+        assert!(
+            transport
+                .publish_policy_with_certified_maintenance_guard_projected(
+                    &request,
+                    &wrong_authority,
+                    Duration::from_secs(30),
+                    || now,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "embedded public keys cannot replace the configured coordinator root"
+        );
+
+        let wrong_roots: BTreeMap<_, _> = roots
+            .keys()
+            .cloned()
+            .map(|identity| (identity, SigningKey::from_bytes(&[97; 32]).verifying_key()))
+            .collect();
+        let wrong_authority = FleetCertifiedMaintenanceAuthority {
+            epoch_signing_key: &key,
+            coordinator_signer: &signer,
+            enrolled_supervisors: &wrong_roots,
+        };
+        assert!(
+            transport
+                .publish_policy_with_certified_maintenance_guard_projected(
+                    &request,
+                    &wrong_authority,
+                    Duration::from_secs(30),
+                    || now,
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "certificate participants cannot enroll their own supervisor roots"
+        );
+
+        request.guard.stale_after = Duration::from_secs(1);
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            transport
+                .publish_policy_with_certified_maintenance_guard_projected(
+                    &request,
+                    &authority,
+                    Duration::from_secs(30),
+                    || {
+                        let call = calls.get();
+                        calls.set(call + 1);
+                        if call == 0 {
+                            now
+                        } else {
+                            now + chrono::TimeDelta::seconds(1)
+                        }
+                    },
+                    |_| Ok(()),
+                )
+                .is_err(),
+            "signed observations must remain fresh until SQL commit"
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(transport.list_actions().unwrap(), state.actions);
+        let connection =
+            Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+        let rows = connection
+            .query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;")
+            .unwrap();
+        assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+    }
+}
+
+// The default integration target executes these contracts without the crate's
+// optional inline-test cfg. Fixtures contain real per-node Ed25519 signatures.
+mod certified_maintenance_guard_contract_tests {
+    use chrono::{DateTime, Utc};
+    use ed25519_dalek::{Signer, SigningKey};
+    use fleet::{FleetAction, FleetActionRecord};
+    use frankenengine_node::control_plane::fleet_transport as fleet;
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+
+    struct CertifiedMaintenanceFixture {
+        guard: fleet::FleetPolicyMaintenanceGuard,
+        current: fleet::FleetNativeSessionHoldEvidence,
+        committed: fleet::FleetNativeDrainEvidence,
+        certificate: fleet::FleetEpochQuiescenceCertificate,
+        roots: std::collections::BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
+    }
+
+    fn resign_certified_maintenance_drain(
+        drain: &mut fleet::NativeSessionDrainCheckpoint,
+        key: &SigningKey,
+    ) {
+        let checkpoint = drain.observation_sha256().unwrap();
+        let attestation = drain.supervisor_attestation.as_mut().unwrap();
+        attestation.checkpoint_sha256 = checkpoint;
+        attestation.product_root_key_id =
+            format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes()));
+        attestation.signature_hex =
+            hex::encode(key.sign(&attestation.signing_payload().unwrap()).to_bytes());
+    }
+
+    fn certified_maintenance_fixture() -> CertifiedMaintenanceFixture {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let mut roots = std::collections::BTreeMap::new();
+        let mut nodes = Vec::new();
+        // The pure check consumes authenticated checkpoint references. Real
+        // durable-store tests separately bind those references to action logs.
+        for (seed, zone, node_id) in [(41, "zone-a", "node-a"), (42, "zone-b", "node-b")] {
+            let key = SigningKey::from_bytes(&[seed; 32]);
+            let applied = fleet::FleetApplicationCheckpoint {
+                action_count: 1,
+                actions_sha256: hex::encode(Sha256::digest(
+                    format!("held snapshot for {zone}").as_bytes(),
+                )),
+            };
+            let mut drain = fleet::NativeSessionDrainCheckpoint {
+                applied_actions: applied.clone(),
+                session_set_sha256: hex::encode(Sha256::digest(node_id.as_bytes())),
+                admitted_sessions: 2,
+                terminal_sessions: 2,
+                pending_sessions: 0,
+                indeterminate_sessions: 0,
+                fence_held: true,
+                supervisor_attestation: Some(fleet::NativeSessionDrainAttestation {
+                    schema_version: fleet::NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_owned(),
+                    node_id: node_id.to_owned(),
+                    zone_id: zone.to_owned(),
+                    drain_id: "01900000-0000-7000-8000-000000000001".to_owned(),
+                    generation: 2,
+                    project_root_sha256: hex::encode(Sha256::digest(
+                        format!("project-{node_id}").as_bytes(),
+                    )),
+                    observed_at: now,
+                    product_root_key_id: String::new(),
+                    checkpoint_sha256: String::new(),
+                    signature_hex: String::new(),
+                }),
+            };
+            resign_certified_maintenance_drain(&mut drain, &key);
+            roots.insert((zone.to_owned(), node_id.to_owned()), key.verifying_key());
+            nodes.push(fleet::FleetNativeSessionHoldNodeEvidence {
+                zone_id: zone.to_owned(),
+                node_id: node_id.to_owned(),
+                expected_actions: applied.clone(),
+                last_seen: Some(now),
+                health: Some(fleet::NodeHealth::Maintenance),
+                applied_actions: Some(applied),
+                native_session_drain: Some(drain),
+                active_hold_ids: vec!["signed-maintenance".to_owned()],
+                ready: true,
+                reason: fleet::FleetNativeDrainReadiness::Ready,
+                admission_resumed: false,
+            });
+        }
+        let guard = fleet::FleetPolicyMaintenanceGuard {
+            hold_action_id: "signed-maintenance".to_owned(),
+            expected_action_log: fleet::FleetActionLogCheckpoint {
+                action_count: 1,
+                actions_sha256: hex::encode(Sha256::digest(b"retained all-zone maintenance hold")),
+            },
+            required_nodes: roots.keys().cloned().collect(),
+            stale_after: Duration::from_secs(30),
+            certified_epoch: Some(8),
+        };
+        let current = fleet::FleetNativeSessionHoldEvidence {
+            schema_version: "franken-node/fleet-native-session-hold-evidence/v1".to_owned(),
+            scope: "local_supervisor_maintenance_observations".to_owned(),
+            observed_at: now,
+            stale_after: guard.stale_after,
+            action_count: guard.expected_action_log.action_count,
+            hold_action_id: guard.hold_action_id.clone(),
+            hold_zone_id: "all".to_owned(),
+            target: fleet::FleetNativeSessionHoldTarget::Held,
+            complete: true,
+            admission_resumed: false,
+            fleet_quiescence_certified: false,
+            uncovered_zones: Vec::new(),
+            nodes,
+        };
+        // Model the authenticated historical input to the pure validator.
+        // Durable tests separately prove its epoch/coordinator authentication.
+        let committed = fleet::FleetNativeDrainEvidence {
+            schema_version: "franken-node/fleet-native-drain-evidence/v1".to_owned(),
+            scope: fleet::FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE.to_owned(),
+            observed_at: now,
+            stale_after: guard.stale_after,
+            action_count: guard.expected_action_log.action_count,
+            complete: true,
+            fleet_quiescence_certified: true,
+            uncovered_zones: Vec::new(),
+            nodes: current
+                .nodes
+                .iter()
+                .map(|node| fleet::FleetNativeDrainNodeEvidence {
+                    zone_id: node.zone_id.clone(),
+                    node_id: node.node_id.clone(),
+                    expected_actions: node.expected_actions.clone(),
+                    last_seen: node.last_seen,
+                    health: node.health,
+                    applied_actions: node.applied_actions.clone(),
+                    native_session_drain: node.native_session_drain.clone(),
+                    ready: true,
+                    reason: fleet::FleetNativeDrainReadiness::Ready,
+                })
+                .collect(),
+        };
+        let certificate = fleet::FleetEpochQuiescenceCertificate {
+            schema_version: fleet::FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA.to_owned(),
+            transition_id: "transition-maintenance-8".to_owned(),
+            pre_epoch: 7,
+            committed_epoch: 8,
+            initiator: "operator".to_owned(),
+            reason: "publish only while the enrolled population remains held".to_owned(),
+            trace_id: "trace-maintenance-8".to_owned(),
+            operation_id: None,
+            operation_request_sha256: None,
+            certified_at: now,
+            action_log_checkpoint: guard.expected_action_log.clone(),
+            fleet_quiescence_certified: true,
+            participants: current
+                .nodes
+                .iter()
+                .map(|node| {
+                    let drain = node.native_session_drain.as_ref().unwrap();
+                    let attestation = drain.supervisor_attestation.as_ref().unwrap();
+                    fleet::FleetEpochParticipantQuiescence {
+                        zone_id: node.zone_id.clone(),
+                        node_id: node.node_id.clone(),
+                        stage: fleet::FleetAcknowledgementStage::EpochBarrierCertified,
+                        drain_id: attestation.drain_id.clone(),
+                        generation: attestation.generation,
+                        admitted_sessions: drain.admitted_sessions,
+                        terminal_sessions: drain.terminal_sessions,
+                        session_set_sha256: drain.session_set_sha256.clone(),
+                        checkpoint_sha256: attestation.checkpoint_sha256.clone(),
+                        supervisor_key_id: attestation.product_root_key_id.clone(),
+                        active_hold_ids: node.active_hold_ids.clone(),
+                    }
+                })
+                .collect(),
+        };
+        CertifiedMaintenanceFixture {
+            guard,
+            current,
+            committed,
+            certificate,
+            roots,
+        }
+    }
+
+    fn certified_maintenance_receipt(
+        fixture: &CertifiedMaintenanceFixture,
+    ) -> fleet::FleetGuardedPolicyReceipt {
+        let evidence = fleet::validate_fleet_certified_maintenance_guard(
+            &fixture.guard,
+            &fixture.current,
+            &fixture.committed,
+            &fixture.certificate,
+            &fixture.roots,
+        )
+        .unwrap();
+        let artifact = fleet::FleetPolicyArtifact::new(
+            1,
+            fleet::FleetRuntimePolicy {
+                block_private_network: true,
+                ..fleet::FleetRuntimePolicy::default()
+            },
+        )
+        .unwrap();
+        fleet::FleetGuardedPolicyReceipt {
+            schema_version: fleet::FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
+            action: FleetActionRecord {
+                action_id: "certified-policy-1".to_owned(),
+                emitted_at: fixture.current.observed_at,
+                action: FleetAction::PolicyUpdate {
+                    zone_id: "all".to_owned(),
+                    policy_version: "revision-1".to_owned(),
+                    changed_fields: vec!["block_private_network".to_owned()],
+                    artifact: Some(artifact),
+                },
+            },
+            guard: fixture.guard.clone(),
+            evidence,
+            accepted_at: fixture.current.observed_at,
+            observation_scope: fleet::FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+            already_published: false,
+            fleet_quiescence_certified: true,
+        }
+    }
+
+    #[test]
+    fn certified_guard_accepts_fresh_successors_of_the_same_retained_held_population() {
+        let mut fixture = certified_maintenance_fixture();
+        fixture.current.observed_at += chrono::TimeDelta::hours(1);
+        for (index, node) in fixture.current.nodes.iter_mut().enumerate() {
+            node.last_seen = Some(fixture.current.observed_at);
+            let drain = node.native_session_drain.as_mut().unwrap();
+            drain.supervisor_attestation.as_mut().unwrap().observed_at =
+                fixture.current.observed_at;
+            resign_certified_maintenance_drain(
+                drain,
+                &SigningKey::from_bytes(&[41 + u8::try_from(index).unwrap(); 32]),
+            );
+        }
+        let evidence = fleet::validate_fleet_certified_maintenance_guard(
+            &fixture.guard,
+            &fixture.current,
+            &fixture.committed,
+            &fixture.certificate,
+            &fixture.roots,
+        )
+        .unwrap();
+        assert!(evidence.fleet_quiescence_certified);
+        assert_eq!(
+            evidence.scope,
+            fleet::FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE
+        );
+        assert_eq!(evidence.observed_at, fixture.current.observed_at);
+        assert_eq!(
+            fixture.certificate.certified_at,
+            fixture.committed.observed_at
+        );
+        assert!(!fixture.current.fleet_quiescence_certified);
+        let recovered = fleet::validate_fleet_certified_maintenance_guard(
+            &fixture.guard,
+            &evidence,
+            &fixture.committed,
+            &fixture.certificate,
+            &fixture.roots,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered, evidence,
+            "receipt recovery must retain its original accepted evidence"
+        );
+    }
+
+    #[test]
+    fn certified_guard_rejects_changed_enrollment_population_generation_and_hold() {
+        for mutation in 0..18 {
+            let mut fixture = certified_maintenance_fixture();
+            match mutation {
+                0 => {
+                    fixture.current.nodes.pop();
+                }
+                1 => {
+                    fixture
+                        .roots
+                        .remove(&("zone-b".to_owned(), "node-b".to_owned()));
+                }
+                2 => {
+                    fixture.roots.insert(
+                        ("zone-c".to_owned(), "node-c".to_owned()),
+                        SigningKey::from_bytes(&[43; 32]).verifying_key(),
+                    );
+                }
+                3 => {
+                    fixture.roots.insert(
+                        ("zone-a".to_owned(), "node-a".to_owned()),
+                        SigningKey::from_bytes(&[99; 32]).verifying_key(),
+                    );
+                }
+                4 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .session_set_sha256 = "c".repeat(64)
+                }
+                5 => {
+                    let drain = fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap();
+                    drain.admitted_sessions += 1;
+                    drain.terminal_sessions += 1;
+                }
+                6 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .generation += 1
+                }
+                7 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .drain_id = uuid::Uuid::from_u128(2).to_string()
+                }
+                8 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .project_root_sha256 = "d".repeat(64)
+                }
+                9 => fixture.current.nodes[0].active_hold_ids = vec!["another-owner".to_owned()],
+                10 => fixture.guard.expected_action_log.actions_sha256 = "e".repeat(64),
+                11 => fixture.guard.certified_epoch = Some(7),
+                12 => {
+                    let drain = fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap();
+                    drain.terminal_sessions -= 1;
+                    drain.indeterminate_sessions += 1;
+                }
+                13 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .observed_at -= chrono::TimeDelta::seconds(1)
+                }
+                14 => fixture.current.hold_zone_id = "zone-a".to_owned(),
+                15 => {
+                    fixture.current.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .fence_held = false
+                }
+                16 => fixture.current.fleet_quiescence_certified = true,
+                _ => {
+                    fixture.current.scope =
+                        fleet::FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE.to_owned()
+                }
+            }
+            if let Some(node) = fixture.current.nodes.first_mut() {
+                resign_certified_maintenance_drain(
+                    node.native_session_drain.as_mut().unwrap(),
+                    &SigningKey::from_bytes(&[41; 32]),
+                );
+            }
+            assert!(
+                fleet::validate_fleet_certified_maintenance_guard(
+                    &fixture.guard,
+                    &fixture.current,
+                    &fixture.committed,
+                    &fixture.certificate,
+                    &fixture.roots,
+                )
+                .is_err(),
+                "changed certified participant mutation {mutation} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn certified_guard_checks_original_freshness_and_requires_fresh_supervisor_signatures() {
+        let mut fixture = certified_maintenance_fixture();
+        fixture.current.observed_at += chrono::TimeDelta::seconds(30);
+        for node in &mut fixture.current.nodes {
+            node.last_seen = Some(fixture.current.observed_at);
+        }
+        assert!(
+            fleet::validate_fleet_certified_maintenance_guard(
+                &fixture.guard,
+                &fixture.current,
+                &fixture.committed,
+                &fixture.certificate,
+                &fixture.roots,
+            )
+            .is_err(),
+            "unsigned heartbeat must not renew the original supervisor observation"
+        );
+
+        let mut fixture = certified_maintenance_fixture();
+        fixture.committed.nodes[0].last_seen =
+            Some(fixture.certificate.certified_at - chrono::TimeDelta::seconds(30));
+        assert!(
+            fleet::validate_fleet_certified_maintenance_guard(
+                &fixture.guard,
+                &fixture.current,
+                &fixture.committed,
+                &fixture.certificate,
+                &fixture.roots,
+            )
+            .is_err(),
+            "original epoch observations must be fresh at certification time"
+        );
+    }
+
+    #[test]
+    fn certified_policy_and_resume_receipts_bind_epoch_scope_and_signature_integrity() {
+        let fixture = certified_maintenance_fixture();
+        let receipt = certified_maintenance_receipt(&fixture);
+        receipt.validate().unwrap();
+        for mutation in 0..5 {
+            let mut changed = receipt.clone();
+            match mutation {
+                0 => changed.guard.certified_epoch = None,
+                1 => changed.guard.certified_epoch = Some(0),
+                2 => {
+                    changed.observation_scope =
+                        fleet::FleetGuardedPolicyObservationScope::LocalSupervisorObservations
+                }
+                3 => {
+                    changed.evidence.nodes[0]
+                        .native_session_drain
+                        .as_mut()
+                        .unwrap()
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .signature_hex = "00".repeat(64)
+                }
+                _ => {
+                    changed.fleet_quiescence_certified = false;
+                    changed.evidence.fleet_quiescence_certified = false;
+                    changed.evidence.scope = "local_supervisor_maintenance_observations".to_owned();
+                }
+            }
+            assert!(
+                changed.validate().is_err(),
+                "certified receipt mutation {mutation} was accepted"
+            );
+        }
+        let mut resume = fleet::FleetGuardedResumeReceipt {
+            schema_version: fleet::FLEET_GUARDED_RESUME_RECEIPT_SCHEMA.to_owned(),
+            request: fleet::GuardedFleetNativeSessionResume {
+                action: FleetActionRecord {
+                    action_id: "certified-resume-1".to_owned(),
+                    emitted_at: receipt.accepted_at,
+                    action: FleetAction::NativeSessionResume {
+                        zone_id: "all".to_owned(),
+                        hold_action_id: receipt.guard.hold_action_id.clone(),
+                        reason: Some("release this policy owner".to_owned()),
+                    },
+                },
+                policy_action: receipt.action.clone(),
+                guard: receipt.guard.clone(),
+                expires_at: receipt.accepted_at + chrono::TimeDelta::seconds(30),
+            },
+            evidence: receipt.evidence.clone(),
+            accepted_at: receipt.accepted_at,
+            observation_scope: receipt.observation_scope,
+            already_resumed: false,
+        };
+        resume.validate().unwrap();
+        resume.evidence.fleet_quiescence_certified = false;
+        assert!(resume.validate().is_err());
+        let mut ordinary = fixture.guard;
+        ordinary.certified_epoch = None;
+        let encoded = serde_json::to_value(&ordinary).unwrap();
+        assert!(encoded.get("certified_epoch").is_none());
+        assert_eq!(
+            serde_json::from_value::<fleet::FleetPolicyMaintenanceGuard>(encoded).unwrap(),
+            ordinary
+        );
+    }
+
+    #[cfg(feature = "http-client")]
+    fn certified_resume_receipt(
+        receipt: &fleet::FleetGuardedPolicyReceipt,
+    ) -> fleet::FleetGuardedResumeReceipt {
+        fleet::FleetGuardedResumeReceipt {
+            schema_version: fleet::FLEET_GUARDED_RESUME_RECEIPT_SCHEMA.to_owned(),
+            request: fleet::GuardedFleetNativeSessionResume {
+                action: FleetActionRecord {
+                    action_id: "certified-resume-1".to_owned(),
+                    emitted_at: receipt.accepted_at,
+                    action: FleetAction::NativeSessionResume {
+                        zone_id: "all".to_owned(),
+                        hold_action_id: receipt.guard.hold_action_id.clone(),
+                        reason: Some("release this policy owner".to_owned()),
+                    },
+                },
+                policy_action: receipt.action.clone(),
+                guard: receipt.guard.clone(),
+                expires_at: receipt.accepted_at + chrono::TimeDelta::seconds(30),
+            },
+            evidence: receipt.evidence.clone(),
+            accepted_at: receipt.accepted_at,
+            observation_scope: receipt.observation_scope,
+            already_resumed: true,
+        }
+    }
+
+    #[cfg(feature = "http-client")]
+    fn with_guarded_http_reply<R>(
+        payload: &impl serde::Serialize,
+        expected_path: &'static str,
+        check: impl FnOnce(
+            &mut frankenengine_node::control_plane::fleet_transport_http::HttpFleetTransport,
+        ) -> R,
+    ) -> R {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = serde_json::to_vec(payload).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            let message_bytes = loop {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "HTTP request ended before its headers");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() <= 128 * 1024);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&request[..end]);
+                    assert!(header.starts_with(&format!("POST {expected_path} HTTP/1.1")));
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .expect("bounded JSON request has Content-Length");
+                    break end + 4 + length;
+                }
+            };
+            assert!(message_bytes <= 128 * 1024);
+            while request.len() < message_bytes {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "HTTP request ended before its body");
+                request.extend_from_slice(&chunk[..count]);
+            }
+            write!(stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len(),
+            ).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let mut client =
+            frankenengine_node::control_plane::fleet_transport_http::HttpFleetTransport::new(
+                &format!("http://{address}"),
+                &"a".repeat(64),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        let result = check(&mut client);
+        worker.join().unwrap();
+        result
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn http_guarded_policy_recovery_preserves_exact_certified_epoch_and_mode() {
+        use fleet::FleetTransport as _;
+        use frankenengine_node::control_plane::fleet_transport_http::FLEET_HTTP_GUARDED_POLICY_PATH;
+
+        for mutation in 0..5 {
+            let fixture = certified_maintenance_fixture();
+            let mut receipt = certified_maintenance_receipt(&fixture);
+            receipt.already_published = true;
+            let mut request = fleet::GuardedFleetPolicyPublication {
+                action: receipt.action.clone(),
+                guard: receipt.guard.clone(),
+            };
+            // A retry may observe a later prefix; its original epoch remains
+            // immutable even though other original guard fields are retained.
+            request.guard.expected_action_log.actions_sha256 = "f".repeat(64);
+            match mutation {
+                0 => {}
+                1 => request.guard.certified_epoch = None,
+                2 => {
+                    receipt.guard.certified_epoch = None;
+                    receipt.fleet_quiescence_certified = false;
+                    receipt.evidence.fleet_quiescence_certified = false;
+                    receipt.evidence.scope = "local_supervisor_maintenance_observations".to_owned();
+                }
+                3 => receipt.guard.certified_epoch = Some(9),
+                _ => receipt.already_published = false,
+            }
+            let result =
+                with_guarded_http_reply(&receipt, FLEET_HTTP_GUARDED_POLICY_PATH, |client| {
+                    assert!(client.supports_certified_maintenance());
+                    client.publish_policy_with_maintenance_guard(&request)
+                });
+            assert_eq!(
+                result.is_ok(),
+                mutation == 0,
+                "policy response mutation {mutation}: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn http_guarded_resume_recovery_preserves_exact_certified_epoch_and_mode() {
+        use fleet::FleetTransport as _;
+        use frankenengine_node::control_plane::fleet_transport_http::FLEET_HTTP_GUARDED_RESUME_PATH;
+
+        for mutation in 0..5 {
+            let fixture = certified_maintenance_fixture();
+            let publication = certified_maintenance_receipt(&fixture);
+            let mut receipt = certified_resume_receipt(&publication);
+            let mut request = receipt.request.clone();
+            request.guard.expected_action_log.actions_sha256 = "f".repeat(64);
+            request.expires_at += chrono::TimeDelta::seconds(30);
+            match mutation {
+                0 => {}
+                1 => request.guard.certified_epoch = None,
+                2 => {
+                    receipt.request.guard.certified_epoch = None;
+                    receipt.evidence.fleet_quiescence_certified = false;
+                    receipt.evidence.scope = "local_supervisor_maintenance_observations".to_owned();
+                }
+                3 => receipt.request.guard.certified_epoch = Some(9),
+                _ => receipt.already_resumed = false,
+            }
+            let result =
+                with_guarded_http_reply(&receipt, FLEET_HTTP_GUARDED_RESUME_PATH, |client| {
+                    client.resume_native_sessions_with_maintenance_guard(&request)
+                });
+            assert_eq!(
+                result.is_ok(),
+                mutation == 0,
+                "resume response mutation {mutation}: {result:?}"
+            );
         }
     }
 }
