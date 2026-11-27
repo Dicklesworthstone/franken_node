@@ -66,7 +66,12 @@ fn debug_artifact_readers_refuse_writerless_fifos_without_blocking() {
             );
         }
     }
-    assert!(std::fs::symlink_metadata(fifo).unwrap().file_type().is_fifo());
+    assert!(
+        std::fs::symlink_metadata(fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
 }
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -497,6 +502,242 @@ fn source_graph_capsule_export_is_explicit_private_and_does_not_overwrite() {
         error["schema_version"],
         "franken-node/verify-source-graph-error-cli/v1"
     );
+}
+
+#[test]
+fn source_graph_replay_requires_an_independent_pin_and_unambiguous_input_mode() {
+    let pin = format!("sha256:{}", "ab".repeat(32));
+    let parse_source_graph = |arguments: Vec<&str>| {
+        let mut command = vec!["franken-node", "verify", "source-graph"];
+        command.extend(arguments);
+        let Command::Verify(VerifyCommand::SourceGraph(args)) = parse(&command).unwrap().command
+        else {
+            panic!("expected source graph");
+        };
+        args
+    };
+    let replay = parse_source_graph(vec![
+        "--replay-source-capsule",
+        "/operator/review/source.capsule",
+        "--expected-capsule-hash",
+        &pin,
+        "--json",
+    ]);
+    replay.validate().unwrap();
+    assert!(replay.project_path.as_os_str().is_empty());
+    assert!(replay.entrypoint.is_empty());
+    assert_eq!(replay.expected_capsule_hash.as_deref(), Some(pin.as_str()));
+
+    for mut options in [
+        vec!["project", "app.cjs"],
+        vec!["project"],
+        vec!["--allow-contained-symlinks"],
+        vec!["--conditions", "development"],
+        vec!["--write-source-capsule", "another.capsule"],
+    ] {
+        options.extend([
+            "--replay-source-capsule",
+            "source.capsule",
+            "--expected-capsule-hash",
+            &pin,
+        ]);
+        assert!(parse_source_graph(options).validate().is_err());
+    }
+    assert!(
+        parse_source_graph(vec!["--replay-source-capsule", "source.capsule"])
+            .validate()
+            .is_err()
+    );
+    assert!(
+        parse_source_graph(vec!["project", "app.cjs", "--expected-capsule-hash", &pin])
+            .validate()
+            .is_err()
+    );
+    for invalid in [
+        "".to_owned(),
+        "ab".repeat(32),
+        format!("sha256:{}", "AB".repeat(32)),
+    ] {
+        assert!(
+            parse_source_graph(vec![
+                "--replay-source-capsule",
+                "source.capsule",
+                "--expected-capsule-hash",
+                &invalid,
+            ])
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_cli_replays_pinned_capsules_after_the_original_project_is_moved() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        GraphOptions, capsule, capture,
+    };
+
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("app.cjs"),
+        "module.exports = require('./dep.cjs');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("dep.cjs"),
+        "throw new Error('PRIVATE_ARCHIVED_SOURCE_MUST_NOT_EXECUTE');\n",
+    )
+    .unwrap();
+    let graph = capture(
+        &project,
+        "app.cjs",
+        GraphOptions {
+            additional_conditions: vec!["development".into()],
+            ..GraphOptions::default()
+        },
+    )
+    .unwrap();
+    let encoded = capsule::encode(&graph).unwrap();
+    let path = workspace.path().join("source.capsule");
+    std::fs::write(&path, encoded.bytes()).unwrap();
+    std::fs::rename(&project, workspace.path().join("retired-project")).unwrap();
+    assert!(!project.exists());
+
+    let invoke = |pin: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .current_dir(workspace.path())
+            .args(["verify", "source-graph", "--replay-source-capsule"])
+            .arg(&path)
+            .args(["--expected-capsule-hash", pin, "--json"])
+            .output()
+            .unwrap()
+    };
+    let output = invoke(encoded.digest());
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    let replayed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Exact graph object, with no CLI envelope fields that would invalidate a
+    // standalone verifier's strict --graph-report input schema.
+    assert_eq!(replayed, serde_json::to_value(graph.report()).unwrap());
+    assert_eq!(replayed["modules"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        replayed["options"]["additional_conditions"],
+        serde_json::json!(["development"])
+    );
+    assert_eq!(replayed["execution_performed"], false);
+    assert_eq!(replayed["runtime_completeness"], false);
+    assert_eq!(replayed["release_certification"], false);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_ARCHIVED_SOURCE"));
+
+    // The graph commitment and capsule commitment are distinct authorities.
+    let wrong_pin = invoke(&graph.report().input_hash);
+    assert_eq!(wrong_pin.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&wrong_pin.stdout).unwrap();
+    assert_eq!(error["ok"], false);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("ERR_MODULE_CAPSULE_PIN_MISMATCH")
+    );
+
+    let mut altered = encoded.bytes().to_vec();
+    *altered.last_mut().unwrap() ^= 1;
+    std::fs::write(&path, altered).unwrap();
+    let corrupted = invoke(encoded.digest());
+    assert_eq!(corrupted.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&corrupted.stdout).unwrap();
+    assert_eq!(error["ok"], false);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("ERR_MODULE_CAPSULE_PIN_MISMATCH")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_cli_capsule_replay_preserves_incomplete_capture() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        GraphOptions, capsule, capture,
+    };
+
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        workspace.path().join("app.cjs"),
+        "require(globalThis.runtimeOnlyModule);\n",
+    )
+    .unwrap();
+    let graph = capture(workspace.path(), "app.cjs", GraphOptions::default()).unwrap();
+    assert!(!graph.report().fully_resolved);
+    let encoded = capsule::encode(&graph).unwrap();
+    let path = workspace.path().join("incomplete.capsule");
+    std::fs::write(&path, encoded.bytes()).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args(["verify", "source-graph", "--replay-source-capsule"])
+        .arg(&path)
+        .args(["--expected-capsule-hash", encoded.digest(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report, serde_json::to_value(graph.report()).unwrap());
+    assert!(
+        report["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["state"] == "non_literal")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_cli_capsule_replay_refuses_unsafe_files_without_blocking() {
+    let workspace = tempfile::tempdir().unwrap();
+    let fifo = workspace.path().join("writerless.fifo");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let linked = workspace.path().join("linked.capsule");
+    std::os::unix::fs::symlink(&fifo, &linked).unwrap();
+    let oversized = workspace.path().join("oversized.capsule");
+    let file = std::fs::File::create(&oversized).unwrap();
+    file.set_len(
+        frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::MAX_CAPSULE_BYTES as u64 + 1,
+    )
+    .unwrap();
+    let pin = format!("sha256:{}", "00".repeat(32));
+    for path in [
+        fifo.as_path(),
+        linked.as_path(),
+        oversized.as_path(),
+        workspace.path(),
+    ] {
+        let mut command = assert_cmd::Command::new(env!("CARGO_BIN_EXE_franken-node"));
+        command
+            .args(["verify", "source-graph", "--replay-source-capsule"])
+            .arg(path)
+            .args(["--expected-capsule-hash", &pin, "--json"])
+            .timeout(std::time::Duration::from_secs(5));
+        let assertion = command.assert().code(1);
+        let error: serde_json::Value =
+            serde_json::from_slice(&assertion.get_output().stdout).unwrap();
+        assert_eq!(
+            error["schema_version"],
+            "franken-node/verify-source-graph-error-cli/v1"
+        );
+        assert_eq!(error["ok"], false);
+        assert!(assertion.get_output().stderr.is_empty());
+    }
 }
 
 #[test]

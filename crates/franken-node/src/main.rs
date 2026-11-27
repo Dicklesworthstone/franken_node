@@ -39043,10 +39043,7 @@ fn named_cli_fail(
 }
 
 fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
-    anyhow::ensure!(
-        !args.project_path.as_os_str().is_empty() && !args.entrypoint.is_empty(),
-        "`verify source-graph` requires a project path and project-relative entrypoint"
-    );
+    args.validate()?;
     #[cfg(not(unix))]
     {
         anyhow::bail!("Source graph capture requires Unix");
@@ -39055,22 +39052,38 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
     {
         use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::{
             SymlinkPolicy,
-            source_graph::{GraphOptions, capture},
+            source_graph::{GraphOptions, capsule, capture},
         };
 
-        let captured = capture(
-            &args.project_path,
-            &args.entrypoint,
-            GraphOptions {
-                symlink_policy: if args.allow_contained_symlinks {
-                    SymlinkPolicy::Contained
-                } else {
-                    SymlinkPolicy::Reject
+        let captured = if let Some(path) = &args.replay_source_capsule {
+            let pin = args
+                .expected_capsule_hash
+                .as_deref()
+                .context("source capsule replay requires an independent pin")?;
+            // Read once through the existing bounded, nonblocking, no-symlink
+            // artifact reader. Replay then consults only these pinned bytes;
+            // neither missing probes nor changed sources use the live project.
+            let bytes = supply_chain::registry_artifact::read_artifact_file(
+                path,
+                capsule::MAX_CAPSULE_BYTES as u64,
+            )
+            .context("read retained source capsule")?;
+            capsule::replay(&bytes, pin).context("reconstruct pinned source graph")?
+        } else {
+            capture(
+                &args.project_path,
+                &args.entrypoint,
+                GraphOptions {
+                    symlink_policy: if args.allow_contained_symlinks {
+                        SymlinkPolicy::Contained
+                    } else {
+                        SymlinkPolicy::Reject
+                    },
+                    additional_conditions: args.module_conditions.clone(),
+                    ..GraphOptions::default()
                 },
-                additional_conditions: args.module_conditions.clone(),
-                ..GraphOptions::default()
-            },
-        )?;
+            )?
+        };
         let report = captured.report();
         let capsule = if let Some(path) = &args.write_source_capsule {
             // Native builtins and sealed optional-dependency failures do not
@@ -39109,7 +39122,11 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
             println!(
                 "Source graph: {} (bounded static requests; no guest execution)",
                 if report.fully_resolved {
-                    "CAPTURED"
+                    if args.replay_source_capsule.is_some() {
+                        "REPLAYED FROM PINNED CAPSULE"
+                    } else {
+                        "CAPTURED"
+                    }
                 } else if capsule.is_some() {
                     "CAPTURED WITH NATIVE TERMINAL ROUTES"
                 } else {
@@ -39126,6 +39143,9 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
             println!("Content identity grants no publisher or execution authority.");
             if let Some((path, capsule)) = &capsule {
                 println!("Source capsule: {} ({})", path.display(), capsule.digest());
+            }
+            if args.replay_source_capsule.is_some() {
+                println!("Reconstructed from retained observations; the live project was not read.");
             }
         }
         // Successful explicit export certifies the closed request surface,

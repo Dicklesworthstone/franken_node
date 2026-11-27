@@ -2114,10 +2114,68 @@ pub struct VerifySourceGraphArgs {
     #[arg(long, value_name = "NEW_PATH", value_parser = parse_safe_binary_pathbuf)]
     pub write_source_capsule: Option<PathBuf>,
 
-    /// Emit the existing franken-node/module-source-graph/v2 report.
+    /// Reconstruct the graph from a retained FNSGCAP1 capsule without opening
+    /// the original project. Requires --expected-capsule-hash and rejects live
+    /// capture options. Never executes code or extracts capsule contents.
+    #[arg(long, value_name = "PATH", value_parser = parse_safe_binary_pathbuf)]
+    pub replay_source_capsule: Option<PathBuf>,
+
+    /// Independently retained capsule digest (sha256: plus 64 lowercase hex
+    /// digits). This pins the complete capsule, not the source graph input_hash.
+    /// Required only with --replay-source-capsule; never inferred from input.
+    #[arg(long, value_name = "SHA256")]
+    pub expected_capsule_hash: Option<String>,
+
+    /// Emit the existing franken-node/module-source-graph/v3 report, suitable
+    /// as a standalone verifier graph witness when not exporting a new capsule.
     /// Contains module metadata and commitments, not source bodies.
     #[arg(long)]
     pub json: bool,
+}
+
+impl VerifySourceGraphArgs {
+    /// Validate the selected input mode before opening any evidence file.
+    /// Handler validation preserves the command's structured JSON refusals.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(path) = &self.replay_source_capsule {
+            validate_system_binary_pathbuf(path)?;
+            anyhow::ensure!(
+                self.project_path.as_os_str().is_empty()
+                    && self.entrypoint.is_empty()
+                    && !self.allow_contained_symlinks
+                    && self.module_conditions.is_empty()
+                    && self.write_source_capsule.is_none(),
+                "--replay-source-capsule cannot be combined with a project, entrypoint, \
+                 --allow-contained-symlinks, --conditions or --write-source-capsule; \
+                 replay retains the capsule's original capture options"
+            );
+            let pin = self.expected_capsule_hash.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--replay-source-capsule requires an independently retained --expected-capsule-hash"
+                )
+            })?;
+            anyhow::ensure!(
+                pin.strip_prefix("sha256:").is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                }),
+                "--expected-capsule-hash requires sha256: plus 64 lowercase hexadecimal digits"
+            );
+        } else {
+            anyhow::ensure!(
+                self.expected_capsule_hash.is_none(),
+                "--expected-capsule-hash requires --replay-source-capsule"
+            );
+            anyhow::ensure!(
+                !self.project_path.as_os_str().is_empty() && !self.entrypoint.is_empty(),
+                "`verify source-graph` requires a project path and project-relative entrypoint, \
+                 or --replay-source-capsule with --expected-capsule-hash"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Parser)]

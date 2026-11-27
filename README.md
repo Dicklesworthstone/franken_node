@@ -1131,7 +1131,7 @@ remain in force.
 | Command | Purpose |
 |---|---|
 | `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. The module id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
-| `franken-node verify source-graph <project> <entrypoint>` | Capture the existing bounded static module graph without executing guest code. Emits its content commitment for later pinned execution; does not authenticate a publisher or grant authority. Flags: `--json` (existing `franken-node/module-source-graph/v2` report), `--allow-contained-symlinks`. Exit 0 means the declared static scope is complete; incomplete capture or errors exit 1. Missing/unsafe input errors use `franken-node/verify-source-graph-error-cli/v1`. Unix only. |
+| `franken-node verify source-graph [<project> <entrypoint>]` | Capture the bounded static module graph without executing guest code, or reconstruct it offline with `--replay-source-capsule PATH --expected-capsule-hash sha256:HEX`. Emits a content commitment without publisher or execution authority. Flags: `--json` (`franken-node/module-source-graph/v3`), `--allow-contained-symlinks`, repeatable `--conditions`, `--write-source-capsule NEW_PATH`. Replay retains the original capture options and rejects live-capture arguments. Exit 0 means the declared static scope is complete; incomplete replay/capture or errors exit 1. Missing/unsafe input errors use `franken-node/verify-source-graph-error-cli/v1`. Unix only. |
 | `franken-node verify migration <id>` | Check a local migration evidence record and its post-conditions; does not re-run `migrate rewrite`. The migration id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json` (`live_rewrite=false`, `source=local_evidence_record`). |
 | `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. The target is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
@@ -5135,7 +5135,7 @@ one pass.
   ```
 
   The inspection uses the same bounded source capture as native frozen execution
-  and emits its existing `franken-node/module-source-graph/v2` metadata report,
+  and emits its existing `franken-node/module-source-graph/v3` metadata report,
   without source bodies, dependency installation, network access or guest evaluation.
   Exit 0 means the declared static request scope is complete; incomplete captures
   retain diagnostics and exit 1. Runtime completeness and release certification
@@ -5181,6 +5181,31 @@ one pass.
     --registry-artifact /registry/path/artifact.manifest.json \
     --publisher-public-key /operator/publisher.pub
   ```
+
+  Reconstruct the exact graph report later, even after the original project has
+  moved or disappeared, using the independently retained `capsule_digest` from
+  the export or authenticated admission:
+
+  ```sh
+  franken-node verify source-graph \
+    --replay-source-capsule /review/example.capsule \
+    --expected-capsule-hash "$REVIEWED_CAPSULE_DIGEST" \
+    --json > captured-source-graph.json
+  ```
+
+  Replay verifies the complete capsule before rerunning source analysis over
+  its retained sources, manifests, symlinks and negative lookup observations.
+  It never consults the current project, extracts files or executes guest code.
+  The capsule pin differs from the graph's `input_hash`; neither is inferred
+  from the candidate file. Capsule reads are bounded, reject symlinks in every
+  path component, and refuse pipes and devices without waiting for a writer.
+  Original conditions and symlink policy come from the pinned capsule, so live
+  capture options cannot be combined with replay. Incomplete captured graphs
+  retain their diagnostics and exit 1. The JSON output is the exact graph
+  object, ready for `franken-verifier --graph-report` and its language clients;
+  its runtime-completeness, execution and release-certification flags remain
+  false. A graph witness still requires separately authenticated incident,
+  native-session or publisher evidence at the independent verifier boundary.
 
   Supply a publisher public key independently retained **outside the guest
   project**; an embedded key cannot approve itself. The registry artifact must
