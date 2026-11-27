@@ -307,6 +307,40 @@ class ReleaseInstallation(unittest.TestCase):
         self.assertNotIn("BAD_", result.stdout)
         self.assertEqual(self.target.read_bytes(), GOOD)
 
+    def test_version_pin_does_not_skip_a_different_installed_version(self) -> None:
+        archive = self.archive()
+        command = f'main --offline {shlex.quote(str(archive))} --version v0.2.0 --dest "$TEST_DEST" --quiet'
+        for reported in ("franken-node 0.2.0-rc.1", "franken-node 0.2.01", "other 0.2.0"):
+            with self.subTest(reported=reported):
+                self.target.write_text(f"#!/bin/sh\necho '{reported}'\n", encoding="utf-8")
+                result = self.run_shell(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.target.read_bytes(), GOOD)
+        # An exact installed release still needs no archive read or network.
+        result = self.run_shell('main --offline absent.tar.xz --version v0.2.0 --dest "$TEST_DEST" --quiet')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pinned_offline_refuses_wrong_candidate_before_replacement(self) -> None:
+        archive = self.archive()
+        result = self.run_shell(
+            f'main --offline {shlex.quote(str(archive))} --version v0.2.0-beta.1 --dest "$TEST_DEST" --quiet')
+        self.assert_preserved(result)
+        self.assertIn("candidate does not report franken-node 0.2.0-beta.1", result.stderr)
+
+    def test_latest_release_candidate_must_report_the_discovered_tag(self) -> None:
+        archive = self.archive()
+        result = self.run_shell('main --method auto --dest "$TEST_DEST" --quiet', prelude=(
+            'discover_latest_release_tag() { echo v0.3.0; }; '
+            'verify_sigstore() { :; }; '
+            'download_file() { case "$1" in '
+            f'*.tar.xz) cp {shlex.quote(str(archive))} "$2";; '
+            f'*.sha256) cp {shlex.quote(str(archive) + ".sha256")} "$2";; '
+            '*) return 22;; esac; }; '
+            'install_from_source() { echo BAD_SOURCE_BUILD; return 81; };'))
+        self.assert_preserved(result)
+        self.assertIn("candidate does not report franken-node 0.3.0", result.stderr)
+        self.assertNotIn("BAD_SOURCE_BUILD", result.stdout)
+
     def test_linux_arm_aliases_select_only_the_arm64_gnu_asset(self) -> None:
         for arch in ("aarch64", "arm64", "arm64e"):
             with self.subTest(arch=arch):
