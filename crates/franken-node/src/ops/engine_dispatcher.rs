@@ -7076,7 +7076,8 @@ fn verified_control_stop_ledger(
 
 /// Re-verify a persisted host-effect ledger after the run: the identity
 /// capture at `capture_path` must sit in this user's runtime-evidence capture
-/// directory and be signed by this machine's runtime-evidence product root,
+/// directory (or its authenticated cold archive) and be signed by this
+/// machine's runtime-evidence product root,
 /// and the ledger (outcome counts, hash chain, head and detached signature)
 /// must verify against the session identity that capture authenticates.
 /// Returns the product root's key id.
@@ -7098,13 +7099,14 @@ pub fn verify_recorded_host_effect_ledger(
 /// Read and authenticate the public session capture together with its recorded
 /// ledger. Incident export carries this exact verified value, without reopening
 /// a mutable path after authentication or exporting any signing seed.
+/// A retired hot capture may be recovered from a protected, authenticated archive.
 #[cfg(feature = "engine")]
 pub fn load_verified_recorded_host_effect_identity(
     project_root: &Path,
     ledger: &HostEffectLedger,
     capture_path: &Path,
 ) -> Result<RuntimeEvidenceIdentityCapture> {
-    let (product_root_path, capture_directory, _) =
+    let (product_root_path, capture_directory, protected_state_root) =
         prepare_runtime_evidence_directories(project_root)?;
     let capture_directory = capture_directory.canonicalize().with_context(|| {
         format!(
@@ -7112,30 +7114,100 @@ pub fn load_verified_recorded_host_effect_identity(
             capture_directory.display()
         )
     })?;
+    let capture = load_recorded_runtime_evidence_identity_at(
+        &protected_state_root,
+        &product_root_path,
+        &capture_directory,
+        capture_path,
+    )?;
+    validate_host_effect_ledger(ledger, &capture.evidence_verification_identity)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(capture)
+}
+
+#[cfg(feature = "engine")]
+fn load_recorded_runtime_evidence_identity_at(
+    protected_state_root: &Path,
+    product_root_path: &Path,
+    capture_directory: &Path,
+    capture_path: &Path,
+) -> Result<RuntimeEvidenceIdentityCapture> {
     let resolved_capture =
-        canonicalize_under_known_canonical_root(capture_path, &capture_directory).with_context(
-            || {
-                format!(
-                    "resolve runtime evidence identity capture {}",
-                    capture_path.display()
+        match canonicalize_under_known_canonical_root(capture_path, capture_directory) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // Only an absent leaf in the original protected directory may
+                // resolve through cold storage. A dangling symlink, missing
+                // ancestor or path outside that directory is not an archive
+                // lookup and must not acquire authority from an embedded key.
+                let parent = capture_path
+                    .parent()
+                    .context("runtime evidence identity capture has no parent")?
+                    .canonicalize()
+                    .context("resolve missing runtime evidence capture parent")?;
+                if parent != capture_directory
+                    || !matches!(
+                        std::fs::symlink_metadata(capture_path),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound
+                    )
+                {
+                    return Err(error).context("resolve runtime evidence identity capture");
+                }
+                parent.join(
+                    capture_path
+                        .file_name()
+                        .context("runtime evidence identity capture has no file name")?,
                 )
-            },
-        )?;
-    if resolved_capture.parent() != Some(capture_directory.as_path()) {
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "resolve runtime evidence identity capture {}",
+                        capture_path.display()
+                    )
+                });
+            }
+        };
+    if resolved_capture.parent() != Some(capture_directory) {
         anyhow::bail!(
             "runtime evidence identity capture {} is not in {}",
             resolved_capture.display(),
             capture_directory.display()
         );
     }
-    let product_root = load_runtime_evidence_product_root(&product_root_path)?;
+    let product_root = load_runtime_evidence_product_root(product_root_path)?;
     let trusted_root = product_root.verifying_key();
-    let bytes = read_runtime_evidence_private_file(&resolved_capture, 64 * 1024)?;
-    let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)
-        .context("runtime evidence identity capture is not valid JSON")?;
+    let capture: RuntimeEvidenceIdentityCapture =
+        match read_runtime_evidence_private_file(&resolved_capture, 64 * 1024) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("runtime evidence identity capture is not valid JSON")?,
+            Err(error) => {
+                let missing = error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound);
+                #[cfg(unix)]
+                let missing = missing
+                    || error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT);
+                if !missing
+                    || !matches!(
+                        std::fs::symlink_metadata(&resolved_capture),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound
+                    )
+                {
+                    return Err(error);
+                }
+                // Compaction persists the authenticated cold copy before
+                // retiring this leaf. This also handles retirement racing
+                // the read, without masking corrupt or unreadable hot files.
+                super::native_session_inventory::load_archived_runtime_evidence_identity(
+                    protected_state_root,
+                    &resolved_capture,
+                )?
+                .ok_or(error)
+                .context("runtime evidence identity is absent from hot and cold storage")?
+            }
+        };
     capture.verify_with_product_root(&trusted_root)?;
-    validate_host_effect_ledger(ledger, &capture.evidence_verification_identity)
-        .map_err(|error| anyhow::anyhow!(error))?;
     Ok(capture)
 }
 
@@ -10429,7 +10501,9 @@ impl EngineDispatcher {
 
         Self::resolve_commonjs_package_entry(
             dir,
-            manifest.as_ref().and_then(|manifest| manifest.main.as_deref()),
+            manifest
+                .as_ref()
+                .and_then(|manifest| manifest.main.as_deref()),
         )
     }
 
@@ -22422,6 +22496,145 @@ mod tests {
             tamper_error
                 .to_string()
                 .contains("signature verification failed")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn recorded_identity_survives_clean_session_compaction_without_trusting_hot_corruption() {
+        use crate::ops::native_session_inventory::{
+            NativeSessionAdmission, NativeSessionEffectObservation,
+            NativeSessionInventoryCompactRequest, NativeSessionInventoryGuard,
+            NativeSessionOutcomeKind, compact_native_session_inventory_at,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let product = temp.path().join("product");
+        let root = product.join("runtime-evidence");
+        let keys = root.join("keys");
+        let captures = root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+        for directory in [&product, &root, &keys, &captures] {
+            ensure_runtime_evidence_directory(directory, true).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let captures = captures.canonicalize().unwrap();
+        let root_key_path = root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH);
+        assert!(create_new_runtime_evidence_private_file(&root_key_path, &[0x52; 32]).unwrap());
+        let nonce = uuid::Uuid::now_v7().to_string();
+        let grant = runtime_evidence_grant_for_test(&nonce, [0x31; 32], [0x52; 32]);
+        let capture = grant.capture.clone();
+        let authority = grant.into_authority().unwrap();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "archived-identity-regression",
+            &[],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let (capture_path, capture_bytes) =
+            prepare_runtime_evidence_capture(&captures, &capture).unwrap();
+        assert!(create_new_runtime_evidence_private_file(&capture_path, &capture_bytes).unwrap());
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let entrypoint = project.join("app.js");
+        std::fs::write(&entrypoint, "console.log('retained');").unwrap();
+        let admission = NativeSessionAdmission {
+            session_nonce: nonce,
+            product_root_key_id: capture.product_root_key_id.clone(),
+            identity_capture_path: capture_path.clone(),
+            security_epoch: STANDARD_SECURITY_EPOCH,
+            admitted_at: Utc::now(),
+            project_root: project,
+            entrypoint,
+            dependency_ids: Vec::new(),
+            configured_node_id: None,
+            fleet_zone_id: None,
+            fleet_policy_sha256: None,
+            process_spawn_authority_granted: Some(false),
+            control_scopes: Some(Vec::new()),
+            source_capsule: None,
+        };
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::Completed,
+            NativeSessionEffectObservation::from_verified_ledger(Some(&ledger)),
+        );
+        drop(guard);
+        let load = || {
+            load_recorded_runtime_evidence_identity_at(
+                &root,
+                &root_key_path,
+                &captures,
+                &capture_path,
+            )
+        };
+        assert_eq!(load().unwrap(), capture);
+        let report = compact_native_session_inventory_at(
+            &root,
+            &NativeSessionInventoryCompactRequest {
+                archive_dir: Some(temp.path().join("export")),
+                max_sessions_to_archive: None,
+                finalize_orphaned_pending: false,
+                min_pending_age_secs: 0,
+                confirm: false,
+                operator_id: Some("identity-retention-test".to_owned()),
+                reason: Some("retain authenticated run evidence after compaction".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.archived_clean_sessions, 1);
+        assert!(
+            !capture_path.exists(),
+            "compaction really retired the hot identity"
+        );
+        let archived = load().unwrap();
+        assert_eq!(archived, capture);
+        validate_host_effect_ledger(&ledger, &archived.evidence_verification_identity).unwrap();
+        let mut altered_ledger = ledger.clone();
+        altered_ledger.trace_id.push_str("-tampered");
+        assert!(
+            validate_host_effect_ledger(&altered_ledger, &archived.evidence_verification_identity)
+                .is_err()
+        );
+
+        // A valid archive is not a fallback for corrupt present evidence.
+        assert!(create_new_runtime_evidence_private_file(&capture_path, b"not JSON").unwrap());
+        assert!(load().unwrap_err().to_string().contains("not valid JSON"));
+        assert!(
+            load_recorded_runtime_evidence_identity_at(
+                &root,
+                &root_key_path,
+                &captures,
+                &temp.path().join("outside.json"),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn missing_recorded_identity_does_not_follow_dangling_symlink_into_cold_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let captures = root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+        ensure_runtime_evidence_directory(&root, true).unwrap();
+        ensure_runtime_evidence_directory(&captures, true).unwrap();
+        let captures = captures.canonicalize().unwrap();
+        let alias = captures.join("alias.json");
+        std::os::unix::fs::symlink(captures.join("missing.json"), &alias).unwrap();
+        let error = load_recorded_runtime_evidence_identity_at(
+            &root,
+            &root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+            &captures,
+            &alias,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resolve runtime evidence identity capture")
         );
     }
 

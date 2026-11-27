@@ -1630,6 +1630,24 @@ seals authenticated clean sessions into an Ed25519-signed Merkle cold archive
 (`--finalize-orphaned-pending --confirm --operator-id <id> --reason <reason>`)
 without discarding incident evidence.
 
+New cold archives use `franken-node/native-session-cold-archive/v2` and retain
+each session's original product-signed runtime identity. Before retiring hot
+rows or sidecars, compaction writes, verifies and syncs both the operator's
+export and a private content-addressed copy in protected runtime evidence.
+Historical run-ledger authentication and incident capture can therefore use
+the retained identity even if the operator moves the exported archive.
+Forensic discovery merges authenticated hot and cold observations, checks
+remaining files after interrupted retirement, and reports conflicting or
+corrupt evidence. Archived sessions do not re-enter the live drain census.
+
+Archive files are limited to 64 MiB; use `--max-sessions` for smaller batches.
+Protected retention is also bounded and refuses overflow without retiring hot
+evidence. Legacy v1 archives remain independently verifiable, but cannot restore
+identities already discarded by older compaction. Neither archive version
+reconstructs original admission/outcome receipt signatures or certifies replay,
+quiescence or complete history. See the
+[cold-archive verification contract](sdk/verifier/NATIVE_SESSION_FORENSICS.md).
+
 ### Registry, bench, debug
 
 | Command | Purpose |
@@ -4719,7 +4737,7 @@ code, not a sandbox for running arbitrary verifier programs.
 |---|---|---|
 | `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
 | `native-session-forensics` | `authenticated_supervisor_observations`: original admission, retained journal, optional outcome and v3 source capsule, preserving pending/interrupted states | Original product-root signatures under an independently enrolled key; optional retained session/admission identity pins |
-| `native-session-cold-archive` | `authenticated_archived_supervisor_observations`: signed compaction-time observations and independently recomputed ordered Merkle population | Product-root archive signature; optional retained population root via `expected_archive_root_sha256`, `expectedArchiveRootSha256` or `--expected-archive-root-sha256` |
+| `native-session-cold-archive` | `authenticated_archived_supervisor_observations`: signed compaction-time observations and independently recomputed ordered Merkle population; v2 also authenticates each retained original runtime identity | Product-root archive and v2 identity signatures; optional retained population root via `expected_archive_root_sha256`, `expectedArchiveRootSha256` or `--expected-archive-root-sha256` |
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
 | `signed-session` | `authenticated_verification_session`: a sealed verification session's ordered steps and recorded verdict | Embedded Ed25519 signature checked under the caller's independent verifier key |

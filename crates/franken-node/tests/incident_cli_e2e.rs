@@ -3762,6 +3762,122 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
 
 #[cfg(feature = "engine")]
 #[test]
+fn native_incident_capture_and_coverage_survive_clean_session_compaction() {
+    use sha2::{Digest as _, Sha256};
+
+    let state_home = tempfile::tempdir().expect("isolated runtime evidence state");
+    let (workspace, run) = native_replay_workspace_with_arguments_in_state_home(
+        "console.log(6 * 7);\n",
+        "balanced",
+        true,
+        false,
+        &[],
+        Some(state_home.path()),
+    );
+    let receipt_id = run["receipt"]["receipt_id"]
+        .as_str()
+        .expect("native receipt id");
+    let capture_path = PathBuf::from(
+        run["dispatch"]["runtime_evidence_identity_capture_path"]
+            .as_str()
+            .expect("original protected runtime identity"),
+    );
+    assert!(capture_path.is_file());
+    let invoke = |args: &[&str]| {
+        run_cli_in_workspace_with_state_home(workspace.path(), args, Some(state_home.path()))
+    };
+    let archive_dir = state_home.path().join("operator-archive");
+    let compact = invoke(&[
+        "ops",
+        "session-inventory",
+        "compact",
+        "--archive-dir",
+        archive_dir.to_str().expect("archive path"),
+        "--max-sessions",
+        "1",
+        "--operator-id",
+        "incident-compaction-regression",
+        "--reason",
+        "retain recorded native execution after reclaiming hot admission capacity",
+        "--json",
+    ]);
+    assert!(compact.status.success(), "{compact:?}");
+    let compact: serde_json::Value = serde_json::from_slice(&compact.stdout).unwrap();
+    assert_eq!(compact["archived_clean_sessions"], 1);
+    assert_eq!(compact["after"]["retained_sessions"], 0);
+    assert!(
+        !capture_path.exists(),
+        "the original hot identity was actually retired"
+    );
+    let exported = PathBuf::from(compact["archive_path"].as_str().expect("archive export"));
+    let archive_bytes = fs::read(&exported).unwrap();
+    let archive: serde_json::Value = serde_json::from_slice(&archive_bytes).unwrap();
+    assert_eq!(
+        archive["schema_version"],
+        "franken-node/native-session-cold-archive/v2"
+    );
+    let protected_archive = PathBuf::from(
+        compact["inventory_root"]
+            .as_str()
+            .expect("protected runtime evidence root"),
+    )
+    .join("session-cold-archives")
+    .join(format!(
+        "{}.json",
+        hex::encode(Sha256::digest(&archive_bytes))
+    ));
+    assert_eq!(fs::read(&protected_archive).unwrap(), archive_bytes);
+    fs::rename(
+        exported,
+        state_home.path().join("moved-operator-export.json"),
+    )
+    .unwrap();
+
+    let coverage = invoke(&["ops", "incident-coverage", "--json"]);
+    assert!(coverage.status.success(), "{coverage:?}");
+    let coverage: serde_json::Value = serde_json::from_slice(&coverage.stdout).unwrap();
+    assert_eq!(coverage["authenticated_receipts"], 1, "{coverage}");
+    assert_eq!(coverage["inventory_runs"], 1, "{coverage}");
+    assert_eq!(coverage["population_authenticated"], true, "{coverage}");
+    assert_eq!(coverage["retained_population_complete"], true, "{coverage}");
+    assert_eq!(coverage["unresolved_native_sessions"], 0);
+    assert_eq!(
+        coverage["native_session_inventory"]["authenticated_admissions"],
+        1
+    );
+    assert_eq!(
+        coverage["native_session_inventory"]["reconciled_run_sessions"],
+        1
+    );
+    assert_eq!(coverage["historical_completeness"], false);
+    assert!(coverage["source_errors"].as_array().unwrap().is_empty());
+
+    let (bundle_name, bundle) =
+        capture_native_run_bundle_with(workspace.path(), receipt_id, |args| invoke(args));
+    assert_eq!(bundle["initial_state_snapshot"]["effect_count"], 0);
+    let replay = execute_native_replay_with(&bundle_name, |args| invoke(args));
+    assert!(replay.status.success(), "{replay:?}");
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["execution_result"]["matched"], true, "{replay}");
+
+    let mut tampered = archive;
+    tampered["reason"] = json!("edited after signature and content address were published");
+    fs::write(&protected_archive, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let rejected = invoke(&["ops", "incident-coverage", "--min-coverage", "1", "--json"]);
+    assert!(!rejected.status.success(), "{rejected:?}");
+    let rejected: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(rejected["population_authenticated"], false, "{rejected}");
+    assert_eq!(
+        rejected["retained_population_complete"], false,
+        "{rejected}"
+    );
+    assert!(!rejected["source_errors"].as_array().unwrap().is_empty());
+    let recapture = invoke(&["incident", "capture", "--from-run", receipt_id, "--json"]);
+    assert!(!recapture.status.success(), "{recapture:?}");
+}
+
+#[cfg(feature = "engine")]
+#[test]
 fn native_incident_replay_rejects_authenticated_wrong_outputs_and_unused_io() {
     use frankenengine_node::ops::native_replay::NativeReplayCapture;
 

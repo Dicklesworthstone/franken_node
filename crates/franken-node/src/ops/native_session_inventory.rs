@@ -770,17 +770,20 @@ impl NativeSessionForensicStatus {
 }
 
 /// Both admission identity and scope are authenticated before inclusion.
-/// An outcome appears only after its original supervisor receipt verifies.
+/// An outcome requires its original supervisor receipt or the product-signed
+/// cold archive that retained that authenticated observation before retirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSessionForensicRecord {
     pub admission: NativeSessionAdmission,
     pub outcome: Option<NativeSessionOutcome>,
     pub status: NativeSessionForensicStatus,
+    /// The signed admission receipt or authenticated cold archive containing it.
     pub admission_receipt_path: PathBuf,
+    /// The signed outcome receipt or authenticated cold archive containing it.
     pub outcome_receipt_path: Option<PathBuf>,
     /// The signed observation was absent from the database projection. This
-    /// field describes an in-memory read; inspection never repairs the store.
+    /// includes cold evidence; inspection never repairs or repopulates the store.
     pub outcome_recovered_from_receipt: bool,
     /// Independently authenticated provider observations never promote a
     /// pending launch to a terminal session or establish worker liveness.
@@ -845,6 +848,7 @@ pub enum NativeSessionForensicErrorKind {
     JournalInvalid,
     SourceCapsuleInvalid,
     IdentityInventoryInvalid,
+    ColdArchiveInvalid,
 }
 
 /// Source failures are separate from authenticated records. A nonce here is
@@ -1161,6 +1165,14 @@ fn verify_admission_capture_with_root(
     }
     let bytes = read_runtime_evidence_private_file(&admission.identity_capture_path, 64 * 1024)?;
     let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)?;
+    verify_capture_for_admission(admission, &capture, product_root)
+}
+
+fn verify_capture_for_admission(
+    admission: &NativeSessionAdmission,
+    capture: &RuntimeEvidenceIdentityCapture,
+    product_root: &ed25519_dalek::VerifyingKey,
+) -> Result<()> {
     capture.verify_with_product_root(product_root)?;
     if capture.session_nonce != admission.session_nonce
         || capture.product_root_key_id != admission.product_root_key_id
@@ -3138,12 +3150,12 @@ pub(crate) struct NativeSessionInventoryGuard {
     post_admit_usage: Option<(DatabaseStateFingerprint, usize, usize)>,
 }
 
-/// Deferred completion handle for an already-reaped native session. Allows the
-/// CLI `run` handler to coalesce `session-outcomes/` + `native-sessions.db`
-/// durability flushes with project-level receipt/ledger/evidence-ledger writes
-/// in a single `std::thread::scope`. Dropping this handle without calling
-/// [`Self::finalize`] still persists the exact completed observation
-/// synchronously so no early error or panic path can leave a session pending.
+/// Deferred completion handle for an already-reaped native session. The CLI
+/// retains its supervisor lease until project receipt, ledger, and incident
+/// consumers finish using the hot identity and admission evidence. Only then
+/// may finalization make the session eligible for compaction. Dropping this
+/// handle without calling [`Self::finalize`] still persists the exact completed
+/// observation synchronously on ordinary error and panic paths.
 #[must_use = "finalize or drop the deferred native-session finalizer to persist the outcome"]
 pub struct DeferredNativeSessionFinalizer {
     guard: NativeSessionInventoryGuard,
@@ -5630,6 +5642,143 @@ fn append_native_session_forensic_observation(
     Ok(())
 }
 
+fn validate_archived_hot_residue(
+    protected_root: &Path,
+    key: &ed25519_dalek::VerifyingKey,
+    entry: &NativeSessionColdArchiveEntry,
+    retained_bytes: &mut usize,
+) -> Result<Option<NativeSessionForensicJournal>> {
+    let admission = &entry.admission;
+    let body_path = admission_record_path(protected_root, &entry.session_nonce);
+    if validate_private_path_if_present(&body_path)? {
+        let body = read_runtime_evidence_private_file(&body_path, MAX_ADMISSION_BYTES)?;
+        *retained_bytes = retained_bytes.saturating_add(body.len());
+        if bounded_json(admission, MAX_ADMISSION_BYTES)?.as_bytes() != body.as_slice() {
+            bail!("retired hot admission body disagrees with its authenticated cold archive");
+        }
+    }
+    // Absence is expected after partial retirement. Every remaining signed
+    // receipt must still authenticate against the exact archived admission.
+    read_admission_receipt(protected_root, admission, key)?;
+    if let Some(receipt) = read_outcome_receipt(protected_root, admission, key)? {
+        *retained_bytes =
+            retained_bytes.saturating_add(bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len());
+        if receipt.outcome != entry.outcome {
+            bail!("retired hot outcome disagrees with its authenticated cold archive");
+        }
+    }
+    if validate_private_path_if_present(&admission.identity_capture_path)? {
+        let bytes =
+            read_runtime_evidence_private_file(&admission.identity_capture_path, 64 * 1024)?;
+        *retained_bytes = retained_bytes.saturating_add(bytes.len());
+        let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)?;
+        verify_capture_for_admission(admission, &capture, key)?;
+        if entry.identity_capture.as_ref() != Some(&capture) {
+            bail!("retired hot identity disagrees with its authenticated cold archive");
+        }
+    }
+    let journal =
+        read_retained_native_session_effect_journal(protected_root, &entry.session_nonce)?;
+    if let Some(journal) = &journal {
+        *retained_bytes = retained_bytes.saturating_add(journal.len());
+    }
+    if *retained_bytes > MAX_RESERVED_BYTES {
+        bail!("retired hot evidence exceeds the forensic aggregate byte bound");
+    }
+    journal
+        .map(|journal| {
+            frankenengine_verifier_sdk::native_session::verify_native_session_effect_journal(
+                journal.as_bytes(),
+                key,
+                &entry.session_nonce,
+                &admission_digest(admission)?,
+            )
+            .map(NativeSessionForensicJournal::from)
+            .map_err(anyhow::Error::from)
+        })
+        .transpose()
+}
+
+fn append_archived_forensic_observations(
+    protected_root: &Path,
+    key: &ed25519_dalek::VerifyingKey,
+    archived: RetainedColdArchiveEvidence,
+    admissions: &mut BTreeMap<String, NativeSessionAdmission>,
+    retained_bytes: &mut usize,
+    report: &mut NativeSessionForensicReport,
+) -> Result<()> {
+    let mut checked_sources = BTreeSet::new();
+    for (nonce, (path, entry)) in archived.entries {
+        if *retained_bytes > MAX_RESERVED_BYTES {
+            bail!("native-session forensic evidence exceeds the aggregate byte bound");
+        }
+        if let Some(hot_admission) = admissions.get(&nonce) {
+            if hot_admission != &entry.admission {
+                bail!("hot and archived native-session admissions disagree");
+            }
+            let hot_outcome = read_outcome_receipt(protected_root, hot_admission, key)?.context(
+                "archived native session has a hot admission without its signed outcome",
+            )?;
+            if hot_outcome.outcome != entry.outcome {
+                bail!("hot and archived native-session outcomes disagree");
+            }
+            let capture_bytes = read_runtime_evidence_private_file(
+                &hot_admission.identity_capture_path,
+                64 * 1024,
+            )?;
+            let hot_capture: RuntimeEvidenceIdentityCapture =
+                serde_json::from_slice(&capture_bytes)?;
+            if entry.identity_capture.as_ref() != Some(&hot_capture) {
+                bail!("hot and archived native-session identities disagree");
+            }
+            // A crash after archive publication but before hot retirement may
+            // leave both exact copies. Preserve one original hot observation,
+            // including any existing projection or journal diagnostics.
+            continue;
+        }
+        admissions.insert(nonce, entry.admission.clone());
+        if report
+            .project_root
+            .as_ref()
+            .is_some_and(|project| !entry.admission.belongs_to_control_scope(project))
+        {
+            continue;
+        }
+        let durable_journal =
+            match validate_archived_hot_residue(protected_root, key, &entry, retained_bytes) {
+                Ok(journal) => journal,
+                Err(error) => {
+                    report.source_errors.push(forensic_source_error(
+                        Some(&entry.session_nonce),
+                        path.clone(),
+                        NativeSessionForensicErrorKind::ColdArchiveInvalid,
+                        format!("{error:#}"),
+                    ));
+                    None
+                }
+            };
+        if let Some(source) = &entry.admission.source_capsule
+            && checked_sources.insert(source.capsule_digest.clone())
+        {
+            *retained_bytes = retained_bytes.saturating_add(source.capsule_bytes);
+            if *retained_bytes > MAX_RESERVED_BYTES {
+                bail!("native-session forensic sources exceed the aggregate byte bound");
+            }
+            read_retained_native_session_source_capsule(protected_root, &entry.admission)?;
+        }
+        report.records.push(NativeSessionForensicRecord {
+            admission: entry.admission,
+            outcome: Some(entry.outcome),
+            status: NativeSessionForensicStatus::TerminalObservation,
+            admission_receipt_path: path.clone(),
+            outcome_receipt_path: Some(path),
+            outcome_recovered_from_receipt: true,
+            durable_journal,
+        });
+    }
+    Ok(())
+}
+
 fn read_native_session_forensics_at(
     protected_root: &Path,
     project_root: Option<&Path>,
@@ -5674,6 +5823,18 @@ fn read_native_session_forensics_at(
     )?;
     let key = root.verifying_key();
     drop(root);
+    let archived = match read_retained_cold_archives(protected_root, &key) {
+        Ok(archived) => archived,
+        Err(error) => {
+            report.source_errors.push(forensic_source_error(
+                None,
+                protected_root.join(COLD_ARCHIVE_DIRECTORY),
+                NativeSessionForensicErrorKind::ColdArchiveInvalid,
+                format!("{error:#}"),
+            ));
+            RetainedColdArchiveEvidence::default()
+        }
+    };
     let mut admissions = BTreeMap::new();
     let inventory = (|| -> Result<Option<Connection>> {
         match std::fs::symlink_metadata(&report.database_path) {
@@ -5806,12 +5967,14 @@ fn read_native_session_forensics_at(
             match read_optional_forensic_projection(connection, nonce) {
                 Ok(Some(projection)) => Some(projection),
                 Ok(None) => {
-                    report.source_errors.push(forensic_source_error(
-                        Some(nonce),
-                        report.database_path.clone(),
-                        NativeSessionForensicErrorKind::InventoryUnreadable,
-                        "retained native-session admission has no database projection",
-                    ));
+                    if !archived.entries.contains_key(nonce) {
+                        report.source_errors.push(forensic_source_error(
+                            Some(nonce),
+                            report.database_path.clone(),
+                            NativeSessionForensicErrorKind::InventoryUnreadable,
+                            "retained native-session admission has no database projection",
+                        ));
+                    }
                     None
                 }
                 Err(error) => {
@@ -5858,6 +6021,12 @@ fn read_native_session_forensics_at(
         } else {
             continue;
         };
+        if projection.is_none() && archived.entries.contains_key(nonce) {
+            // The signed cold copy explains this exact row's retirement.
+            // Validate any residual hot files in the archive pass below;
+            // missing originals must not be fabricated or required again.
+            continue;
+        }
         let (admission, receipt, projected_outcome, outcome_within_bound) = match projection {
             Some((admission_value, projected_outcome, outcome_within_bound)) => {
                 let json_bytes = |value: &SqliteValue| match value {
@@ -5945,6 +6114,21 @@ fn read_native_session_forensics_at(
         if retained_bytes > MAX_RESERVED_BYTES {
             break;
         }
+    }
+    if let Err(error) = append_archived_forensic_observations(
+        protected_root,
+        &key,
+        archived,
+        &mut admissions,
+        &mut retained_bytes,
+        &mut report,
+    ) {
+        report.source_errors.push(forensic_source_error(
+            None,
+            protected_root.join(COLD_ARCHIVE_DIRECTORY),
+            NativeSessionForensicErrorKind::ColdArchiveInvalid,
+            format!("{error:#}"),
+        ));
     }
     report.records.sort_by(|left, right| {
         left.admission
@@ -6861,9 +7045,18 @@ pub const NATIVE_SESSION_INVENTORY_STATUS_SCHEMA: &str =
     "franken-node/ops-session-inventory-status/v1";
 pub const NATIVE_SESSION_INVENTORY_COMPACT_SCHEMA: &str =
     "franken-node/ops-session-inventory-compact/v1";
-pub const NATIVE_SESSION_COLD_ARCHIVE_SCHEMA: &str = "franken-node/native-session-cold-archive/v1";
+pub const NATIVE_SESSION_COLD_ARCHIVE_SCHEMA: &str = "franken-node/native-session-cold-archive/v2";
+const NATIVE_SESSION_COLD_ARCHIVE_V1_SCHEMA: &str = "franken-node/native-session-cold-archive/v1";
+const COLD_ARCHIVE_DIRECTORY: &str = "session-cold-archives";
+const MAX_RETAINED_COLD_ARCHIVES: usize = MAX_STORED_SESSIONS;
+const MAX_RETAINED_COLD_ARCHIVE_SESSIONS: usize = MAX_IDENTITY_CAPTURES;
+const MAX_RETAINED_COLD_ARCHIVE_BYTES: usize = MAX_RETAINED_ADMISSION_BYTES;
+const MAX_COLD_ARCHIVE_BYTES: usize =
+    frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES;
 const NATIVE_SESSION_COLD_ARCHIVE_LEAF_DOMAIN: &[u8] =
     b"franken-node/native-session-cold-archive-leaf/v1\0";
+const NATIVE_SESSION_COLD_ARCHIVE_V2_LEAF_DOMAIN: &[u8] =
+    b"franken-node/native-session-cold-archive-leaf/v2\0";
 const NATIVE_SESSION_COLD_ARCHIVE_NODE_DOMAIN: &[u8] =
     b"franken-node/native-session-cold-archive-node/v1\0";
 const NATIVE_SESSION_COLD_ARCHIVE_SIG_DOMAIN: &[u8] =
@@ -6908,6 +7101,23 @@ pub struct NativeSessionColdArchiveEntry {
     pub leaf_sha256: String,
     pub admission: NativeSessionAdmission,
     pub outcome: NativeSessionOutcome,
+    /// The original product-signed engine identity is required by v2. Legacy
+    /// v1 archives remain verifiable but cannot reconstruct a retired identity.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_cold_archive_identity"
+    )]
+    pub identity_capture: Option<RuntimeEvidenceIdentityCapture>,
+}
+
+fn deserialize_cold_archive_identity<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<RuntimeEvidenceIdentityCapture>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    RuntimeEvidenceIdentityCapture::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6956,17 +7166,27 @@ fn is_clean_completed_outcome(outcome: &NativeSessionOutcome) -> bool {
 fn cold_archive_leaf_sha256(
     admission: &NativeSessionAdmission,
     outcome: &NativeSessionOutcome,
+    identity_capture: Option<&RuntimeEvidenceIdentityCapture>,
 ) -> Result<String> {
     let admission_bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
     let outcome_bytes = bounded_json(outcome, MAX_OUTCOME_BYTES)?;
     let mut hash = Sha256::new();
-    hash.update(NATIVE_SESSION_COLD_ARCHIVE_LEAF_DOMAIN);
+    hash.update(if identity_capture.is_some() {
+        NATIVE_SESSION_COLD_ARCHIVE_V2_LEAF_DOMAIN
+    } else {
+        NATIVE_SESSION_COLD_ARCHIVE_LEAF_DOMAIN
+    });
     hash.update(u64::try_from(admission.session_nonce.len())?.to_be_bytes());
     hash.update(admission.session_nonce.as_bytes());
     hash.update(u64::try_from(admission_bytes.len())?.to_be_bytes());
     hash.update(admission_bytes.as_bytes());
     hash.update(u64::try_from(outcome_bytes.len())?.to_be_bytes());
     hash.update(outcome_bytes.as_bytes());
+    if let Some(capture) = identity_capture {
+        let capture_bytes = bounded_json(capture, 64 * 1024)?;
+        hash.update(u64::try_from(capture_bytes.len())?.to_be_bytes());
+        hash.update(capture_bytes.as_bytes());
+    }
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -7028,13 +7248,18 @@ pub fn verify_native_session_cold_archive(
     bundle: &NativeSessionColdArchiveBundle,
     expected_verifying_key: &ed25519_dalek::VerifyingKey,
 ) -> Result<()> {
-    if bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA {
+    if bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA
+        && bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_V1_SCHEMA
+    {
         bail!("unsupported native-session cold archive schema version");
     }
     if bundle.operator_id.trim().is_empty() || bundle.reason.trim().is_empty() {
         bail!("native-session cold archive requires non-empty operator_id and reason");
     }
-    if bundle.session_count != bundle.entries.len() || bundle.entries.is_empty() {
+    if bundle.session_count != bundle.entries.len()
+        || bundle.entries.is_empty()
+        || bundle.entries.len() > MAX_STORED_SESSIONS
+    {
         bail!("native-session cold archive session_count does not match entries");
     }
     let expected_key_hex = hex::encode(expected_verifying_key.as_bytes());
@@ -7054,7 +7279,15 @@ pub fn verify_native_session_cold_archive(
         if !is_clean_completed_outcome(&entry.outcome) {
             bail!("native-session cold archive contains non-clean session outcome");
         }
-        let recomputed_leaf = cold_archive_leaf_sha256(&entry.admission, &entry.outcome)?;
+        let capture = match (&*bundle.schema_version, &entry.identity_capture) {
+            (NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, Some(capture)) => {
+                verify_capture_for_admission(&entry.admission, capture, expected_verifying_key)?;
+                Some(capture)
+            }
+            (NATIVE_SESSION_COLD_ARCHIVE_V1_SCHEMA, None) => None,
+            _ => bail!("native-session cold archive identity does not match its schema version"),
+        };
+        let recomputed_leaf = cold_archive_leaf_sha256(&entry.admission, &entry.outcome, capture)?;
         if !crate::security::constant_time::ct_eq(&entry.leaf_sha256, &recomputed_leaf) {
             bail!(
                 "native-session cold archive leaf digest mismatch for {}",
@@ -7078,6 +7311,271 @@ pub fn verify_native_session_cold_archive(
         .verify_strict(&cold_archive_signature_preimage(bundle)?, &signature)
         .context("native-session cold archive Ed25519 signature verification failed")?;
     Ok(())
+}
+
+#[derive(Default)]
+struct RetainedColdArchiveEvidence {
+    entries: BTreeMap<String, (PathBuf, NativeSessionColdArchiveEntry)>,
+    archived_sessions: usize,
+}
+
+fn retained_cold_archive_path(protected_root: &Path, bytes: &[u8]) -> PathBuf {
+    protected_root
+        .join(COLD_ARCHIVE_DIRECTORY)
+        .join(format!("{}.json", hex::encode(Sha256::digest(bytes))))
+}
+
+/// Cold evidence belongs to forensic discovery only. It must never re-enter
+/// the hot admission, lease, drain, or effect-accounting population.
+fn read_retained_cold_archives(
+    protected_root: &Path,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<RetainedColdArchiveEvidence> {
+    let directory = protected_root.join(COLD_ARCHIVE_DIRECTORY);
+    match std::fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RetainedColdArchiveEvidence::default());
+        }
+        Err(error) => return Err(error).context("inspect retained native-session cold archives"),
+        Ok(_) => validate_existing_forensic_directory(&directory)?,
+    }
+    let mut paths = std::fs::read_dir(&directory)?
+        .take(MAX_RETAINED_COLD_ARCHIVES + 1)
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if paths.len() > MAX_RETAINED_COLD_ARCHIVES {
+        bail!("retained native-session cold archives exceed their file bound");
+    }
+    paths.sort();
+    let mut evidence = RetainedColdArchiveEvidence::default();
+    let mut retained_bytes = 0usize;
+    let mut capture_owners = BTreeMap::new();
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    for path in paths {
+        let bytes = read_runtime_evidence_private_file(&path, MAX_COLD_ARCHIVE_BYTES)?;
+        retained_bytes = retained_bytes.saturating_add(bytes.len());
+        if retained_bytes > MAX_RETAINED_COLD_ARCHIVE_BYTES {
+            bail!("retained native-session cold archives exceed their aggregate byte bound");
+        }
+        if path != retained_cold_archive_path(protected_root, &bytes) {
+            bail!("retained native-session cold archive does not match its content address");
+        }
+        let bundle: NativeSessionColdArchiveBundle = serde_json::from_slice(&bytes)
+            .context("decode retained native-session cold archive")?;
+        verify_native_session_cold_archive(&bundle, key)?;
+        if bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA {
+            bail!(
+                "legacy native-session cold archive has no retained engine identities; forensic coverage is incomplete"
+            );
+        }
+        evidence.archived_sessions = evidence
+            .archived_sessions
+            .saturating_add(bundle.entries.len());
+        if evidence.archived_sessions > MAX_RETAINED_COLD_ARCHIVE_SESSIONS {
+            bail!("retained native-session cold archives exceed their session bound");
+        }
+        for entry in bundle.entries {
+            if entry.admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
+                bail!("archived native-session capture is outside its protected capture directory");
+            }
+            if let Some(owner) = capture_owners.insert(
+                entry.admission.identity_capture_path.clone(),
+                entry.session_nonce.clone(),
+            ) && owner != entry.session_nonce
+            {
+                bail!("retained native-session cold archives disagree on capture ownership");
+            }
+            match evidence.entries.get(&entry.session_nonce) {
+                Some((_, previous)) if previous != &entry => {
+                    bail!(
+                        "retained native-session cold archives contain conflicting session evidence"
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    evidence
+                        .entries
+                        .insert(entry.session_nonce.clone(), (path.clone(), entry));
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+/// Restore the exact public identity retained before hot-evidence retirement.
+/// The caller must first establish that the original capture is absent; an
+/// archive must never conceal an invalid or contradictory present capture.
+pub(crate) fn load_archived_runtime_evidence_identity(
+    protected_root: &Path,
+    capture_path: &Path,
+) -> Result<Option<RuntimeEvidenceIdentityCapture>> {
+    if let Some(product_root) = protected_root.parent() {
+        validate_existing_forensic_directory(product_root)?;
+    }
+    validate_existing_forensic_directory(protected_root)?;
+    validate_existing_forensic_directory(&protected_root.join("keys"))?;
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    validate_existing_forensic_directory(&capture_directory)?;
+    if capture_path.parent() != Some(capture_directory.as_path()) {
+        bail!("archived runtime evidence capture is outside its protected capture directory");
+    }
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let key = root.verifying_key();
+    drop(root);
+    let evidence = read_retained_cold_archives(protected_root, &key)?;
+    Ok(evidence
+        .entries
+        .into_values()
+        .find(|(_, entry)| entry.admission.identity_capture_path == capture_path)
+        .and_then(|(_, entry)| entry.identity_capture))
+}
+
+fn sync_retained_cold_archive(protected_root: &Path, path: &Path) -> Result<()> {
+    let archive_directory = protected_root.join(COLD_ARCHIVE_DIRECTORY);
+    if path.parent() != Some(archive_directory.as_path()) {
+        bail!("native-session cold archive durability path is outside protected retention");
+    }
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        std::fs::File::from(open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // FlushFileBuffers requires a writable handle. Opening the reparse
+        // point itself preserves the same metadata refusal as private reads.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(0x0020_0000)
+            .share_mode(0x0000_0003)
+            .open(path)?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    validate_runtime_evidence_private_file_metadata(path, &file.metadata()?)?;
+    file.sync_all()
+        .context("sync retained native-session cold archive")?;
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags, open};
+        // The archive directory may itself be newly created. Persist both
+        // namespace entries before hot retirement, including retries that
+        // encounter a file published before an earlier directory-sync error.
+        for directory in [archive_directory, protected_root.to_path_buf()] {
+            let file = std::fs::File::from(open(
+                &directory,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            file.sync_all()
+                .context("sync native-session cold archive directory")?;
+        }
+    }
+    Ok(())
+}
+
+fn retain_cold_archive(
+    protected_root: &Path,
+    bytes: &[u8],
+    bundle: &NativeSessionColdArchiveBundle,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<PathBuf> {
+    use std::io::Write as _;
+
+    if bytes.len() > MAX_COLD_ARCHIVE_BYTES
+        || bundle.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA
+    {
+        bail!("retaining a native-session cold archive requires bounded v2 identity evidence");
+    }
+    verify_native_session_cold_archive(bundle, key)?;
+    let decoded: NativeSessionColdArchiveBundle = serde_json::from_slice(bytes)?;
+    if &decoded != bundle {
+        bail!("native-session cold archive bytes disagree with the verified bundle");
+    }
+    let directory = protected_root.join(COLD_ARCHIVE_DIRECTORY);
+    ensure_runtime_evidence_directory(&directory, true)?;
+    let existing = read_retained_cold_archives(protected_root, key)?;
+    let path = retained_cold_archive_path(protected_root, bytes);
+    if validate_private_path_if_present(&path)? {
+        if read_runtime_evidence_private_file(&path, MAX_COLD_ARCHIVE_BYTES)?.as_slice() != bytes {
+            bail!("retained native-session cold archive content-address collision");
+        }
+        sync_retained_cold_archive(protected_root, &path)?;
+        return Ok(path);
+    }
+    if existing
+        .archived_sessions
+        .saturating_add(bundle.entries.len())
+        > MAX_RETAINED_COLD_ARCHIVE_SESSIONS
+    {
+        bail!("retained native-session cold archives exceed their session bound");
+    }
+    let capture_owners: BTreeMap<_, _> = existing
+        .entries
+        .values()
+        .map(|(_, entry)| (&entry.admission.identity_capture_path, &entry.session_nonce))
+        .collect();
+    for entry in &bundle.entries {
+        if let Some((_, previous)) = existing.entries.get(&entry.session_nonce)
+            && previous != entry
+        {
+            bail!("new native-session cold archive conflicts with retained session evidence");
+        }
+        if let Some(owner) = capture_owners.get(&entry.admission.identity_capture_path)
+            && **owner != entry.session_nonce
+        {
+            bail!("new native-session cold archive conflicts with retained capture ownership");
+        }
+    }
+    check_private_directory_capacity(
+        &directory,
+        1,
+        bytes.len(),
+        MAX_RETAINED_COLD_ARCHIVES,
+        MAX_RETAINED_COLD_ARCHIVE_BYTES,
+        "cold archive",
+        "cold archives",
+    )?;
+    // Stage outside the discovery directory so readers never mistake a
+    // partially written temporary file for an authenticated archive.
+    let mut staged = tempfile::NamedTempFile::new_in(protected_root)
+        .context("stage retained native-session cold archive")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        staged
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(&path)
+        .map_err(|error| error.error)
+        .context("persist retained native-session cold archive")?;
+    let retained = read_runtime_evidence_private_file(&path, MAX_COLD_ARCHIVE_BYTES)?;
+    if retained.as_slice() != bytes {
+        bail!("retained native-session cold archive changed before hot-evidence retirement");
+    }
+    let verified: NativeSessionColdArchiveBundle = serde_json::from_slice(&retained)?;
+    verify_native_session_cold_archive(&verified, key)?;
+    if &verified != bundle {
+        bail!("retained native-session cold archive differs from the authenticated observation");
+    }
+    sync_retained_cold_archive(protected_root, &path)?;
+    Ok(path)
 }
 
 fn inspect_status_in_tx(
@@ -7216,6 +7714,44 @@ pub fn inspect_native_session_inventory_status_at(
     })
 }
 
+fn validate_cold_archive_export_directory(protected_root: &Path, directory: &Path) -> Result<()> {
+    fn prospective_canonical_path(path: &Path) -> Result<PathBuf> {
+        let absolute = std::path::absolute(path)?;
+        let mut ancestor = absolute.as_path();
+        let mut missing = Vec::new();
+        loop {
+            match ancestor.canonicalize() {
+                Ok(mut resolved) => {
+                    for component in missing.into_iter().rev() {
+                        resolved.push(component);
+                    }
+                    return Ok(resolved);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(
+                        ancestor
+                            .file_name()
+                            .context("archive directory has an unresolved noncanonical ancestor")?
+                            .to_os_string(),
+                    );
+                    ancestor = ancestor
+                        .parent()
+                        .context("archive directory has no resolvable parent")?;
+                }
+                Err(error) => {
+                    return Err(error).context("resolve native-session archive directory");
+                }
+            }
+        }
+    }
+
+    let retained = prospective_canonical_path(protected_root)?.join(COLD_ARCHIVE_DIRECTORY);
+    if prospective_canonical_path(directory)?.starts_with(&retained) {
+        bail!("operator archive export directory overlaps protected native-session cold retention");
+    }
+    Ok(())
+}
+
 /// Compact native-session inventory capacity without silently discarding
 /// incident, failed, panicked, denied-effect, or active session evidence:
 /// 1. Recovers any already-signed `session-outcomes/` receipts.
@@ -7262,6 +7798,11 @@ pub fn compact_native_session_inventory_at(
              finalization records honest SupervisionIncomplete/Unknown outcomes and never \
              marks orphaned sessions as cleanly completed"
         );
+    }
+    if let Some(directory) = &request.archive_dir {
+        // Check missing destinations through their nearest existing ancestor
+        // before creating directories or publishing any operator-named file.
+        validate_cold_archive_export_directory(protected_root, directory)?;
     }
 
     let before = inspect_native_session_inventory_status_at(protected_root)?;
@@ -7457,6 +7998,7 @@ pub fn compact_native_session_inventory_at(
                 archive_dir.display()
             )
         })?;
+        validate_cold_archive_export_directory(protected_root, archive_dir)?;
         let all_records = retry_snapshot_conflict(|| {
             let connection = open_inventory_unlocked(protected_root, false)?
                 .context("native-session inventory disappeared before cold-archive scan")?;
@@ -7512,13 +8054,22 @@ pub fn compact_native_session_inventory_at(
                 // historical admissions; no synthetic outcome is inferred here.
                 supervisor_lease::Probe::Unproven => {}
             }
-            let leaf_sha256 = cold_archive_leaf_sha256(&record.admission, &outcome)?;
+            let capture_bytes = read_runtime_evidence_private_file(
+                &record.admission.identity_capture_path,
+                64 * 1024,
+            )?;
+            let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&capture_bytes)
+                .context("decode native-session identity before cold archiving")?;
+            verify_capture_for_admission(&record.admission, &capture, &verifying_key)?;
+            let leaf_sha256 =
+                cold_archive_leaf_sha256(&record.admission, &outcome, Some(&capture))?;
             leaves.push(leaf_sha256.clone());
             entries.push(NativeSessionColdArchiveEntry {
                 session_nonce: record.admission.session_nonce.clone(),
                 leaf_sha256,
                 admission: record.admission,
                 outcome,
+                identity_capture: Some(capture),
             });
         }
         if !entries.is_empty() {
@@ -7541,6 +8092,9 @@ pub fn compact_native_session_inventory_at(
 
             let encoded = serde_json::to_vec_pretty(&bundle)
                 .context("serialize native-session cold archive bundle")?;
+            if encoded.len() > MAX_COLD_ARCHIVE_BYTES {
+                bail!("native-session cold archive exceeds its retained byte bound");
+            }
             let file_name = format!(
                 "native-session-archive-{}-{}.json",
                 archived_at.format("%Y%m%dT%H%M%SZ"),
@@ -7571,16 +8125,32 @@ pub fn compact_native_session_inventory_at(
             std::fs::File::open(archive_dir)?.sync_all()?;
 
             // Re-read and independently verify the persisted archive before deleting any DB rows.
-            let persisted_bytes = std::fs::read(&final_path).with_context(|| {
-                format!(
-                    "read back persisted native-session cold archive {}",
-                    final_path.display()
-                )
-            })?;
+            let persisted_bytes =
+                read_runtime_evidence_private_file(&final_path, MAX_COLD_ARCHIVE_BYTES)
+                    .with_context(|| {
+                        format!(
+                            "read back persisted native-session cold archive {}",
+                            final_path.display()
+                        )
+                    })?;
             let verified_bundle: NativeSessionColdArchiveBundle =
                 serde_json::from_slice(&persisted_bytes)
                     .context("decode persisted native-session cold archive for verification")?;
             verify_native_session_cold_archive(&verified_bundle, &verifying_key)?;
+            if verified_bundle != bundle {
+                bail!(
+                    "persisted native-session cold archive changed before hot-evidence retirement"
+                );
+            }
+            // The operator's export directory may disappear or be moved. Keep
+            // a bounded, content-addressed copy in protected runtime evidence,
+            // durably published and reverified before removing any hot input.
+            retain_cold_archive(
+                protected_root,
+                &persisted_bytes,
+                &verified_bundle,
+                &verifying_key,
+            )?;
 
             let archived_sessions: Vec<(String, PathBuf)> = verified_bundle
                 .entries
@@ -14360,7 +14930,22 @@ mod tests {
             "unexpected untracked identity captures after compaction: {:?}",
             forensics.untracked_identity_captures
         );
-        assert_eq!(forensics.records.len(), 2);
+        assert_eq!(forensics.records.len(), 3);
+        let archived = forensics
+            .records
+            .iter()
+            .find(|record| record.admission.session_nonce == clean_adm.session_nonce)
+            .expect("archived clean session remains discoverable for incident coverage");
+        assert_eq!(archived.admission, clean_adm);
+        assert!(archived.outcome_recovered_from_receipt);
+        assert!(!clean_adm.identity_capture_path.exists());
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &clean_adm.identity_capture_path)
+                .unwrap()
+                .unwrap()
+                .session_nonce,
+            clean_adm.session_nonce,
+        );
 
         let archive_path = report.archive_path.expect("archive path emitted");
         let raw = std::fs::read(&archive_path).unwrap();
@@ -14369,10 +14954,425 @@ mod tests {
             load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
                 .unwrap();
         verify_native_session_cold_archive(&bundle, &root_key.verifying_key()).unwrap();
+        let portable =
+            frankenengine_verifier_sdk::native_session::verify_native_session_cold_archive(
+                &raw,
+                &root_key.verifying_key(),
+            )
+            .unwrap();
+        assert_eq!(portable.session_count, 1);
+        assert_eq!(portable.identity_captures_verified, 1);
+        assert!(!portable.replay_certified);
+        assert!(!portable.original_receipt_signatures_verified);
 
         // Tampering 1 byte in reason or entry must fail closed.
         bundle.reason.push('!');
         assert!(verify_native_session_cold_archive(&bundle, &root_key.verifying_key()).is_err());
+    }
+
+    fn reseal_test_cold_archive(root: &Path, bundle: &mut NativeSessionColdArchiveBundle) {
+        use ed25519_dalek::Signer as _;
+
+        let root_key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap();
+        for entry in &mut bundle.entries {
+            entry.leaf_sha256 = cold_archive_leaf_sha256(
+                &entry.admission,
+                &entry.outcome,
+                entry.identity_capture.as_ref(),
+            )
+            .unwrap();
+        }
+        bundle.session_count = bundle.entries.len();
+        bundle.merkle_root_sha256 = compute_cold_archive_merkle_root(
+            &bundle
+                .entries
+                .iter()
+                .map(|entry| entry.leaf_sha256.clone())
+                .collect::<Vec<_>>(),
+        );
+        bundle.signing_public_key_hex = hex::encode(root_key.verifying_key().as_bytes());
+        bundle.signature_hex = hex::encode(
+            root_key
+                .sign(&cold_archive_signature_preimage(bundle).unwrap())
+                .to_bytes(),
+        );
+    }
+
+    fn clean_test_cold_archive(
+        root: &Path,
+        marker: u8,
+    ) -> (NativeSessionAdmission, NativeSessionColdArchiveBundle) {
+        let admission = fixture(root, marker);
+        let mut guard = NativeSessionInventoryGuard::admit(root, admission.clone(), 0).unwrap();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::Completed,
+            clean_compaction_ledger_observation(),
+        );
+        drop(guard);
+        let inventory = read_inventory_at(root, None).unwrap();
+        let outcome = inventory
+            .records
+            .iter()
+            .find(|record| record.admission.session_nonce == admission.session_nonce)
+            .unwrap()
+            .outcome
+            .clone()
+            .unwrap();
+        let capture: RuntimeEvidenceIdentityCapture =
+            serde_json::from_slice(&std::fs::read(&admission.identity_capture_path).unwrap())
+                .unwrap();
+        let mut bundle = NativeSessionColdArchiveBundle {
+            schema_version: NATIVE_SESSION_COLD_ARCHIVE_SCHEMA.to_owned(),
+            archived_at: Utc::now(),
+            operator_id: "archive-regression".to_owned(),
+            reason: "retain exact public identity and authenticated observations".to_owned(),
+            session_count: 1,
+            merkle_root_sha256: String::new(),
+            signing_public_key_hex: String::new(),
+            signature_hex: String::new(),
+            entries: vec![NativeSessionColdArchiveEntry {
+                session_nonce: admission.session_nonce.clone(),
+                leaf_sha256: String::new(),
+                admission: admission.clone(),
+                outcome,
+                identity_capture: Some(capture),
+            }],
+        };
+        reseal_test_cold_archive(root, &mut bundle);
+        (admission, bundle)
+    }
+
+    #[test]
+    fn compact_keeps_identity_and_forensics_when_operator_export_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, original) = clean_test_cold_archive(&root, 92);
+        let expected_capture = original.entries[0].identity_capture.clone().unwrap();
+        let compact = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(temp.path().join("operator-archive")), false),
+        )
+        .unwrap();
+        assert_eq!(compact.archived_clean_sessions, 1);
+        assert_eq!(compact.after.retained_sessions, 0);
+        assert!(!admission.identity_capture_path.exists());
+        assert!(!admission_record_path(&root, &admission.session_nonce).exists());
+        std::fs::rename(
+            compact.archive_path.unwrap(),
+            temp.path().join("moved-operator-export.json"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &admission.identity_capture_path)
+                .unwrap(),
+            Some(expected_capture),
+        );
+        let forensics =
+            read_native_session_forensics_at(&root, Some(&admission.project_root)).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "{:?}",
+            forensics.source_errors
+        );
+        assert!(forensics.untracked_identity_captures.is_empty());
+        assert_eq!(forensics.records.len(), 1);
+        assert_eq!(forensics.records[0].admission, admission);
+        assert_eq!(
+            forensics.records[0].outcome,
+            Some(original.entries[0].outcome.clone())
+        );
+        assert!(!forensics.replay_certified);
+        assert!(!forensics.quiescence_certified);
+        assert!(read_inventory_at(&root, None).unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn cold_archive_tamper_and_missing_copy_never_reconstruct_an_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, _) = clean_test_cold_archive(&root, 93);
+        let compact = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(temp.path().join("operator-archive")), false),
+        )
+        .unwrap();
+        let bytes = std::fs::read(compact.archive_path.unwrap()).unwrap();
+        let retained = retained_cold_archive_path(&root, &bytes);
+        let mut tampered = bytes.clone();
+        tampered.push(b' ');
+        std::fs::write(&retained, tampered).unwrap();
+        assert!(
+            load_archived_runtime_evidence_identity(&root, &admission.identity_capture_path)
+                .is_err()
+        );
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics
+                .source_errors
+                .iter()
+                .any(|error| { error.kind == NativeSessionForensicErrorKind::ColdArchiveInvalid })
+        );
+
+        std::fs::write(&retained, &bytes).unwrap();
+        std::fs::rename(&retained, temp.path().join("missing-protected-copy.json")).unwrap();
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &admission.identity_capture_path)
+                .unwrap(),
+            None,
+        );
+        // The still-retained project run receipt will now fail identity
+        // authentication; absence never fabricates an archived admission.
+        assert!(
+            read_native_session_forensics_at(&root, None)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert!(
+            load_archived_runtime_evidence_identity(
+                &root,
+                &temp.path().join("outside-capture.json"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cold_archive_merges_exact_hot_observations_but_rejects_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, mut bundle) = clean_test_cold_archive(&root, 94);
+        let key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap()
+                .verifying_key();
+        let bytes = serde_json::to_vec_pretty(&bundle).unwrap();
+        let retained = retain_cold_archive(&root, &bytes, &bundle, &key).unwrap();
+        assert_eq!(
+            retain_cold_archive(&root, &bytes, &bundle, &key).unwrap(),
+            retained,
+            "retrying an already-published archive must complete the same durability barrier",
+        );
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "{:?}",
+            forensics.source_errors
+        );
+        assert_eq!(forensics.records.len(), 1);
+        assert_eq!(forensics.records[0].admission, admission);
+        assert!(!forensics.records[0].outcome_recovered_from_receipt);
+        assert_eq!(read_inventory_at(&root, None).unwrap().records.len(), 1);
+
+        bundle.entries[0].outcome.observed_at += chrono::Duration::seconds(1);
+        reseal_test_cold_archive(&root, &mut bundle);
+        let conflicting = serde_json::to_vec_pretty(&bundle).unwrap();
+        assert!(retain_cold_archive(&root, &conflicting, &bundle, &key).is_err());
+
+        // Model a separately signed contradictory retained archive, not an
+        // unauthenticated byte mutation. It must not replace hot authority.
+        std::fs::rename(&retained, temp.path().join("original-cold-copy.json")).unwrap();
+        create_new_runtime_evidence_private_file(
+            &retained_cold_archive_path(&root, &conflicting),
+            &conflicting,
+        )
+        .unwrap();
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert_eq!(forensics.records.len(), 1);
+        assert!(
+            forensics
+                .source_errors
+                .iter()
+                .any(|error| { error.kind == NativeSessionForensicErrorKind::ColdArchiveInvalid })
+        );
+        assert_ne!(
+            forensics.records[0].outcome,
+            Some(bundle.entries[0].outcome.clone())
+        );
+    }
+
+    #[test]
+    fn cold_archive_reconciles_retired_rows_and_partial_hot_cleanup_without_masking_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, bundle) = clean_test_cold_archive(&root, 98);
+        let key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap()
+                .verifying_key();
+        let bytes = serde_json::to_vec_pretty(&bundle).unwrap();
+        retain_cold_archive(&root, &bytes, &bundle, &key).unwrap();
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "DELETE FROM native_sessions WHERE session_nonce = ?1;",
+            &[SqliteValue::Text(admission.session_nonce.clone().into())],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        protect_sidecars(&root).unwrap();
+
+        // Exact crash point: cold copy and row deletion are durable, but all
+        // per-session hot files still exist. This is explained retirement.
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "{:?}",
+            forensics.source_errors
+        );
+        assert_eq!(forensics.records.len(), 1);
+        assert_eq!(forensics.records[0].admission, admission);
+        assert!(forensics.records[0].outcome_recovered_from_receipt);
+        assert!(forensics.untracked_identity_captures.is_empty());
+
+        // Directory persistence can expose partial cleanup after a restart.
+        // Original signatures are not synthesized from the archive snapshot.
+        for (index, path) in [
+            admission_receipt_path(&root, &admission.session_nonce),
+            outcome_receipt_path(&root, &admission.session_nonce),
+            admission.identity_capture_path.clone(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::rename(path, temp.path().join(format!("retired-evidence-{index}"))).unwrap();
+        }
+        let forensics = read_native_session_forensics_at(&root, None).unwrap();
+        assert!(
+            forensics.source_errors.is_empty(),
+            "{:?}",
+            forensics.source_errors
+        );
+        assert_eq!(forensics.records.len(), 1);
+        assert_eq!(
+            forensics.records[0].outcome,
+            Some(bundle.entries[0].outcome.clone())
+        );
+        assert_eq!(
+            load_archived_runtime_evidence_identity(&root, &admission.identity_capture_path)
+                .unwrap(),
+            bundle.entries[0].identity_capture,
+        );
+
+        std::fs::write(
+            admission_record_path(&root, &admission.session_nonce),
+            b"{}",
+        )
+        .unwrap();
+        let corrupted = read_native_session_forensics_at(&root, None).unwrap();
+        assert_eq!(corrupted.records.len(), 1);
+        assert!(corrupted.source_errors.iter().any(|error| {
+            error.kind == NativeSessionForensicErrorKind::ColdArchiveInvalid
+                && error.detail.contains("hot admission body disagrees")
+        }));
+    }
+
+    #[test]
+    fn cold_archive_requires_the_original_identity_and_keeps_v1_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (_, bundle) = clean_test_cold_archive(&root, 95);
+        let key =
+            load_runtime_evidence_product_root(&root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH))
+                .unwrap()
+                .verifying_key();
+        let other = fixture(&root, 96);
+        let other_capture: RuntimeEvidenceIdentityCapture =
+            serde_json::from_slice(&std::fs::read(other.identity_capture_path).unwrap()).unwrap();
+        let mut replaced = bundle.clone();
+        replaced.entries[0].identity_capture = Some(other_capture);
+        reseal_test_cold_archive(&root, &mut replaced);
+        assert!(verify_native_session_cold_archive(&replaced, &key).is_err());
+
+        let mut legacy = bundle.clone();
+        legacy.schema_version = NATIVE_SESSION_COLD_ARCHIVE_V1_SCHEMA.to_owned();
+        legacy.entries[0].identity_capture = None;
+        reseal_test_cold_archive(&root, &mut legacy);
+        verify_native_session_cold_archive(&legacy, &key).unwrap();
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        assert!(retain_cold_archive(&root, &legacy_bytes, &legacy, &key).is_err());
+        let mut explicit_null = serde_json::to_value(&legacy).unwrap();
+        explicit_null["entries"][0]["identity_capture"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<NativeSessionColdArchiveBundle>(explicit_null).is_err());
+
+        legacy.entries[0].identity_capture = bundle.entries[0].identity_capture.clone();
+        reseal_test_cold_archive(&root, &mut legacy);
+        assert!(verify_native_session_cold_archive(&legacy, &key).is_err());
+        let mut missing = bundle;
+        missing.entries[0].identity_capture = None;
+        reseal_test_cold_archive(&root, &mut missing);
+        assert!(verify_native_session_cold_archive(&missing, &key).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_archive_destination_cannot_poison_protected_cold_retention() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, _) = clean_test_cold_archive(&root, 99);
+        let retained = root.join(COLD_ARCHIVE_DIRECTORY);
+        for destination in [retained.clone(), retained.join("nested-export")] {
+            let error = compact_native_session_inventory_at(
+                &root,
+                &compaction_request(Some(destination), false),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("overlaps protected"));
+            assert!(
+                !retained.exists(),
+                "refusal must precede directory creation"
+            );
+        }
+        ensure_runtime_evidence_directory(&retained, true).unwrap();
+        let alias = temp.path().join("operator-alias");
+        symlink(&root, &alias).unwrap();
+        let error = compact_native_session_inventory_at(
+            &root,
+            &compaction_request(Some(alias.join(COLD_ARCHIVE_DIRECTORY)), false),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overlaps protected"));
+        assert_eq!(std::fs::read_dir(retained).unwrap().count(), 0);
+        assert!(admission.identity_capture_path.exists());
+        assert!(admission_record_path(&root, &admission.session_nonce).exists());
+        assert_eq!(read_inventory_at(&root, None).unwrap().records.len(), 1);
+        assert!(
+            read_native_session_forensics_at(&root, None)
+                .unwrap()
+                .source_errors
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_cold_archive_directory_cannot_authorize_hot_retirement() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let (admission, _) = clean_test_cold_archive(&root, 97);
+        let outside = temp.path().join("outside-retention");
+        ensure_runtime_evidence_directory(&outside, true).unwrap();
+        symlink(&outside, root.join(COLD_ARCHIVE_DIRECTORY)).unwrap();
+        assert!(
+            compact_native_session_inventory_at(
+                &root,
+                &compaction_request(Some(temp.path().join("operator-archive")), false),
+            )
+            .is_err()
+        );
+        assert!(admission.identity_capture_path.exists());
+        assert!(admission_record_path(&root, &admission.session_nonce).exists());
+        assert_eq!(read_inventory_at(&root, None).unwrap().records.len(), 1);
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
     }
 
     #[test]
