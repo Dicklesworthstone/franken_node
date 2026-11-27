@@ -3482,6 +3482,10 @@ pub struct FleetPolicyRolloutArgs {
     /// Delay between fresh observations, bounded by the remaining total deadline.
     #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u64).range(10..=5_000))]
     pub poll_interval_ms: u64,
+    /// Require enrolled supervisor and coordinator certificates at both policy boundaries.
+    /// Available only with HTTP transport and --zone all.
+    #[arg(long)]
+    pub require_certified_quiescence: bool,
     /// Emit the signed stage report, including durable recovery identities.
     #[arg(long)]
     pub json: bool,

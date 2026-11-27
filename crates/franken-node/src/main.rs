@@ -36486,7 +36486,8 @@ fn run_fleet_policy_rollout(args: &cli::FleetPolicyRolloutArgs) -> Result<()> {
         artifact,
         Duration::from_secs(args.timeout_seconds),
         Duration::from_millis(args.poll_interval_ms),
-    )?;
+    )?
+    .require_certified_quiescence(args.require_certified_quiescence)?;
     let (_, state_dir, mut transport) =
         open_fleet_transport_with_deadline(Path::new("."), Some(rollout.deadline()))?;
     let kind = transport.kind();
@@ -36527,11 +36528,12 @@ fn run_fleet_policy_rollout(args: &cli::FleetPolicyRolloutArgs) -> Result<()> {
             kind.label(),
         );
         println!(
-            "  hold={} policy={} resume={} resume_commit_confirmed={} fleet_quiescence_certified=false",
+            "  hold={} policy={} resume={} resume_commit_confirmed={} certified_boundaries_complete={} fleet_quiescence_certified=false",
             outcome.hold_action_id,
             outcome.policy_action_id,
             outcome.resume_action_id,
             outcome.guarded_resume.is_some(),
+            outcome.certified_boundaries_complete,
         );
         if let Some(evidence) = &outcome.evidence {
             println!(

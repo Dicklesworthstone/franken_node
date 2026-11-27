@@ -3,6 +3,8 @@
 //! A stable operation ID binds all three immutable actions. Every observation
 //! retains the full action prefix and participant union. Only the coordinator's
 //! guarded transaction may turn an acknowledged policy snapshot into a resume.
+//! Certified mode also requires independent signed epoch boundaries before
+//! publication and release, recovered by their original action prefixes.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -12,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::fleet_transport::{
-    FleetAction, FleetActionRecord, FleetGuardedPolicyReceipt, FleetGuardedResumeReceipt,
-    FleetNativeSessionHoldEvidence, FleetNativeSessionHoldTarget, FleetPolicyArtifact,
-    FleetPolicyMaintenanceGuard, FleetSharedState, FleetTransport, FleetTransportError,
-    GuardedFleetNativeSessionResume, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_STALE_AFTER,
-    fleet_action_log_checkpoint, fleet_native_session_hold_evidence, fleet_native_session_holds,
-    validate_action_id, validate_action_record, validate_fleet_policy_publication,
-    validate_zone_id,
+    FleetAction, FleetActionRecord, FleetCertifiedEpochBoundary, FleetEpochBarrierOperation,
+    FleetGuardedPolicyReceipt, FleetGuardedResumeReceipt, FleetNativeSessionHoldEvidence,
+    FleetNativeSessionHoldTarget, FleetPolicyArtifact, FleetPolicyMaintenanceGuard,
+    FleetSharedState, FleetTransport, FleetTransportError, GuardedFleetNativeSessionResume,
+    GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_STALE_AFTER, fleet_action_log_checkpoint,
+    fleet_native_session_hold_evidence, fleet_native_session_holds, validate_action_id,
+    validate_action_record, validate_fleet_policy_publication, validate_zone_id,
 };
 
 pub const FLEET_POLICY_ROLLOUT_SCHEMA: &str = "franken-node/fleet-policy-rollout/v1";
@@ -50,7 +52,23 @@ pub struct FleetPolicyRolloutReport {
     pub evidence: Option<FleetNativeSessionHoldEvidence>,
     pub guarded_publication: Option<FleetGuardedPolicyReceipt>,
     pub guarded_resume: Option<FleetGuardedResumeReceipt>,
+    #[serde(default)]
+    pub require_certified_quiescence: bool,
+    /// Both guarded mutations consumed their respective signed historical
+    /// boundaries. Completion does not certify admissions after the resume.
+    #[serde(default)]
+    pub certified_boundaries_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_epoch: Option<FleetCertifiedEpochBoundary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_epoch: Option<FleetCertifiedEpochBoundary>,
     pub fleet_quiescence_certified: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RolloutEpochStage {
+    Publication,
+    Resume,
 }
 
 /// Create before connecting so initialization, network requests, waits and
@@ -68,6 +86,7 @@ pub struct FleetPolicyRollout {
     hold_id: String,
     policy_id: String,
     resume_id: String,
+    require_certified_quiescence: bool,
 }
 
 impl FleetPolicyRollout {
@@ -116,7 +135,21 @@ impl FleetPolicyRollout {
             hold_id: format!("fleet-rollout-{identity}-hold"),
             policy_id: format!("fleet-rollout-{identity}-policy"),
             resume_id: format!("fleet-rollout-{identity}-resume"),
+            require_certified_quiescence: false,
         })
+    }
+
+    pub fn require_certified_quiescence(
+        mut self,
+        required: bool,
+    ) -> Result<Self, FleetTransportError> {
+        if required && self.zone_id != "all" {
+            return Err(FleetTransportError::serialization(
+                "certified policy rollout requires the all-zone audience",
+            ));
+        }
+        self.require_certified_quiescence = required;
+        Ok(self)
     }
 
     pub fn deadline(&self) -> Instant {
@@ -140,6 +173,10 @@ impl FleetPolicyRollout {
             evidence: None,
             guarded_publication: None,
             guarded_resume: None,
+            require_certified_quiescence: self.require_certified_quiescence,
+            certified_boundaries_complete: false,
+            publication_epoch: None,
+            resume_epoch: None,
             fleet_quiescence_certified: false,
         };
         if let Err(error) = self.run_inner(transport, &mut report) {
@@ -148,6 +185,11 @@ impl FleetPolicyRollout {
         report.timed_out = !report.completed && Instant::now() >= self.deadline;
         report.elapsed_millis =
             u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        report.certified_boundaries_complete = self.require_certified_quiescence
+            && report.publication_epoch.is_some()
+            && report.resume_epoch.is_some()
+            && report.guarded_publication.is_some()
+            && report.guarded_resume.is_some();
         // The transport belongs to this operation; clearing the budget permits
         // callers to inspect its durable state after a timeout.
         if let Err(error) = transport.set_operation_deadline(None)
@@ -180,14 +222,167 @@ impl FleetPolicyRollout {
         &self,
         state: &FleetSharedState,
         required: &BTreeSet<(String, String)>,
+        boundary: Option<&FleetCertifiedEpochBoundary>,
     ) -> Result<FleetPolicyMaintenanceGuard, FleetTransportError> {
+        if self.require_certified_quiescence != boundary.is_some() {
+            return Err(FleetTransportError::stale_state(
+                "rollout guard is missing its required certified epoch boundary",
+            ));
+        }
         Ok(FleetPolicyMaintenanceGuard {
-            certified_epoch: None,
             hold_action_id: self.hold_id.clone(),
-            expected_action_log: fleet_action_log_checkpoint(&state.actions)?,
+            expected_action_log: match boundary {
+                Some(boundary) => boundary.certificate.action_log_checkpoint.clone(),
+                None => fleet_action_log_checkpoint(&state.actions)?,
+            },
             required_nodes: required.clone(),
             stale_after: self.stale_after,
+            certified_epoch: boundary.map(|boundary| boundary.certificate.committed_epoch),
         })
+    }
+
+    fn epoch_operation(
+        &self,
+        actions: &[FleetActionRecord],
+        stage: RolloutEpochStage,
+    ) -> Result<FleetEpochBarrierOperation, FleetTransportError> {
+        let (label, mutation_id) = match stage {
+            RolloutEpochStage::Publication => ("publication", &self.policy_id),
+            RolloutEpochStage::Resume => ("resume", &self.resume_id),
+        };
+        // A committed mutation retains its original admission prefix. Later
+        // actions must never change the stable epoch request used to recover it.
+        let end = actions
+            .iter()
+            .position(|record| record.action_id == *mutation_id)
+            .unwrap_or(actions.len());
+        let prefix = &actions[..end];
+        if !prefix.iter().any(|record| record.action_id == self.hold_id)
+            || (matches!(stage, RolloutEpochStage::Resume)
+                && !prefix
+                    .iter()
+                    .any(|record| record.action_id == self.policy_id))
+        {
+            return Err(FleetTransportError::stale_state(
+                "certified rollout boundary has no retained owner or preceding policy",
+            ));
+        }
+        let expected_action_log = fleet_action_log_checkpoint(prefix)?;
+        let identity = serde_json::to_vec(&(
+            self.rollout_id.as_str(),
+            self.zone_id.as_str(),
+            self.artifact.revision,
+            self.artifact.content_sha256.as_str(),
+            label,
+            &expected_action_log,
+        ))
+        .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        let mut digest = Sha256::new();
+        digest.update(b"franken-node/fleet-policy-rollout-epoch/v1\0");
+        digest.update(identity);
+        let operation = FleetEpochBarrierOperation {
+            operation_id: format!("fleet-rollout-epoch-{}", hex::encode(digest.finalize())),
+            expected_action_log,
+            initiator: "fleet-policy-rollout".to_owned(),
+            reason: format!(
+                "{label} boundary for rollout {}: revision={} sha256={}",
+                self.rollout_id, self.artifact.revision, self.artifact.content_sha256
+            ),
+            trace_id: self.rollout_id.clone(),
+            // Retry intent is independent of the caller's new wait budget.
+            // The guarded mutation separately enforces its fresh observations.
+            stale_after: MAX_GUARDED_POLICY_STALE_AFTER,
+        };
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    fn certify_boundary(
+        &self,
+        transport: &impl FleetTransport,
+        state: &FleetSharedState,
+        stage: RolloutEpochStage,
+        required: &mut BTreeSet<(String, String)>,
+        publication: Option<&FleetCertifiedEpochBoundary>,
+    ) -> Result<Option<FleetCertifiedEpochBoundary>, FleetTransportError> {
+        if !self.require_certified_quiescence {
+            return Ok(None);
+        }
+        self.check_deadline()?;
+        let operation = self.epoch_operation(&state.actions, stage)?;
+        let boundary = transport.certify_maintenance_epoch(&operation)?;
+        self.check_deadline()?;
+        boundary.validate_for_operation(&operation)?;
+        if matches!(stage, RolloutEpochStage::Resume)
+            && publication.is_none_or(|publication| {
+                boundary.certificate.pre_epoch < publication.certificate.committed_epoch
+            })
+        {
+            return Err(FleetTransportError::stale_state(
+                "certified resume requires a later epoch than its publication boundary",
+            ));
+        }
+        required.extend(
+            boundary
+                .evidence
+                .nodes
+                .iter()
+                .map(|node| (node.zone_id.clone(), node.node_id.clone())),
+        );
+        Ok(Some(boundary))
+    }
+
+    fn validate_receipt_epoch(
+        &self,
+        guard: &FleetPolicyMaintenanceGuard,
+        boundary: Option<&FleetCertifiedEpochBoundary>,
+    ) -> Result<(), FleetTransportError> {
+        let expected_epoch = boundary.map(|boundary| boundary.certificate.committed_epoch);
+        if guard.hold_action_id != self.hold_id
+            || self.require_certified_quiescence != boundary.is_some()
+            || guard.certified_epoch != expected_epoch
+            || boundary.is_some_and(|boundary| {
+                guard.expected_action_log != boundary.certificate.action_log_checkpoint
+            })
+        {
+            return Err(FleetTransportError::stale_state(
+                "rollout mutation receipt does not bind its maintenance owner and certified boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_publication_receipt(
+        &self,
+        receipt: &FleetGuardedPolicyReceipt,
+        policy: &FleetActionRecord,
+        boundary: Option<&FleetCertifiedEpochBoundary>,
+    ) -> Result<(), FleetTransportError> {
+        receipt.validate()?;
+        self.validate_receipt_epoch(&receipt.guard, boundary)?;
+        if receipt.action != *policy {
+            return Err(FleetTransportError::action_conflict(
+                "rollout publication receipt binds a different immutable policy",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_resume_receipt(
+        &self,
+        receipt: &FleetGuardedResumeReceipt,
+        resume: &FleetActionRecord,
+        policy: &FleetActionRecord,
+        boundary: Option<&FleetCertifiedEpochBoundary>,
+    ) -> Result<(), FleetTransportError> {
+        receipt.validate()?;
+        self.validate_receipt_epoch(&receipt.request.guard, boundary)?;
+        if receipt.request.action != *resume || receipt.request.policy_action != *policy {
+            return Err(FleetTransportError::action_conflict(
+                "rollout resume receipt binds a different immutable owner release or policy",
+            ));
+        }
+        Ok(())
     }
 
     fn observe(
@@ -244,6 +439,11 @@ impl FleetPolicyRollout {
         transport: &mut impl FleetTransport,
         report: &mut FleetPolicyRolloutReport,
     ) -> Result<(), FleetTransportError> {
+        if self.require_certified_quiescence && !transport.supports_certified_maintenance() {
+            return Err(FleetTransportError::not_initialized(
+                "certified policy rollout requires a transport with enrolled coordinator and supervisor epoch authority",
+            ));
+        }
         transport.set_operation_deadline(Some(self.deadline))?;
         let mut retained = Vec::new();
         let mut required = BTreeSet::new();
@@ -331,12 +531,24 @@ impl FleetPolicyRollout {
         // additionally retains every node admitted at the publication boundary.
         if had_policy {
             report.phase = FleetPolicyRolloutPhase::Applying;
+            report.publication_epoch = self.certify_boundary(
+                transport,
+                &state,
+                RolloutEpochStage::Publication,
+                &mut required,
+                None,
+            )?;
             self.check_deadline()?;
             let receipt = transport.publish_policy_with_maintenance_guard(
                 &GuardedFleetPolicyPublication {
                     action: policy.clone(),
-                    guard: self.guard(&state, &required)?,
+                    guard: self.guard(&state, &required, report.publication_epoch.as_ref())?,
                 },
+            )?;
+            self.validate_publication_receipt(
+                &receipt,
+                &policy,
+                report.publication_epoch.as_ref(),
             )?;
             required.extend(
                 receipt
@@ -360,12 +572,24 @@ impl FleetPolicyRollout {
             report.evidence = Some(evidence);
             if ready {
                 report.phase = FleetPolicyRolloutPhase::Publishing;
+                report.publication_epoch = self.certify_boundary(
+                    transport,
+                    &state,
+                    RolloutEpochStage::Publication,
+                    &mut required,
+                    None,
+                )?;
                 self.check_deadline()?;
                 let receipt = transport.publish_policy_with_maintenance_guard(
                     &GuardedFleetPolicyPublication {
                         action: policy.clone(),
-                        guard: self.guard(&state, &required)?,
+                        guard: self.guard(&state, &required, report.publication_epoch.as_ref())?,
                     },
+                )?;
+                self.validate_publication_receipt(
+                    &receipt,
+                    &policy,
+                    report.publication_epoch.as_ref(),
                 )?;
                 required.extend(
                     receipt
@@ -385,15 +609,23 @@ impl FleetPolicyRollout {
 
         if had_resume {
             report.phase = FleetPolicyRolloutPhase::Resuming;
+            report.resume_epoch = self.certify_boundary(
+                transport,
+                &state,
+                RolloutEpochStage::Resume,
+                &mut required,
+                report.publication_epoch.as_ref(),
+            )?;
             self.check_deadline()?;
             let receipt = transport.resume_native_sessions_with_maintenance_guard(
                 &GuardedFleetNativeSessionResume {
                     action: resume.clone(),
                     policy_action: policy.clone(),
-                    guard: self.guard(&state, &required)?,
+                    guard: self.guard(&state, &required, report.resume_epoch.as_ref())?,
                     expires_at: self.expires_at,
                 },
             )?;
+            self.validate_resume_receipt(&receipt, &resume, &policy, report.resume_epoch.as_ref())?;
             required.extend(
                 receipt
                     .evidence
@@ -416,14 +648,27 @@ impl FleetPolicyRollout {
             report.evidence = Some(evidence);
             if ready {
                 report.phase = FleetPolicyRolloutPhase::Resuming;
+                report.resume_epoch = self.certify_boundary(
+                    transport,
+                    &state,
+                    RolloutEpochStage::Resume,
+                    &mut required,
+                    report.publication_epoch.as_ref(),
+                )?;
                 self.check_deadline()?;
                 let receipt = transport.resume_native_sessions_with_maintenance_guard(
                     &GuardedFleetNativeSessionResume {
                         action: resume.clone(),
                         policy_action: policy.clone(),
-                        guard: self.guard(&state, &required)?,
+                        guard: self.guard(&state, &required, report.resume_epoch.as_ref())?,
                         expires_at: self.expires_at,
                     },
+                )?;
+                self.validate_resume_receipt(
+                    &receipt,
+                    &resume,
+                    &policy,
+                    report.resume_epoch.as_ref(),
                 )?;
                 required.extend(
                     receipt

@@ -6015,3 +6015,509 @@ mod certified_maintenance_guard_contract_tests {
         }
     }
 }
+
+// Exercise certified orchestration against the real serialized durable store.
+// The logical agents below sign actual retained action snapshots; these tests
+// do not stand in for separate native-worker lifecycle acceptance.
+mod certified_rollout_workflow_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+    use frankenengine_node::control_plane::control_epoch::EpochSigningKey;
+    use frankenengine_node::control_plane::fleet_policy_rollout::{
+        FleetPolicyRollout, FleetPolicyRolloutReport,
+    };
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetCertifiedEpochBoundary, FleetEpochBarrierOperation, FleetEpochBarrierParams,
+        FleetEpochCommitSigner, FleetGuardedResumeReceipt, GuardedFleetNativeSessionResume,
+        MAX_GUARDED_POLICY_STALE_AFTER, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+        NativeSessionDrainAttestation,
+    };
+    use frankenengine_node::control_plane::fleet_transport_durable::FleetCertifiedMaintenanceAuthority;
+    use sha2::{Digest, Sha256};
+
+    struct CertifiedAgentTransport {
+        inner: RefCell<DurableFleetTransport>,
+        epoch_key: EpochSigningKey,
+        coordinator: FleetEpochCommitSigner,
+        supervisor_keys: BTreeMap<(String, String), SigningKey>,
+        roots: BTreeMap<(String, String), VerifyingKey>,
+        lose_epoch_reply: Cell<Option<u64>>,
+        lose_policy_reply: bool,
+        lose_resume_reply: bool,
+        change_population_after_epoch: Cell<bool>,
+        population_version: Cell<u64>,
+    }
+
+    impl CertifiedAgentTransport {
+        fn open(directory: &Path) -> Self {
+            let mut inner = DurableFleetTransport::new(directory).unwrap();
+            inner.initialize().unwrap();
+            if inner.list_actions().unwrap().is_empty() {
+                inner
+                    .publish_action(&maintenance_action("independent-owner", "all", None))
+                    .unwrap();
+            }
+            let supervisor_keys = BTreeMap::from([
+                (
+                    ("zone-a".to_owned(), "node-a".to_owned()),
+                    SigningKey::from_bytes(&[101; 32]),
+                ),
+                (
+                    ("zone-b".to_owned(), "node-b".to_owned()),
+                    SigningKey::from_bytes(&[102; 32]),
+                ),
+            ]);
+            if inner.list_node_statuses().unwrap().is_empty() {
+                for (zone_id, node_id) in supervisor_keys.keys() {
+                    let mut node = sample_node(node_id);
+                    node.zone_id = zone_id.clone();
+                    inner.upsert_node_status(&node).unwrap();
+                }
+            }
+            let roots = supervisor_keys
+                .iter()
+                .map(|(identity, key)| (identity.clone(), key.verifying_key()))
+                .collect();
+            Self {
+                inner: RefCell::new(inner),
+                epoch_key: EpochSigningKey::new(&[103; 32]).unwrap(),
+                coordinator: FleetEpochCommitSigner::new(
+                    "certified-rollout-test",
+                    SigningKey::from_bytes(&[104; 32]),
+                )
+                .unwrap(),
+                supervisor_keys,
+                roots,
+                lose_epoch_reply: Cell::new(None),
+                lose_policy_reply: false,
+                lose_resume_reply: false,
+                change_population_after_epoch: Cell::new(false),
+                population_version: Cell::new(0),
+            }
+        }
+
+        fn authority(&self) -> FleetCertifiedMaintenanceAuthority<'_> {
+            FleetCertifiedMaintenanceAuthority {
+                epoch_signing_key: &self.epoch_key,
+                coordinator_signer: &self.coordinator,
+                enrolled_supervisors: &self.roots,
+            }
+        }
+
+        fn acknowledge(
+            &self,
+            inner: &mut DurableFleetTransport,
+        ) -> Result<FleetSharedState, FleetTransportError> {
+            let mut state = inner.read_shared_state()?;
+            let now = Utc::now();
+            for node in &mut state.nodes {
+                let identity = (node.zone_id.clone(), node.node_id.clone());
+                let key = self.supervisor_keys.get(&identity).ok_or_else(|| {
+                    FleetTransportError::not_initialized("test node has no enrolled supervisor")
+                })?;
+                let applied = fleet_application_checkpoint(&state.actions, &node.zone_id)?;
+                let held = !fleet_native_session_holds(&state.actions, &node.zone_id)?.is_empty();
+                let population = self.population_version.get();
+                let mut drain = NativeSessionDrainCheckpoint {
+                    applied_actions: applied.clone(),
+                    session_set_sha256: hex::encode(Sha256::digest(
+                        format!("{}/{}:population-{population}", node.zone_id, node.node_id)
+                            .as_bytes(),
+                    )),
+                    admitted_sessions: 2 + population,
+                    terminal_sessions: 2 + population,
+                    pending_sessions: 0,
+                    indeterminate_sessions: 0,
+                    fence_held: held,
+                    supervisor_attestation: None,
+                };
+                let mut attestation = NativeSessionDrainAttestation {
+                    schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_owned(),
+                    node_id: node.node_id.clone(),
+                    zone_id: node.zone_id.clone(),
+                    drain_id: uuid::Uuid::from_u128(if node.node_id == "node-a" { 1 } else { 2 })
+                        .to_string(),
+                    generation: 1,
+                    project_root_sha256: hex::encode(Sha256::digest(
+                        format!("project:{}/{}", node.zone_id, node.node_id).as_bytes(),
+                    )),
+                    observed_at: now,
+                    product_root_key_id: format!(
+                        "ed25519:{}",
+                        hex::encode(key.verifying_key().as_bytes())
+                    ),
+                    checkpoint_sha256: drain.observation_sha256()?,
+                    signature_hex: String::new(),
+                };
+                attestation.signature_hex =
+                    hex::encode(key.sign(&attestation.signing_payload()?).to_bytes());
+                drain.supervisor_attestation = Some(attestation);
+                node.last_seen = now;
+                node.health = if held {
+                    NodeHealth::Maintenance
+                } else {
+                    NodeHealth::Healthy
+                };
+                node.applied_actions = Some(applied);
+                node.native_session_drain = Some(drain);
+                inner.upsert_node_status(node)?;
+            }
+            Ok(state)
+        }
+    }
+
+    impl FleetTransport for CertifiedAgentTransport {
+        fn set_operation_deadline(
+            &mut self,
+            deadline: Option<std::time::Instant>,
+        ) -> Result<(), FleetTransportError> {
+            self.inner.borrow_mut().set_operation_deadline(deadline)
+        }
+
+        fn initialize(&mut self) -> Result<(), FleetTransportError> {
+            self.inner.borrow_mut().initialize()
+        }
+
+        fn supports_certified_maintenance(&self) -> bool {
+            true
+        }
+
+        fn certify_maintenance_epoch(
+            &self,
+            operation: &FleetEpochBarrierOperation,
+        ) -> Result<FleetCertifiedEpochBoundary, FleetTransportError> {
+            operation.validate()?;
+            let mut inner = self.inner.borrow_mut();
+            let (evidence, certificate, _, already_committed) = inner
+                .certify_epoch_quiescence_projected(
+                    &self.epoch_key,
+                    Some(&self.coordinator),
+                    &self.roots,
+                    FleetEpochBarrierParams {
+                        initiator: &operation.initiator,
+                        reason: &operation.reason,
+                        now: Utc::now(),
+                        stale_after: operation.stale_after,
+                        trace_id: &operation.trace_id,
+                        operation_id: Some(&operation.operation_id),
+                        operation_request_sha256: None,
+                        expected_action_log: Some(&operation.expected_action_log),
+                    },
+                    Utc::now,
+                    |_| Ok(()),
+                )?;
+            let (_, _, commit_proof) = inner.export_epoch_commit(
+                &self.epoch_key,
+                &self.coordinator,
+                certificate.committed_epoch,
+            )?;
+            let boundary = FleetCertifiedEpochBoundary {
+                already_committed,
+                evidence,
+                certificate,
+                commit_proof,
+            };
+            boundary.validate_for_operation(operation)?;
+            if self.lose_epoch_reply.get() == Some(boundary.certificate.committed_epoch) {
+                self.lose_epoch_reply.set(None);
+                return Err(FleetTransportError::io(
+                    "simulated lost committed epoch response",
+                ));
+            }
+            if self.change_population_after_epoch.replace(false) {
+                self.population_version
+                    .set(self.population_version.get() + 1);
+                self.acknowledge(&mut inner)?;
+            }
+            Ok(boundary)
+        }
+
+        fn publish_action(
+            &mut self,
+            action: &FleetActionRecord,
+        ) -> Result<(), FleetTransportError> {
+            self.inner.borrow_mut().publish_action(action)
+        }
+
+        fn publish_policy_with_maintenance_guard(
+            &mut self,
+            request: &GuardedFleetPolicyPublication,
+        ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+            let receipt = self
+                .inner
+                .borrow_mut()
+                .publish_policy_with_certified_maintenance_guard_projected(
+                    request,
+                    &self.authority(),
+                    MAX_GUARDED_POLICY_STALE_AFTER,
+                    Utc::now,
+                    |_| Ok(()),
+                )?;
+            if std::mem::take(&mut self.lose_policy_reply) {
+                return Err(FleetTransportError::io(
+                    "simulated lost committed policy response",
+                ));
+            }
+            Ok(receipt)
+        }
+
+        fn resume_native_sessions_with_maintenance_guard(
+            &mut self,
+            request: &GuardedFleetNativeSessionResume,
+        ) -> Result<FleetGuardedResumeReceipt, FleetTransportError> {
+            let receipt = self
+                .inner
+                .borrow_mut()
+                .resume_native_sessions_with_certified_maintenance_guard_projected(
+                    request,
+                    &self.authority(),
+                    MAX_GUARDED_POLICY_STALE_AFTER,
+                    Utc::now,
+                    |_| Ok(()),
+                )?;
+            if std::mem::take(&mut self.lose_resume_reply) {
+                return Err(FleetTransportError::io(
+                    "simulated lost committed resume response",
+                ));
+            }
+            Ok(receipt)
+        }
+
+        fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+            self.inner.borrow().list_actions()
+        }
+
+        fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
+            self.inner.borrow_mut().upsert_node_status(status)
+        }
+
+        fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
+            self.inner.borrow().list_node_statuses()
+        }
+
+        fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
+            self.acknowledge(&mut self.inner.borrow_mut())
+        }
+    }
+
+    fn operation(id: &str, seconds: u64) -> FleetPolicyRollout {
+        FleetPolicyRollout::new(
+            id,
+            "all",
+            rollout_artifact(1),
+            Duration::from_secs(seconds),
+            Duration::from_millis(10),
+        )
+        .unwrap()
+        .require_certified_quiescence(true)
+        .unwrap()
+    }
+
+    fn assert_completed_boundaries(report: &FleetPolicyRolloutReport) {
+        assert!(report.completed, "{report:?}");
+        assert!(report.require_certified_quiescence);
+        assert!(report.certified_boundaries_complete);
+        assert!(!report.fleet_quiescence_certified);
+        assert!(!report.evidence.as_ref().unwrap().fleet_quiescence_certified);
+        assert!(
+            report
+                .guarded_publication
+                .as_ref()
+                .unwrap()
+                .fleet_quiescence_certified
+        );
+        assert!(
+            report
+                .guarded_resume
+                .as_ref()
+                .unwrap()
+                .evidence
+                .fleet_quiescence_certified
+        );
+        let publication = report.publication_epoch.as_ref().unwrap();
+        let resume = report.resume_epoch.as_ref().unwrap();
+        assert_eq!(publication.certificate.committed_epoch, 1);
+        assert_eq!(resume.certificate.committed_epoch, 2);
+        assert_eq!(publication.certificate.participants.len(), 2);
+        assert_eq!(resume.certificate.participants.len(), 2);
+        assert_eq!(
+            publication.evidence.stale_after,
+            MAX_GUARDED_POLICY_STALE_AFTER
+        );
+        assert_eq!(resume.evidence.stale_after, MAX_GUARDED_POLICY_STALE_AFTER);
+    }
+
+    #[test]
+    fn certified_rollout_recovers_lost_epoch_policy_and_resume_responses_without_duplicate_commits()
+    {
+        for cut in 0..4 {
+            let directory = tempfile::tempdir().unwrap();
+            let mut transport = CertifiedAgentTransport::open(directory.path());
+            match cut {
+                0 => transport.lose_epoch_reply.set(Some(1)),
+                1 => transport.lose_epoch_reply.set(Some(2)),
+                2 => transport.lose_policy_reply = true,
+                _ => transport.lose_resume_reply = true,
+            }
+            let first = operation("certified-release", 20).run(&mut transport);
+            assert!(!first.completed, "{first:?}");
+            assert!(
+                first
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("simulated lost committed")
+            );
+            if cut != 3 {
+                assert!(
+                    fleet_native_session_holds(&transport.list_actions().unwrap(), "zone-a",)
+                        .unwrap()
+                        .contains(&first.hold_action_id)
+                );
+            }
+            drop(transport);
+
+            // The exact operation survives coordinator reopening and a new
+            // caller budget; changing the budget must not change epoch intent.
+            let mut transport = CertifiedAgentTransport::open(directory.path());
+            let recovered = operation("certified-release", 40).run(&mut transport);
+            assert_completed_boundaries(&recovered);
+            assert_eq!(transport.list_actions().unwrap().len(), 4);
+            assert_eq!(
+                transport
+                    .inner
+                    .borrow()
+                    .current_fleet_epoch(&transport.epoch_key)
+                    .unwrap(),
+                2
+            );
+            assert!(
+                recovered
+                    .publication_epoch
+                    .as_ref()
+                    .unwrap()
+                    .already_committed
+            );
+            assert_eq!(
+                recovered.resume_epoch.as_ref().unwrap().already_committed,
+                cut == 1 || cut == 3
+            );
+            assert_eq!(
+                recovered
+                    .guarded_publication
+                    .as_ref()
+                    .unwrap()
+                    .already_published,
+                cut != 0
+            );
+            assert_eq!(
+                recovered.guarded_resume.as_ref().unwrap().already_resumed,
+                cut == 3
+            );
+
+            let original_publication = recovered.publication_epoch.as_ref().unwrap().clone();
+            let original_resume = recovered.resume_epoch.as_ref().unwrap().clone();
+            transport
+                .publish_action(&maintenance_action("later-owner", "all", None))
+                .unwrap();
+            let actions = transport.list_actions().unwrap();
+            let replay = operation("certified-release", 30).run(&mut transport);
+            assert_completed_boundaries(&replay);
+            assert!(
+                replay
+                    .guarded_publication
+                    .as_ref()
+                    .unwrap()
+                    .already_published
+            );
+            assert!(replay.guarded_resume.as_ref().unwrap().already_resumed);
+            assert_eq!(
+                replay.publication_epoch.as_ref().unwrap().certificate,
+                original_publication.certificate
+            );
+            assert_eq!(
+                replay.publication_epoch.as_ref().unwrap().commit_proof,
+                original_publication.commit_proof
+            );
+            assert_eq!(
+                replay.resume_epoch.as_ref().unwrap().certificate,
+                original_resume.certificate
+            );
+            assert_eq!(
+                replay.resume_epoch.as_ref().unwrap().commit_proof,
+                original_resume.commit_proof
+            );
+            assert_eq!(transport.list_actions().unwrap(), actions);
+            assert_eq!(
+                transport
+                    .inner
+                    .borrow()
+                    .current_fleet_epoch(&transport.epoch_key)
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                fleet_native_session_holds(&actions, "zone-a").unwrap(),
+                BTreeSet::from(["independent-owner".to_owned(), "later-owner".to_owned()])
+            );
+        }
+    }
+
+    #[test]
+    fn certified_rollout_preserves_its_hold_when_the_signed_population_changes_after_the_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut transport = CertifiedAgentTransport::open(directory.path());
+        transport.change_population_after_epoch.set(true);
+        let report = operation("population-changed", 20).run(&mut transport);
+        assert!(!report.completed, "{report:?}");
+        assert!(report.error.is_some());
+        assert!(report.publication_epoch.is_some());
+        assert!(report.guarded_publication.is_none());
+        assert!(report.guarded_resume.is_none());
+        assert!(!report.certified_boundaries_complete);
+        let actions = transport.list_actions().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert!(
+            fleet_native_session_holds(&actions, "zone-a")
+                .unwrap()
+                .contains(&report.hold_action_id)
+        );
+        assert!(!actions.iter().any(|action| matches!(
+            &action.action,
+            FleetAction::PolicyUpdate { .. } | FleetAction::NativeSessionResume { .. }
+        )));
+    }
+
+    #[test]
+    fn certified_rollout_rejects_scoped_or_unsupported_transport_before_publishing_a_hold() {
+        assert!(
+            FleetPolicyRollout::new(
+                "scoped-certification",
+                "zone-a",
+                rollout_artifact(1),
+                Duration::from_secs(20),
+                Duration::from_millis(10),
+            )
+            .unwrap()
+            .require_certified_quiescence(true)
+            .is_err()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut local = DurableFleetTransport::new(directory.path()).unwrap();
+        local.initialize().unwrap();
+        let report = operation("local-certification", 20).run(&mut local);
+        assert!(!report.completed);
+        assert!(
+            report
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("requires a transport")
+        );
+        assert!(local.list_actions().unwrap().is_empty());
+    }
+}

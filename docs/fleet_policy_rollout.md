@@ -31,6 +31,29 @@ Use `--zone all` for fleet-wide policy. Revisions are positive and monotonic wit
 
 The default timeout is 300 seconds and polling interval is 250 milliseconds. The timeout is one shared budget across connection initialization, HTTP requests, database waits, and all rollout phases. The final coordinator release also carries a wall-clock expiration checked within the admitting transaction. Poll intervals must be 10–5000 milliseconds, and timeout must be 1–86400 seconds. Choose a budget longer than your agents' normal observation interval.
 
+## Require certified quiescence at both policy boundaries
+
+Use `--require-certified-quiescence --zone all` with the HTTP coordinator when the policy change must consume enrolled native-supervisor certificates:
+
+```sh
+franken-node fleet policy rollout \
+  --id hardening-fleet-2026-11 \
+  --zone all \
+  --revision 7 \
+  --file policy.json \
+  --require-certified-quiescence \
+  --timeout-seconds 300 \
+  --json
+```
+
+The coordinator must have a separately provisioned `--coordinator-id` and `--coordinator-signing-key`. Every node in its `--node-credentials-file` must have an independently enrolled `supervisor_public_key_hex`. The local durable transport refuses this mode before creating a hold. The HTTP coordinator also refuses missing signing authority or supervisor roots; an unsuccessful certification leaves any already committed maintenance hold in force.
+
+The command commits a signed epoch while every enrolled supervisor reports a fresh terminal population under the hold. Policy publication consumes that retained epoch inside the same database transaction that checks the current action log and node observations. After all nodes acknowledge the policy, the command commits a newer epoch and consumes it atomically with its own hold release. The guard carries only an epoch reference; the coordinator loads the authenticated evidence from its durable history.
+
+A retained certificate can remain usable after later epochs advance if its exact action prefix, enrollment, hold owners, drain generation, project, and population remain unchanged. The mutation still requires fresh supervisor-signed successor observations and rechecks their expiry before commit. A heartbeat alone cannot refresh the signed population. Changed participants, an intervening action, a replaced signing root, or a pre-policy certificate used for resume causes refusal.
+
+Retry with the same certification flag. Epoch operation IDs bind the rollout identity, boundary stage, and exact full action prefix. When a mutation's response is lost, its original prefix is recovered from the immutable action log, so the same signed epoch and durable mutation receipt can be recovered without advancing twice. A retry cannot downgrade a certified publication or release to an ordinary observation receipt.
+
 ## Ownership, participants, and retries
 
 The required `--id` binds a deterministic hold, policy action, and resume action. Its hold reason binds the policy digest, which covers the revision and executable policy. Reusing the same ID with different policy contents, revision, or zone fails before further publication. For a new intended change, choose a new ID.
@@ -57,11 +80,14 @@ With `--json`, the command emits one `franken-node/fleet-policy-rollout-cli/v1` 
 | `timed_out` and `error` | Why the operation did not establish completion. |
 | `guarded_publication` | Original evidence accepted atomically with policy publication. |
 | `guarded_resume` | Original evidence accepted atomically with this owner's release, when confirmed. |
+| `require_certified_quiescence` | Whether both mutations require certified enrolled-supervisor boundaries. |
+| `publication_epoch`, `resume_epoch` | Signed historical epoch evidence and commit proofs for the two boundaries. |
+| `certified_boundaries_complete` | Both certified mutations and their matching historical epoch proofs have been recovered or committed. |
 | `evidence` | Most recent exact-snapshot observation, including remaining active holds. |
 
 A recovered receipt keeps its original acceptance time and evidence, changing only its explicit retry flag. Historical acceptance does not assert current node readiness; the command obtains fresh observations before reporting current completion.
 
-The policy enforcement scope is **new run admission**. These ordinary maintenance receipts report `fleet_quiescence_certified: false`. They do not replace the separate enrolled-supervisor epoch-barrier certificate workflow or claim process-tree quiescence.
+The policy enforcement scope is **new run admission**. Ordinary maintenance receipts report `fleet_quiescence_certified: false`. Certified mode marks the evidence accepted at each guarded mutation as certified and retains its signed epoch proof. The rollout's top-level `fleet_quiescence_certified` remains false: successful completion observes the release, and historical boundary certificates do not assert that the currently admitted population is quiescent.
 
 ## Safety boundaries
 
