@@ -135,7 +135,6 @@ struct PipeDrainResult {
 }
 
 impl LockstepHarness {
-    const DIRECTORY_ENTRY_CANDIDATES: [&'static str; 3] = ["index.js", "index.mjs", "index.cjs"];
     const BUN_DIRECTORY_ENTRY_CANDIDATES: [&'static str; 5] = [
         "index.ts",
         "index.tsx",
@@ -194,22 +193,6 @@ impl LockstepHarness {
         matches!(runtime, "node" | "bun")
     }
 
-    fn directory_entry_candidates(runtime: &str) -> &'static [&'static str] {
-        if runtime == "bun" {
-            &Self::BUN_DIRECTORY_ENTRY_CANDIDATES
-        } else {
-            &Self::DIRECTORY_ENTRY_CANDIDATES
-        }
-    }
-
-    fn entrypoint_extensions(runtime: &str) -> &'static [&'static str] {
-        if runtime == "bun" {
-            &["ts", "tsx", "js", "mjs", "cjs"]
-        } else {
-            &["js", "mjs", "cjs"]
-        }
-    }
-
     fn resolve_runtime_binary(runtime: &str) -> String {
         Self::resolve_runtime_binary_with(runtime, &|configured_hint| {
             // bd-zi9hj: no `franken-engine` CLI binary ships anywhere (the
@@ -258,15 +241,15 @@ impl LockstepHarness {
     }
 
     fn resolve_directory_entrypoint(runtime: &str, project_dir: &Path) -> Result<PathBuf> {
-        let package_json_path = project_dir.join("package.json");
-        let mut unresolved_main: Option<String> = None;
+        let root = project_dir.canonicalize().with_context(|| {
+            format!(
+                "failed resolving lockstep project root {}",
+                project_dir.display()
+            )
+        })?;
+        let package_json_path = root.join("package.json");
+        let mut main: Option<String> = None;
         if package_json_path.exists() {
-            let root = project_dir.canonicalize().with_context(|| {
-                format!(
-                    "failed resolving lockstep project root {}",
-                    project_dir.display()
-                )
-            })?;
             let resolved = package_json_path.canonicalize().with_context(|| {
                 format!(
                     "failed resolving package manifest {}",
@@ -282,28 +265,70 @@ impl LockstepHarness {
             let package_json = std::fs::read(&resolved).with_context(|| {
                 format!("failed reading package manifest {}", resolved.display())
             })?;
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&package_json).with_context(|| {
-                    format!(
-                        "invalid package manifest JSON while resolving lockstep entrypoint: {}",
-                        resolved.display()
-                    )
-                })?;
-
-            if let Some(main) = manifest
+            // Node accepts a leading UTF-8 BOM in package manifests.
+            let json = if runtime == "node" {
+                package_json
+                    .strip_prefix(&[0xef, 0xbb, 0xbf])
+                    .unwrap_or(&package_json)
+            } else {
+                &package_json
+            };
+            let manifest: serde_json::Value = serde_json::from_slice(json).with_context(|| {
+                format!(
+                    "invalid package manifest JSON while resolving lockstep entrypoint: {}",
+                    resolved.display()
+                )
+            })?;
+            main = manifest
                 .get("main")
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if let Some(resolved) = Self::resolve_entry_candidate(project_dir, main, runtime) {
-                    return Ok(resolved);
-                }
-                unresolved_main = Some(main.to_string());
-            }
+                .map(str::to_owned);
         }
 
-        for candidate in Self::directory_entry_candidates(runtime) {
+        if runtime == "node" {
+            // A declared main is a literal filename. Keep its whitespace and
+            // refuse disallowed spellings even when an index is available.
+            let main = main.as_deref().filter(|value| !value.is_empty());
+            if let Some(value) = main
+                && value.contains(['\\', '\0'])
+            {
+                anyhow::bail!(
+                    "package.json main `{value}` did not resolve under {}: expected a project-relative path",
+                    project_dir.display()
+                );
+            }
+            let target = crate::ops::engine_dispatcher::EngineDispatcher::resolve_commonjs_package_entry(
+                &root, main,
+            )
+            .map_err(anyhow::Error::msg)
+            .with_context(|| match main {
+                Some(value) => format!("package.json main `{value}` did not resolve under {} and no fallback entrypoint was found", root.display()),
+                None => format!("no executable JS entrypoint found under {}", root.display()),
+            })?;
+            // Validate the *winning* path. Searching onward after a disallowed
+            // winner would silently run a different program in the reference leg.
+            let resolved = target
+                .canonicalize()
+                .context("resolve selected Node entrypoint")?;
+            anyhow::ensure!(
+                resolved.starts_with(&root) && resolved.is_file(),
+                "no executable JS entrypoint found inside {}: selected file {} is outside the project or not regular",
+                root.display(),
+                resolved.display()
+            );
+            return Ok(resolved);
+        }
+
+        let unresolved_main = main
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(value) = unresolved_main
+            && let Some(resolved) = Self::resolve_bun_entry_candidate(project_dir, value)
+        {
+            return Ok(resolved);
+        }
+        for candidate in Self::BUN_DIRECTORY_ENTRY_CANDIDATES {
             let path = project_dir.join(candidate);
             if path.is_file() && Self::path_within_project(project_dir, &path) {
                 return Ok(path);
@@ -314,22 +339,18 @@ impl LockstepHarness {
             anyhow::bail!(
                 "package.json main `{main}` did not resolve under {} and no fallback entrypoint was found ({})",
                 project_dir.display(),
-                Self::directory_entry_candidates(runtime).join(", ")
+                Self::BUN_DIRECTORY_ENTRY_CANDIDATES.join(", ")
             );
         }
 
         anyhow::bail!(
             "no executable JS entrypoint found under {} (checked package.json main and {})",
             project_dir.display(),
-            Self::directory_entry_candidates(runtime).join(", ")
+            Self::BUN_DIRECTORY_ENTRY_CANDIDATES.join(", ")
         );
     }
 
-    fn resolve_entry_candidate(
-        project_dir: &Path,
-        raw_target: &str,
-        runtime: &str,
-    ) -> Option<PathBuf> {
+    fn resolve_bun_entry_candidate(project_dir: &Path, raw_target: &str) -> Option<PathBuf> {
         let normalized = raw_target.trim().trim_start_matches("./");
         if normalized.is_empty() {
             return None;
@@ -351,7 +372,7 @@ impl LockstepHarness {
         }
 
         if candidate.extension().is_none() {
-            for extension in Self::entrypoint_extensions(runtime) {
+            for extension in ["ts", "tsx", "js", "mjs", "cjs"] {
                 let with_extension = candidate.with_extension(extension);
                 if with_extension.is_file()
                     && Self::path_within_project(project_dir, &with_extension)
@@ -365,7 +386,7 @@ impl LockstepHarness {
             if !Self::path_within_project(project_dir, &candidate) {
                 return None;
             }
-            for entry in Self::directory_entry_candidates(runtime) {
+            for entry in Self::BUN_DIRECTORY_ENTRY_CANDIDATES {
                 let nested = candidate.join(entry);
                 if nested.is_file() && Self::path_within_project(project_dir, &nested) {
                     return Some(nested);
@@ -2257,6 +2278,86 @@ mod tests {
     }
 
     #[test]
+    fn node_directory_selection_uses_literal_main_and_commonjs_suffix_order() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(root.join("index.js"), "throw new Error('wrong entry');").unwrap();
+        std::fs::write(
+            root.join("program.prod.js"),
+            "throw new Error('trimmed name');",
+        )
+        .unwrap();
+        std::fs::write(root.join(" program.prod .json"), "{}").unwrap();
+        std::fs::write(root.join(" program.prod .js"), "console.log('literal');").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            "\u{feff}{\"main\":\" program.prod \"}",
+        )
+        .unwrap();
+        let selected = LockstepHarness::resolve_runtime_target("node", root).unwrap();
+        assert_eq!(
+            selected,
+            root.canonicalize().unwrap().join(" program.prod .js")
+        );
+
+        std::fs::create_dir(root.join("cli")).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"main":"./cli/"}"#).unwrap();
+        std::fs::write(root.join("cli/index.json"), "{}").unwrap();
+        // A nested manifest would restart LOAD_AS_DIRECTORY; Node instead
+        // tries LOAD_INDEX at this stage and picks the JSON file.
+        std::fs::write(root.join("cli/package.json"), r#"{"main":"other.cjs"}"#).unwrap();
+        std::fs::write(
+            root.join("cli/other.cjs"),
+            "throw new Error('wrong nested entry');",
+        )
+        .unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("cli/index.json")
+        );
+    }
+
+    #[test]
+    fn node_directory_does_not_infer_esm_or_cjs_suffixes() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        for name in ["entry.mjs", "entry.cjs", "index.mjs", "index.cjs"] {
+            std::fs::write(
+                root.join(name),
+                "console.log('must be explicitly selected');",
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("package.json"), r#"{"main":"entry"}"#).unwrap();
+        assert!(LockstepHarness::resolve_runtime_target("node", root).is_err());
+        std::fs::write(root.join("index.json"), "{}").unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("index.json")
+        );
+        std::fs::write(root.join("package.json"), r#"{"main":"entry.mjs"}"#).unwrap();
+        assert_eq!(
+            LockstepHarness::resolve_runtime_target("node", root).unwrap(),
+            root.canonicalize().unwrap().join("entry.mjs")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_directory_refuses_escaping_winner_even_when_fallback_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(outside.path().join("entry.js"), "console.log('outside');").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("entry.js"), root.join("selected.js"))
+            .unwrap();
+        std::fs::write(root.join("index.js"), "console.log('different program');").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"main":"selected"}"#).unwrap();
+        let error = LockstepHarness::resolve_runtime_target("node", root).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the project"));
+    }
+
+    #[test]
     fn resolve_runtime_target_falls_back_to_directory_index() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let expected = temp_dir.path().join("index.mjs");
@@ -2401,32 +2502,26 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         // ".." segments
         assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "../../etc/passwd", "node")
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "../../etc/passwd")
                 .is_none(),
             "must reject .. traversal"
         );
         // absolute path
         assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "/etc/passwd", "node")
-                .is_none(),
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "/etc/passwd").is_none(),
             "must reject absolute path"
         );
         // backslash
         assert!(
-            LockstepHarness::resolve_entry_candidate(
-                temp_dir.path(),
-                "..\\..\\etc\\passwd",
-                "node"
-            )
-            .is_none(),
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "..\\..\\etc\\passwd")
+                .is_none(),
             "must reject backslash traversal"
         );
         // embedded ".." in deeper path
         assert!(
-            LockstepHarness::resolve_entry_candidate(
+            LockstepHarness::resolve_bun_entry_candidate(
                 temp_dir.path(),
-                "dist/../../../etc/passwd",
-                "node"
+                "dist/../../../etc/passwd"
             )
             .is_none(),
             "must reject embedded .. traversal"
@@ -2437,10 +2532,8 @@ mod tests {
     fn resolve_entry_candidate_rejects_empty_after_normalization() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
 
-        assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), " ./ ", "node").is_none()
-        );
-        assert!(LockstepHarness::resolve_entry_candidate(temp_dir.path(), "", "node").is_none());
+        assert!(LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), " ./ ").is_none());
+        assert!(LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "").is_none());
     }
 
     #[test]
@@ -2450,8 +2543,7 @@ mod tests {
             .expect("write fallback entry");
 
         assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "index\0.js", "node")
-                .is_none(),
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "index\0.js").is_none(),
             "embedded NUL in package main must fail closed"
         );
     }
@@ -2494,7 +2586,7 @@ mod tests {
         std::fs::create_dir(temp_dir.path().join("dist")).expect("create dist");
 
         assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "dist", "node").is_none(),
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "dist").is_none(),
             "directory main without index candidate must not resolve"
         );
     }
@@ -2527,7 +2619,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_entry, &link_path).expect("symlink");
 
         assert!(
-            LockstepHarness::resolve_entry_candidate(temp_dir.path(), "entry.js", "node").is_none(),
+            LockstepHarness::resolve_bun_entry_candidate(temp_dir.path(), "entry.js").is_none(),
             "must reject symlinked entrypoint outside project"
         );
     }
