@@ -76,12 +76,6 @@ fn sanitize_log_identifier(identifier: &str) -> String {
     output
 }
 
-fn reindex_trace_steps(steps: &mut [TraceStep]) {
-    for (idx, step) in steps.iter_mut().enumerate() {
-        step.seq = u64::try_from(idx).unwrap_or(u64::MAX);
-    }
-}
-
 fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hasher.update(len.to_le_bytes());
@@ -205,6 +199,7 @@ pub mod error_codes {
     pub const ERR_TTR_REPLAY_FAILED: &str = "ERR_TTR_REPLAY_FAILED";
     pub const ERR_TTR_DUPLICATE_TRACE: &str = "ERR_TTR_DUPLICATE_TRACE";
     pub const ERR_TTR_TRACE_CAPACITY_EXCEEDED: &str = "ERR_TTR_TRACE_CAPACITY_EXCEEDED";
+    pub const ERR_TTR_CAPTURE_LIMIT_EXCEEDED: &str = "ERR_TTR_CAPTURE_LIMIT_EXCEEDED";
     pub const ERR_TTR_STEP_ORDER_VIOLATION: &str = "ERR_TTR_STEP_ORDER_VIOLATION";
     pub const ERR_TTR_TRACE_NOT_FOUND: &str = "ERR_TTR_TRACE_NOT_FOUND";
 
@@ -260,6 +255,14 @@ pub enum TimeTravelError {
     DuplicateTrace { trace_id: String },
     /// The engine is already at trace-registration capacity.
     TraceCapacityExceeded { trace_id: String, capacity: usize },
+    /// A complete trace would exceed its capture or replay resource limit.
+    /// The excess must never be truncated and re-sealed as a complete trace.
+    CaptureLimitExceeded {
+        trace_id: String,
+        field: String,
+        limit: usize,
+        observed: usize,
+    },
     /// Steps are not in the correct order.
     StepOrderViolation { trace_id: String, step_seq: u64 },
     /// Trace not found in engine.
@@ -344,6 +347,18 @@ impl fmt::Display for TimeTravelError {
                     error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED
                 )
             }
+            Self::CaptureLimitExceeded {
+                trace_id,
+                field,
+                limit,
+                observed,
+            } => {
+                write!(
+                    f,
+                    "[{0}] trace {trace_id}: {field} count {observed} exceeds limit {limit}; refusing an incomplete trace",
+                    error_codes::ERR_TTR_CAPTURE_LIMIT_EXCEEDED
+                )
+            }
             Self::StepOrderViolation { trace_id, step_seq } => {
                 write!(
                     f,
@@ -374,6 +389,7 @@ impl TimeTravelError {
             Self::ReplayFailed { .. } => error_codes::ERR_TTR_REPLAY_FAILED,
             Self::DuplicateTrace { .. } => error_codes::ERR_TTR_DUPLICATE_TRACE,
             Self::TraceCapacityExceeded { .. } => error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED,
+            Self::CaptureLimitExceeded { .. } => error_codes::ERR_TTR_CAPTURE_LIMIT_EXCEEDED,
             Self::StepOrderViolation { .. } => error_codes::ERR_TTR_STEP_ORDER_VIOLATION,
             Self::TraceNotFound { .. } => error_codes::ERR_TTR_TRACE_NOT_FOUND,
         }
@@ -381,6 +397,40 @@ impl TimeTravelError {
 }
 
 impl std::error::Error for TimeTravelError {}
+
+/// Reject an oversized trace population before a caller materializes step
+/// payloads or CAS objects. Capture, imported traces and operator navigation use
+/// the same limit; none may certify a retained suffix as the complete history.
+pub fn validate_trace_step_count(
+    trace_id: &str,
+    step_count: usize,
+) -> Result<(), TimeTravelError> {
+    if step_count > MAX_TRACE_STEPS {
+        return Err(TimeTravelError::CaptureLimitExceeded {
+            trace_id: trace_id.to_string(),
+            field: "steps".to_string(),
+            limit: MAX_TRACE_STEPS,
+            observed: step_count,
+        });
+    }
+    Ok(())
+}
+
+fn validate_step_side_effect_count(
+    trace_id: &str,
+    step_seq: u64,
+    side_effect_count: usize,
+) -> Result<(), TimeTravelError> {
+    if side_effect_count > MAX_SIDE_EFFECTS_PER_STEP {
+        return Err(TimeTravelError::CaptureLimitExceeded {
+            trace_id: trace_id.to_string(),
+            field: format!("steps[{step_seq}].side_effects"),
+            limit: MAX_SIDE_EFFECTS_PER_STEP,
+            observed: side_effect_count,
+        });
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Audit log entry
@@ -637,15 +687,16 @@ pub struct TraceStep {
 }
 
 impl TraceStep {
-    /// Create a new trace step.
+    /// Create a new trace step without altering its captured evidence.
+    /// [`TraceBuilder`] and [`WorkflowTrace::validate`] reject excess effects;
+    /// silently truncating them here would authenticate an incomplete history.
     pub fn new(
         seq: u64,
         input: Vec<u8>,
         output: Vec<u8>,
-        mut side_effects: Vec<SideEffect>,
+        side_effects: Vec<SideEffect>,
         timestamp_ns: u64,
     ) -> Self {
-        side_effects.truncate(MAX_SIDE_EFFECTS_PER_STEP);
         Self {
             seq,
             input,
@@ -773,6 +824,7 @@ impl WorkflowTrace {
     fn validate_structure(&self) -> Result<(), TimeTravelError> {
         validate_trace_identifier_field("trace_id", &self.trace_id)?;
         validate_trace_identifier_field("workflow_name", &self.workflow_name)?;
+        validate_trace_step_count(&self.trace_id, self.steps.len())?;
 
         // INV-TTR-TRACE-COMPLETE: must have at least one step
         if self.steps.is_empty() {
@@ -783,6 +835,7 @@ impl WorkflowTrace {
 
         // INV-TTR-STEP-ORDER: verify strict sequential ordering
         for (i, step) in self.steps.iter().enumerate() {
+            validate_step_side_effect_count(&self.trace_id, step.seq, step.side_effects.len())?;
             let expected_seq = u64::try_from(i).unwrap_or(u64::MAX);
             if !matches!(step.seq.cmp(&expected_seq), std::cmp::Ordering::Equal) {
                 return Err(TimeTravelError::SequenceGap {
@@ -834,6 +887,7 @@ pub struct TraceBuilder {
     steps: Vec<TraceStep>,
     next_seq: u64,
     audit_log: Vec<AuditEntry>,
+    capture_error: Option<TimeTravelError>,
 }
 
 impl TraceBuilder {
@@ -875,12 +929,18 @@ impl TraceBuilder {
             steps: Vec::new(),
             next_seq: 0,
             audit_log,
+            capture_error: None,
         }
     }
 
     /// Record a trace step.
     /// Emits event TTR-002 (step recorded).
-    /// Returns the assigned sequence number.
+    /// Returns the attempted sequence number. If a capacity limit is exceeded,
+    /// capture becomes permanently invalid and further records are discarded
+    /// without altering the retained prefix. [`Self::build`] reports the first
+    /// error rather than sealing a truncated trace. Callers that know their
+    /// population in advance can use [`validate_trace_step_count`] to fail before
+    /// materializing payloads.
     pub fn record_step(
         &mut self,
         input: Vec<u8>,
@@ -889,15 +949,35 @@ impl TraceBuilder {
         timestamp_ns: u64,
     ) -> u64 {
         let seq = self.next_seq;
-        let will_evict = self.steps.len() >= MAX_TRACE_STEPS;
-        push_bounded(
-            &mut self.steps,
-            TraceStep::new(seq, input, output, side_effects, timestamp_ns),
-            MAX_TRACE_STEPS,
-        );
-        if will_evict {
-            reindex_trace_steps(&mut self.steps);
+        self.next_seq = self.next_seq.saturating_add(1);
+        if self.capture_error.is_some() {
+            return seq;
         }
+        let limits = validate_trace_step_count(&self.trace_id, self.steps.len().saturating_add(1))
+            .and_then(|()| {
+                validate_step_side_effect_count(&self.trace_id, seq, side_effects.len())
+            });
+        if let Err(error) = limits {
+            push_bounded(
+                &mut self.audit_log,
+                AuditEntry::new(
+                    event_codes::TTR_010,
+                    &self.trace_id,
+                    &sanitize_log_identifier(&error.to_string()),
+                    timestamp_ns,
+                ),
+                MAX_AUDIT_LOG_ENTRIES,
+            );
+            self.capture_error = Some(error);
+            return seq;
+        }
+        self.steps.push(TraceStep::new(
+            seq,
+            input,
+            output,
+            side_effects,
+            timestamp_ns,
+        ));
         let trace_id = self.trace_id.clone();
         push_bounded(
             &mut self.audit_log,
@@ -909,13 +989,15 @@ impl TraceBuilder {
             ),
             MAX_AUDIT_LOG_ENTRIES,
         );
-        self.next_seq = self.next_seq.saturating_add(1);
         seq
     }
 
     /// Finalize the trace, computing the digest.
     /// Emits event TTR-003 (capture completed) and TTR-009/TTR-010 (integrity).
     pub fn build(mut self) -> Result<(WorkflowTrace, Vec<AuditEntry>), TimeTravelError> {
+        if let Some(error) = self.capture_error {
+            return Err(error);
+        }
         if self.steps.is_empty() {
             return Err(TimeTravelError::EmptyTrace {
                 trace_id: self.trace_id,
@@ -1852,6 +1934,10 @@ impl StepNavigator {
 /// Useful for testing and verification scripts.
 #[cfg(any(test, feature = "test-support"))]
 pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) -> WorkflowTrace {
+    assert!(
+        step_count <= MAX_TRACE_STEPS,
+        "demo trace exceeds the complete trace step limit"
+    );
     let env = EnvironmentSnapshot::new(
         1_000_000,
         BTreeMap::from([("FRANKEN_NODE_PROFILE".to_string(), "balanced".to_string())]),
@@ -1866,14 +1952,7 @@ pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) 
         let effects = vec![SideEffect::new("log", format!("effect-{i}").into_bytes())];
         let seq = u64::try_from(i).unwrap_or(u64::MAX);
         let timestamp = seq.saturating_add(1).saturating_mul(1000);
-        push_bounded(
-            &mut steps,
-            TraceStep::new(seq, input, output, effects, timestamp),
-            MAX_TRACE_STEPS,
-        );
-    }
-    if step_count > MAX_TRACE_STEPS {
-        reindex_trace_steps(&mut steps);
+        steps.push(TraceStep::new(seq, input, output, effects, timestamp));
     }
 
     WorkflowTrace {
@@ -2159,14 +2238,30 @@ mod tests {
     }
 
     #[test]
-    fn trace_step_bounds_side_effects() {
+    fn trace_step_preserves_excess_effects_for_fail_closed_validation() {
         let side_effects = (0..MAX_SIDE_EFFECTS_PER_STEP.saturating_add(32))
             .map(|idx| SideEffect::new("effect", idx.to_le_bytes().to_vec()))
             .collect();
 
         let step = TraceStep::new(0, vec![], vec![], side_effects, 0);
 
-        assert_eq!(step.side_effects.len(), MAX_SIDE_EFFECTS_PER_STEP);
+        assert_eq!(step.side_effects.len(), MAX_SIDE_EFFECTS_PER_STEP + 32);
+        let mut changed = step.clone();
+        changed.side_effects.last_mut().unwrap().payload.push(0xff);
+        assert_ne!(step.side_effects_digest(), changed.side_effects_digest());
+
+        let mut trace = one_step_trace("excess-effects");
+        trace.steps[0] = step;
+        trace = trace.with_canonical_digest();
+        assert_eq!(
+            trace.validate().unwrap_err(),
+            TimeTravelError::CaptureLimitExceeded {
+                trace_id: "excess-effects".to_string(),
+                field: "steps[0].side_effects".to_string(),
+                limit: MAX_SIDE_EFFECTS_PER_STEP,
+                observed: MAX_SIDE_EFFECTS_PER_STEP + 32,
+            }
+        );
     }
 
     #[test]
@@ -5473,34 +5568,156 @@ mod tests {
             );
         }
 
-        // Verify capacity is still enforced (push_bounded should evict old entries)
+        // Preserve the complete original prefix for diagnosis, never reindex a
+        // suffix or silently accept later events after capture overflow.
         assert_eq!(
             builder.steps.len(),
             MAX_TRACE_STEPS,
             "TraceBuilder steps should be bounded by MAX_TRACE_STEPS"
         );
-
-        // Verify most recent steps are preserved after FIFO eviction.
+        assert_eq!(builder.steps[0].seq, 0);
+        assert_eq!(builder.steps[0].input, b"input-0");
         let last_step = &builder.steps[builder.steps.len() - 1];
-        assert!(
-            String::from_utf8_lossy(&last_step.input).starts_with("overflow-input-"),
-            "Most recent step should be preserved after overflow"
-        );
-
-        let (trace, _) = builder
-            .build()
-            .expect("bounded trace should remain valid after evicting old steps");
-        assert!(trace.validate().is_ok());
-        assert_eq!(trace.steps[0].seq, 0);
         assert_eq!(
-            trace.steps[trace.steps.len() - 1].seq,
-            u64::try_from(MAX_TRACE_STEPS.saturating_sub(1)).unwrap_or(u64::MAX)
+            last_step.input,
+            format!("input-{}", MAX_TRACE_STEPS - 1).as_bytes()
         );
-        assert!(
-            String::from_utf8_lossy(&trace.steps[trace.steps.len() - 1].input)
-                .starts_with("overflow-input-"),
-            "Built trace should preserve the newest bounded window"
+        assert_eq!(last_step.seq, (MAX_TRACE_STEPS - 1) as u64);
+        let error = builder
+            .build()
+            .expect_err("an overflowed capture must never seal a partial history");
+        assert_eq!(
+            error,
+            TimeTravelError::CaptureLimitExceeded {
+                trace_id: "bound-test".to_string(),
+                field: "steps".to_string(),
+                limit: MAX_TRACE_STEPS,
+                observed: MAX_TRACE_STEPS + 1,
+            }
         );
+        assert_eq!(error.code(), error_codes::ERR_TTR_CAPTURE_LIMIT_EXCEEDED);
+    }
+
+    #[test]
+    fn trace_builder_at_capacity_preserves_initial_event_and_navigation() {
+        let mut builder = TraceBuilder::new("full-history", "incident-replay", demo_env());
+        for index in 0..MAX_TRACE_STEPS {
+            builder.record_step(
+                index.to_le_bytes().to_vec(),
+                vec![u8::from(index == 0)],
+                Vec::new(),
+                index as u64,
+            );
+        }
+        let (trace, _) = builder.build().expect("exact-capacity history is complete");
+        let mut navigator = StepNavigator::new(trace.clone()).unwrap();
+        assert_eq!(navigator.step_count(), MAX_TRACE_STEPS);
+        assert_eq!(navigator.current().seq, 0);
+        let initial_digest = navigator.current().output_digest;
+        navigator.step_to((MAX_TRACE_STEPS - 1) as u64).unwrap();
+        assert_eq!(navigator.current().seq, (MAX_TRACE_STEPS - 1) as u64);
+        assert_ne!(navigator.current().output_digest, initial_digest);
+        navigator.step_to(0).unwrap();
+        assert_eq!(navigator.current().output_digest, initial_digest);
+
+        let mut engine = ReplayEngine::new();
+        engine.register_trace(trace).unwrap();
+        let replay = engine
+            .replay_with_adapter("full-history", |step, _| {
+                // The first event must remain visible to the comparator even
+                // when the rest of a maximum-sized history is identical.
+                Ok((vec![0], step.side_effects.clone()))
+            })
+            .unwrap();
+        assert_eq!(replay.verdict, ReplayVerdict::Diverged(1));
+        assert_eq!(replay.divergences[0].step_seq, 0);
+        assert_eq!(replay.steps_replayed, MAX_TRACE_STEPS as u64);
+    }
+
+    #[test]
+    fn imported_oversized_trace_cannot_bypass_builder_limits() {
+        let mut trace = one_step_trace("import-overflow");
+        trace.steps = (0..=MAX_TRACE_STEPS)
+            .map(|seq| TraceStep::new(seq as u64, Vec::new(), Vec::new(), Vec::new(), 0))
+            .collect();
+        trace = trace.with_canonical_digest();
+        let bytes = serde_json::to_vec(&trace).unwrap();
+        let imported: WorkflowTrace = serde_json::from_slice(&bytes).unwrap();
+        let expected = TimeTravelError::CaptureLimitExceeded {
+            trace_id: "import-overflow".to_string(),
+            field: "steps".to_string(),
+            limit: MAX_TRACE_STEPS,
+            observed: MAX_TRACE_STEPS + 1,
+        };
+        assert_eq!(imported.validate().unwrap_err(), expected);
+        assert_eq!(StepNavigator::new(imported.clone()).unwrap_err(), expected);
+        let mut engine = ReplayEngine::new();
+        assert_eq!(engine.register_trace(imported).unwrap_err(), expected);
+        assert_eq!(engine.trace_count(), 0);
+    }
+
+    #[test]
+    fn side_effect_overflow_poison_is_sticky_across_later_valid_steps() {
+        let mut builder = TraceBuilder::new("effect-overflow", "incident-replay", demo_env());
+        builder.record_step(b"first".to_vec(), vec![1], Vec::new(), 0);
+        builder.record_step(
+            b"overflow".to_vec(),
+            vec![2],
+            vec![SideEffect::new("fs_write", vec![0]); MAX_SIDE_EFFECTS_PER_STEP + 1],
+            1,
+        );
+        // A later ordinary step cannot hide the incomplete effect population.
+        builder.record_step(b"later".to_vec(), vec![3], Vec::new(), 2);
+        assert_eq!(builder.step_count(), 1);
+        assert_eq!(builder.steps[0].input, b"first");
+        assert_eq!(
+            builder.build().unwrap_err(),
+            TimeTravelError::CaptureLimitExceeded {
+                trace_id: "effect-overflow".to_string(),
+                field: "steps[1].side_effects".to_string(),
+                limit: MAX_SIDE_EFFECTS_PER_STEP,
+                observed: MAX_SIDE_EFFECTS_PER_STEP + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn imported_effect_limit_accepts_boundary_and_rejects_excess() {
+        let mut trace = one_step_trace("effect-boundary");
+        trace.steps[0].side_effects =
+            vec![SideEffect::new("clock_read", vec![0]); MAX_SIDE_EFFECTS_PER_STEP];
+        trace = trace.with_canonical_digest();
+        assert!(trace.validate().is_ok());
+        assert_eq!(
+            StepNavigator::new(trace.clone())
+                .unwrap()
+                .current()
+                .side_effect_count,
+            MAX_SIDE_EFFECTS_PER_STEP
+        );
+        trace.steps[0]
+            .side_effects
+            .push(SideEffect::new("fs_write", vec![0xff]));
+        trace = trace.with_canonical_digest();
+        let imported: WorkflowTrace =
+            serde_json::from_slice(&serde_json::to_vec(&trace).unwrap()).unwrap();
+        let expected = TimeTravelError::CaptureLimitExceeded {
+            trace_id: "effect-boundary".to_string(),
+            field: "steps[0].side_effects".to_string(),
+            limit: MAX_SIDE_EFFECTS_PER_STEP,
+            observed: MAX_SIDE_EFFECTS_PER_STEP + 1,
+        };
+        assert_eq!(StepNavigator::new(imported.clone()).unwrap_err(), expected);
+        assert_eq!(
+            ReplayEngine::new().register_trace(imported).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "demo trace exceeds the complete trace step limit")]
+    fn demo_trace_refuses_to_manufacture_a_complete_truncated_history() {
+        build_demo_trace("demo-overflow", "test", MAX_TRACE_STEPS + 1);
     }
 
     #[test]

@@ -208,13 +208,19 @@ mod tests {
 
         assert_eq!(builder.step_count(), MAX_TRACE_STEPS);
 
-        // Additional steps should be silently ignored to preserve ordering
+        // Exceeding capacity invalidates the complete capture. Keeping a
+        // bounded prefix does not make a truncated history replayable.
         builder.record_step(vec![255], vec![255], vec![], u64::MAX);
-        assert_eq!(builder.step_count(), MAX_TRACE_STEPS); // Should not increase
-
-        let (trace, _) = builder.build().unwrap();
-        assert!(trace.validate().is_ok());
-        assert_eq!(trace.steps.len(), MAX_TRACE_STEPS);
+        assert_eq!(builder.step_count(), MAX_TRACE_STEPS);
+        assert_eq!(
+            builder.build().unwrap_err(),
+            TimeTravelError::CaptureLimitExceeded {
+                trace_id: "max-steps".to_string(),
+                field: "steps".to_string(),
+                limit: MAX_TRACE_STEPS,
+                observed: MAX_TRACE_STEPS + 1,
+            }
+        );
     }
 
     #[test]

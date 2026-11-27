@@ -25470,6 +25470,50 @@ mod incident_list_tests {
     }
 
     #[test]
+    fn incident_time_travel_keeps_complete_history_and_refuses_oversized_population() {
+        use frankenengine_node::capacity_defaults::aliases::MAX_TRACE_STEPS;
+        use frankenengine_node::replay::time_travel_engine::{ReplayVerdict, error_codes};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle_path = temp.path().join("INC-NAV-BOUNDS.fnbundle");
+        write_fixture_bundle(&bundle_path, "INC-NAV-BOUNDS", "high");
+        let mut summary = incident_replay_cli_summary(
+            &bundle_path,
+            &incident_test_trusted_key_ids(),
+            false,
+            false,
+            None,
+            None,
+            std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
+        )
+        .expect("authenticate recorded incident");
+        let report = build_incident_time_travel_report(&summary, true, Some(1))
+            .expect("inspect the complete authenticated timeline");
+        assert_eq!(report.total_steps, summary.timeline.len());
+        assert_eq!(report.steps.len(), 3);
+        assert_eq!(report.steps[0].seq, 0);
+        assert_eq!(report.selected_step.seq, 1);
+        assert_eq!(report.replay_verdict, ReplayVerdict::Identical);
+        assert_eq!(
+            report.steps[0].post_state_hashes,
+            report.steps[1].pre_state_hashes
+        );
+
+        // Exercise the actual CLI report helper's allocation preflight. This
+        // synthetic oversized population is not an authenticated replay claim;
+        // it must be rejected before creating its per-event CAS objects, even
+        // though the retained summary's claimed event_count is still only 3.
+        let event = summary.timeline[0].clone();
+        summary.timeline.resize(MAX_TRACE_STEPS + 1, event);
+        let error = build_incident_time_travel_report(&summary, true, Some(0))
+            .expect_err("an oversized population must not be silently reindexed");
+        let message = error.to_string();
+        assert!(message.contains(error_codes::ERR_TTR_CAPTURE_LIMIT_EXCEEDED));
+        assert!(message.contains(&format!("count {}", MAX_TRACE_STEPS + 1)));
+        assert!(message.contains(&format!("limit {MAX_TRACE_STEPS}")));
+    }
+
+    #[test]
     fn incident_replay_summary_rejects_missing_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("missing.fnbundle");
@@ -30093,11 +30137,13 @@ fn build_incident_time_travel_report(
     step: Option<u64>,
 ) -> Result<frankenengine_node::replay::time_travel_engine::TimeTravelNavigationReport> {
     use frankenengine_node::replay::time_travel_engine::{
-        EnvironmentSnapshot, ReplayEngine, SideEffect, TraceBuilder,
+        EnvironmentSnapshot, ReplayEngine, SideEffect, TraceBuilder, validate_trace_step_count,
     };
     use frankenengine_node::storage::cas::ContentAddressedStore;
 
     let ttr_trace_id = sanitize_ttr_trace_identifier(&summary.incident_id);
+    validate_trace_step_count(&ttr_trace_id, summary.timeline.len())
+        .map_err(|err| anyhow::anyhow!("build time-travel workflow trace: {err}"))?;
     let clock_seed_ns = chrono::DateTime::parse_from_rfc3339(&summary.bundle_created_at)
         .ok()
         .and_then(|dt| dt.timestamp_nanos_opt())

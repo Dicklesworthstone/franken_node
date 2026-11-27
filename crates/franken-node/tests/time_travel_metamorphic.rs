@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use frankenengine_node::capacity_defaults::aliases::MAX_TRACE_STEPS;
 use frankenengine_node::replay::time_travel_engine::{
     AuditEntry, DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect,
-    TraceBuilder, TraceStep, WorkflowTrace, event_codes,
+    TimeTravelError, TraceBuilder, TraceStep, WorkflowTrace, event_codes,
 };
 use frankenengine_node::storage::cas::{ContentAddressedStore, content_hash};
 
@@ -857,33 +857,21 @@ fn trace_builder_respects_max_capacity() {
         assert_eq!(builder.step_count(), std::cmp::min(i + 1, MAX_TRACE_STEPS));
     }
 
-    let (trace, _audit_log) = builder
-        .build()
-        .expect("trace should build successfully even when capped");
-
-    assert_eq!(trace.steps.len(), MAX_TRACE_STEPS);
-
-    // The retained bounded window must be reindexed from zero after old steps
-    // are evicted, so validation has no sequence gaps.
-    for (index, step) in trace.steps.iter().enumerate() {
-        assert_eq!(
-            step.seq, index as u64,
-            "Capped trace step at index {index} has seq {}, expected {index}",
-            step.seq
-        );
-    }
-
-    assert_eq!(trace.steps[0].seq, 0);
+    // Bounded retention cannot certify a complete history after overflow;
+    // repeated later attempts must preserve the first failure, not clear it.
     assert_eq!(
-        trace.steps[MAX_TRACE_STEPS - 1].seq,
-        (MAX_TRACE_STEPS - 1) as u64
+        builder.audit_log().last().unwrap().event_code,
+        event_codes::TTR_010
     );
     assert_eq!(
-        trace.steps[MAX_TRACE_STEPS - 1].timestamp_ns,
-        1_000_000 + (total_attempts - 1) as u64,
-        "bounded trace should retain the newest step after overflow"
+        builder.build().unwrap_err(),
+        TimeTravelError::CaptureLimitExceeded {
+            trace_id: trace_id.to_string(),
+            field: "steps".to_string(),
+            limit: MAX_TRACE_STEPS,
+            observed: MAX_TRACE_STEPS + 1,
+        }
     );
-    assert!(trace.validate().is_ok());
 }
 
 #[cfg(test)]
