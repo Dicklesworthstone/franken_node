@@ -323,6 +323,8 @@ for (const source of cases.filter((item) => item.format === "publisher-source-tr
 if (trustPositive === 0 || trustNegative === 0) throw new Error("publisher trust matrix is missing");
 let nativePositive = 0;
 let nativeNegative = 0;
+let nativeGraphPositive = 0;
+let nativeGraphNegative = 0;
 for (const observation of cases.filter((item) => item.format === "native-session-forensics")) {
   try {
     const verified = await verifyArtifact(Buffer.from(observation.input_hex, "hex"), observation.anchor,
@@ -377,13 +379,17 @@ for (const observation of cases.filter((item) => item.format === "native-session
       }
     }
     nativePositive += 1;
+    if (observation.graph_report_path !== undefined) nativeGraphPositive += 1;
   } catch (error: unknown) {
     if (observation.expected === "verified" || !(error instanceof VerifierError)
         || error.code !== observation.expected) throw error;
     nativeNegative += 1;
+    if (observation.graph_report_path !== undefined) nativeGraphNegative += 1;
   }
 }
 if (nativePositive === 0 || nativeNegative === 0) throw new Error("native-session matrix is missing");
+assert.deepEqual([nativeGraphPositive, nativeGraphNegative], [5, 13],
+  "all accepted and rejected native graph witnesses must execute");
 let archivePositive = 0;
 let archiveNegative = 0;
 for (const archive of cases.filter((item) => item.format === "native-session-cold-archive")) {
@@ -418,7 +424,10 @@ for (const archive of cases.filter((item) => item.format === "native-session-col
     archiveNegative += 1;
   }
 }
-assert(archivePositive === 7 && archiveNegative === 15, "archive population and authority matrix must execute");
+// V2 adds two authenticated identities and seven typed refusals to the v1
+// population. Require the complete reviewed matrix, including both versions.
+assert.deepEqual([archivePositive, archiveNegative], [9, 22],
+  "archive population and authority matrix must execute");
 let sessionPositive = 0;
 let sessionNegative = 0;
 const sessionVerdicts = new Set<string>();
