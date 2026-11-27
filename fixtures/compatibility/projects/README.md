@@ -1,6 +1,6 @@
 # Executable multi-file project corpus
 
-The collection contains 161 fixture cases in 24 manifests. They exercise CommonJS/ESM module graphs,
+The collection exercises CommonJS/ESM module graphs,
 node_modules packages, scoped and conditional exports, nested dependency
 precedence, package imports/self-reference, builtins through dependencies, and
 filesystem effects. Every case is a complete captured project; execution never
@@ -71,6 +71,11 @@ the run was cancelled, or reference evidence was inconclusive. Exit 2 means an
 input/preflight failure.
 
 ## Filesystem expectations and artifacts
+
+A case's entry may name a captured JavaScript file, a directory containing captured
+files, or `.` for the project root. The runner passes directory operands to each
+runtime unchanged by package lookup. The `directory-entry.corpus.json` cases
+exercise CommonJS and ESM package mains, directory mains and index fallback.
 
 Each case's files map contains the initial project files as text, including
 package manifests and captured dependencies. expected.files optionally maps

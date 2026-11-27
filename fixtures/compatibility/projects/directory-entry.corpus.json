@@ -1,0 +1,88 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Directory entrypoints passed directly to each runtime so package main, index fallback and module format are selected by the launcher.",
+  "cases": [
+    {
+      "id": "directory-root-commonjs-main",
+      "category": "directory-entry",
+      "description": "Launch the workspace root. A nested CommonJS main loads a relative helper and wins over the root index.",
+      "entry": ".",
+      "files": {
+        "package.json": "{\"main\":\"./src/start.cjs\",\"type\":\"commonjs\"}\n",
+        "src/start.cjs": "console.log('root', require('./value.cjs'));\n",
+        "src/value.cjs": "module.exports = 42;\n",
+        "index.js": "console.log('unexpected root index');\n"
+      },
+      "expected": {
+        "stdout": "root 42\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    },
+    {
+      "id": "directory-esm-package-scope",
+      "category": "directory-entry",
+      "description": "A nested package main uses the nearest module type and imports a relative ESM dependency.",
+      "entry": "packages/app",
+      "files": {
+        "package.json": "{\"type\":\"commonjs\"}\n",
+        "packages/app/package.json": "{\"type\":\"module\",\"main\":\"./src/start.js\"}\n",
+        "packages/app/src/start.js": "import { format } from './format.js';\nconsole.log(format('esm'));\n",
+        "packages/app/src/format.js": "export const format = value => '[' + value + ']';\n"
+      },
+      "expected": {
+        "stdout": "[esm]\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    },
+    {
+      "id": "directory-package-main-index",
+      "category": "directory-entry",
+      "description": "An app points main at a directory. Its CommonJS index loads data alongside that directory.",
+      "entry": "app",
+      "files": {
+        "app/package.json": "{\"main\":\"./lib\"}\n",
+        "app/lib/index.js": "const settings = require('./settings.json');\nconsole.log(settings.name, settings.workers);\n",
+        "app/lib/settings.json": "{\"name\":\"workers\",\"workers\":3}\n",
+        "app/index.js": "console.log('unexpected package index');\n"
+      },
+      "expected": {
+        "stdout": "workers 3\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    },
+    {
+      "id": "directory-implicit-index",
+      "category": "directory-entry",
+      "description": "A package with no manifest starts its index.js, which resolves a local dependency through node_modules.",
+      "entry": "app",
+      "files": {
+        "app/index.js": "console.log(require('directory-greeting'));\n",
+        "app/node_modules/directory-greeting/index.js": "module.exports = 'implicit index';\n"
+      },
+      "expected": {
+        "stdout": "implicit index\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    },
+    {
+      "id": "directory-dotted-main",
+      "category": "directory-entry",
+      "description": "An extensionless CommonJS search appends .js to a dotted main filename. A sibling index makes incorrect fallback observable.",
+      "entry": "app",
+      "files": {
+        "app/package.json": "{\"main\":\"dist/worker.v2\"}\n",
+        "app/dist/worker.v2.js": "console.log('worker v2');\n",
+        "app/index.js": "console.log('unexpected fallback');\n"
+      },
+      "expected": {
+        "stdout": "worker v2\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    }
+  ]
+}

@@ -123,9 +123,15 @@ def validate_corpus(corpus: Any) -> dict[str, Any]:
         for path in paths:
             if any(str(parent) in paths for parent in PurePosixPath(path).parents):
                 raise ValueError(f"{name}: file/directory collision at {path}")
-        entry = relative_path(case["entry"])
-        if entry not in paths or PurePosixPath(entry).suffix not in (".js", ".cjs", ".mjs"):
-            raise ValueError(f"{name}: entry must name a captured JavaScript file")
+        # Stage creates precisely the directories implied by the captured files.
+        # Let each runtime resolve the original directory operand independently.
+        if case["entry"] != ".":
+            entry = relative_path(case["entry"])
+            if entry in paths:
+                if PurePosixPath(entry).suffix not in (".js", ".cjs", ".mjs"):
+                    raise ValueError(f"{name}: file entry must name captured JavaScript")
+            elif not any(path.startswith(entry + "/") for path in paths):
+                raise ValueError(f"{name}: entry must name a captured file or directory")
         args = case.get("args", [])
         if not isinstance(args, list) or len(args) > 128:
             raise ValueError(f"{name}: args must be an array of at most 128 strings")
@@ -395,7 +401,7 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
     # None of the processes executes from the source checkout.
     for runtime in runtimes:
         stage(case, directory / runtime / "project")
-    entry = "./" + case["entry"]
+    entry = "." if case["entry"] == "." else "./" + case["entry"]
     args = case.get("args", [])
     commands = {
         "reference": [str(node), entry, *args],

@@ -40,6 +40,19 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 runner.relative_path(path)
 
+    def test_directory_entry_must_be_part_of_the_captured_tree(self):
+        value = case()
+        value["files"] = {"apps/main/index.js": "", "settings.json": "{}"}
+        for entry in (".", "apps", "apps/main", "apps/main/index.js"):
+            with self.subTest(entry=entry):
+                value["entry"] = entry
+                runner.validate_corpus(corpus(value))
+        for entry in ("app", "apps/m", "apps/missing", "apps/../apps/main",
+                      "/apps/main", "settings.json", "./apps", ".git"):
+            with self.subTest(entry=entry), self.assertRaises(ValueError):
+                value["entry"] = entry
+                runner.validate_corpus(corpus(value))
+
     def test_invalid_corpora(self):
         invalid = [corpus(case(), case()), {"schema_version": runner.SCHEMA, "cases": []}]
         for mutate in (
@@ -186,6 +199,21 @@ else:
         self.assertLessEqual(report["started_at"], report["finished_at"])
         self.assertTrue(report["host"]["system"])
         self.assertEqual(report["candidate_source_binding"], "not_established_by_this_runner")
+
+    def test_directory_operand_reaches_each_runtime_without_preresolution(self):
+        root = case("root-directory")
+        root.update(entry=".", files={"index.js": "console.log(42);"})
+        nested = case("nested-directory")
+        nested.update(entry="app", files={"app/package.json": '{"main":"start.cjs"}',
+                                          "app/start.cjs": "console.log(42);"})
+        report = self.run_triad(root, nested)
+        self.assertEqual(report["verdict"], "PASS", report)
+        for value, operand in ((root, "."), (nested, "./app")):
+            for role in ("reference", "bun", "candidate"):
+                with self.subTest(case=value["id"], role=role):
+                    receipt = self.root / "artifacts" / value["id"] / role / "execution/watchdog.json"
+                    argv = json.loads(receipt.read_text())["command"]
+                    self.assertEqual(argv[2 if role == "candidate" else 1], operand)
 
     def test_three_runtime_reference_agreement_is_recorded(self):
         report = self.run_triad(case())
