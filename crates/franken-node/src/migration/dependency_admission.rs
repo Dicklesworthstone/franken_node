@@ -10,6 +10,7 @@
 //!
 //! Format reference: https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/
 
+use crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode;
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{Mode, OFlags, open, openat};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -1121,7 +1122,7 @@ fn inspect_with_installation(
         None => workspaces::capture(
             &mut capture,
             manifest,
-            crate::supply_chain::module_resolution_graph::WorkspaceSelectionMode::Npm,
+            WorkspaceSelectionMode::Npm,
         )?,
     };
     let local = if source == "bun.lock" {
@@ -1189,6 +1190,11 @@ fn inspect_with_installation(
         deadline,
     )?;
     let mut declared = 0;
+    let manager = if catalogs.is_some() {
+        WorkspaceSelectionMode::Bun
+    } else {
+        WorkspaceSelectionMode::Npm
+    };
     let authority = DeclarationAuthority {
         overrides: &overrides,
         bun_workspace_links: (source == "bun.lock").then_some(&workspace_links),
@@ -1209,7 +1215,12 @@ fn inspect_with_installation(
             deadline,
             &authority,
         )?;
-        workspaces::manifest_findings(&mut report, manifest, &source)?;
+        workspaces::manifest_findings(
+            &mut report,
+            manifest,
+            &source,
+            directory.is_empty().then_some(manager),
+        )?;
         if !directory.is_empty() {
             capture.refuse_binary_bun_lock(&format!("{directory}/bun.lockb"))?;
             let path = format!("{directory}/bun.lock");
@@ -1567,6 +1578,75 @@ mod tests {
         );
         let report = inspect(root.path(), deadline()).unwrap();
         assert_eq!(codes(&report), ["install_script"]);
+    }
+
+    #[test]
+    fn root_lifecycle_findings_follow_the_selected_package_manager() {
+        let package = json!({"name":"root","scripts":{
+            "preinstall":"node build.cjs", "install":"node build.cjs",
+            "postinstall":"node build.cjs", "prepare":"node build.cjs",
+            "preprepare":"node build.cjs", "postprepare":"node build.cjs",
+            "prepublish":"node build.cjs", "prepublishOnly":"node pack.cjs",
+            "prepack":"node pack.cjs", "build":"node build.cjs"
+        }});
+        for bun in [false, true] {
+            let root = fixture(package.clone(), None);
+            if bun {
+                fs::write(
+                    root.path().join("bun.lock"),
+                    r#"{"lockfileVersion":1,"workspaces":{"":{"name":"root"}},"packages":{}}"#,
+                )
+                .unwrap();
+            }
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            let hooks: BTreeSet<_> = report
+                .findings
+                .iter()
+                .map(|finding| {
+                    assert_eq!(finding.code, "install_script");
+                    finding.source.strip_prefix("package.json#scripts.").unwrap()
+                })
+                .collect();
+            let mut expected = BTreeSet::from([
+                "preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare",
+            ]);
+            if !bun {
+                expected.insert("prepublish");
+            }
+            assert_eq!(hooks, expected);
+            assert!(!report.installation_checked);
+        }
+    }
+
+    #[test]
+    fn installed_dependency_does_not_inherit_root_only_lifecycle() {
+        let root = fixture(
+            json!({"name":"root","dependencies":{"ordinary":"1.0.0"}}),
+            Some(modern_fixture(json!({
+                "":{"dependencies":{"ordinary":"1.0.0"}},
+                "node_modules/ordinary":{"version":"1.0.0"}
+            }))),
+        );
+        let installed = root.path().join("node_modules/ordinary");
+        fs::create_dir_all(&installed).unwrap();
+        let manifest = json!({
+            "name":"ordinary", "version":"1.0.0",
+            "scripts":{
+                "preprepare":"node pack.cjs",
+                "postprepare":"node pack.cjs",
+                "prepublish":"node pack.cjs"
+            }
+        });
+        fs::write(
+            installed.join("package.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            report.installation_checked && !report.requires_review(),
+            "{report:#?}"
+        );
     }
 
     #[test]
