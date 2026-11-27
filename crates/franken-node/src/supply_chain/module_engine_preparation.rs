@@ -10,8 +10,8 @@
 //! every dependency route; dynamic JSON options require a separate contract.
 
 use super::super::{
-    Budget, CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage,
-    SourceModule, error, normalized_dirname_specifier, scan,
+    Budget, CapturedModuleGraph, CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId,
+    SourceGraphReport, SourceLanguage, SourceModule, error, normalized_dirname_specifier, scan,
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
 use frankenengine_engine::ast::ParseGoal;
@@ -71,9 +71,78 @@ impl PreparedSources {
     }
 }
 
+struct EnginePreparationOutput {
+    kind: ModuleKind,
+    normalized: String,
+    source_ingestion: SourceIngestionSummary,
+    normalization_witness: Option<TsNormalizationWitness>,
+    source_map: Vec<SourceMapEntry>,
+}
+
+fn compute_engine_preparation(
+    source: &str,
+    module_path: &str,
+    source_language: SourceLanguage,
+    explicit: Option<ModuleKind>,
+    graph_input_hash: &str,
+    parser_options: &ParserOptions,
+) -> Result<EnginePreparationOutput> {
+    let prepared = prepare_source_entry_for_public_entrypoints(
+        source,
+        module_path,
+        "captured-module-preparation",
+        graph_input_hash,
+        "franken-node.engine-source-preparation.v1",
+    )
+    .map_err(|_| {
+        error(
+            "ERR_MODULE_ENGINE_NORMALIZATION",
+            "the engine could not normalize captured source",
+        )
+    })?;
+    if prepared.source_ingestion.ts_capability_intent_count != 0 {
+        // ModuleRecord has no slot for a TS capability-intent witness.
+        // Never erase hostcall annotations while dropping their authority
+        // obligations. A future ingestion contract can transport them.
+        return Err(error(
+            "ERR_MODULE_ENGINE_CAPABILITY_METADATA",
+            "typed capability intents require an engine ingestion witness contract",
+        ));
+    }
+    if source_language == SourceLanguage::JavaScript
+        && prepared.source_ingestion.source_language
+            != frankenengine_engine::ts_normalization::SourceLanguage::JavaScript
+    {
+        // The public engine API also accepts an inferred TS/hostcall DSL.
+        // A Node-mode .js capture must not silently switch languages just
+        // because an engine heuristic recognizes type-like source text.
+        return Err(error(
+            "ERR_MODULE_ENGINE_SOURCE_LANGUAGE",
+            "JavaScript source cannot be implicitly reclassified as TypeScript",
+        ));
+    }
+    let normalized = prepared.prepared_source;
+    if normalized.len() > MAX_PREPARED_SOURCE_BYTES {
+        return Err(preparation_limit());
+    }
+    let kind = detect_kind_with_options(&normalized, explicit, parser_options)?;
+    let (normalization_witness, source_map) = prepared
+        .normalization_output
+        .map(|output| (Some(output.witness), output.source_map))
+        .unwrap_or_default();
+    Ok(EnginePreparationOutput {
+        kind,
+        normalized,
+        source_ingestion: prepared.source_ingestion,
+        normalization_witness,
+        source_map,
+    })
+}
+
 pub(super) struct SourcePreparer {
     prepared: PreparedSources,
     expected: Option<ExpectedRoutes>,
+    precomputed: BTreeMap<String, Result<EnginePreparationOutput>>,
     parser: tree_sitter::Parser,
     parser_options: ParserOptions,
     scan_budget: Budget,
@@ -91,6 +160,7 @@ impl SourcePreparer {
         Self {
             prepared: PreparedSources::default(),
             expected: None,
+            precomputed: BTreeMap::new(),
             parser: tree_sitter::Parser::new(),
             parser_options,
             scan_budget: Budget::default(),
@@ -100,6 +170,123 @@ impl SourcePreparer {
 
     pub(super) fn finish(self) -> PreparedSources {
         self.prepared
+    }
+
+    /// Precompute pure, stateless engine source normalization and syntax
+    /// detection across up to 4 scoped threads when a validated graph contains
+    /// multiple distinct slow-path modules (e.g. unmarked `.js` or `.ts` files).
+    /// Results and errors are still merged sequentially in exact
+    /// `report.modules` order by [`Self::prepare`].
+    pub(super) fn precompute_parallel(&mut self, graph: &CapturedModuleGraph) {
+        const MAX_PREP_THREADS: usize = 4;
+
+        let report = graph.report();
+        let max_source_bytes = self.parser_options.budget.max_source_bytes;
+        let mut seen_paths = BTreeSet::<&str>::new();
+        let mut candidates: Vec<(&str, &str, SourceLanguage, Option<ModuleKind>)> = Vec::new();
+        for module in &report.modules {
+            if !seen_paths.insert(module.id.path.as_str()) {
+                continue;
+            }
+            if module.source_language == SourceLanguage::Json {
+                continue;
+            }
+            let Some(bytes) = graph.source_bytes(&module.id) else {
+                continue;
+            };
+            let Ok(source) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            let Ok(source_bytes) = u64::try_from(source.len()) else {
+                continue;
+            };
+            if source_bytes > max_source_bytes {
+                continue;
+            }
+            let Ok(explicit) = captured_kind(module) else {
+                continue;
+            };
+            let has_hashbang = source
+                .strip_prefix('\u{feff}')
+                .unwrap_or(source)
+                .starts_with("#!");
+            if module.source_language == SourceLanguage::JavaScript
+                && !has_hashbang
+                && explicit.is_some()
+            {
+                continue;
+            }
+            candidates.push((
+                module.id.path.as_str(),
+                source,
+                module.source_language,
+                explicit,
+            ));
+        }
+        if candidates.len() < 2 {
+            return;
+        }
+        let worker_count = candidates.len().min(MAX_PREP_THREADS);
+        let chunk_size = candidates.len().div_ceil(worker_count);
+        let graph_input_hash = report.input_hash.as_str();
+        let parser_options = &self.parser_options;
+        let batches: Vec<Vec<(String, Result<EnginePreparationOutput>)>> =
+            std::thread::scope(|scope| {
+                let mut chunks = candidates.chunks(chunk_size);
+                let first_chunk = chunks.next().unwrap_or(&[]);
+                let handles: Vec<_> = chunks
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk
+                                .iter()
+                                .map(|&(path, source, lang, explicit)| {
+                                    (
+                                        path.to_owned(),
+                                        compute_engine_preparation(
+                                            source,
+                                            path,
+                                            lang,
+                                            explicit,
+                                            graph_input_hash,
+                                            parser_options,
+                                        ),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                let mut all = Vec::with_capacity(handles.len() + 1);
+                all.push(
+                    first_chunk
+                        .iter()
+                        .map(|&(path, source, lang, explicit)| {
+                            (
+                                path.to_owned(),
+                                compute_engine_preparation(
+                                    source,
+                                    path,
+                                    lang,
+                                    explicit,
+                                    graph_input_hash,
+                                    parser_options,
+                                ),
+                            )
+                        })
+                        .collect(),
+                );
+                for handle in handles {
+                    if let Ok(batch) = handle.join() {
+                        all.push(batch);
+                    }
+                }
+                all
+            });
+        for batch in batches {
+            for (path, result) in batch {
+                self.precomputed.insert(path, result);
+            }
+        }
     }
 
     /// Called only after independent pin and closed-graph admission.
@@ -161,45 +348,23 @@ impl SourcePreparer {
             return Ok(prepared.summary.kind);
         }
 
-        let prepared = prepare_source_entry_for_public_entrypoints(
-            source,
-            &module.id.path,
-            "captured-module-preparation",
-            &report.input_hash,
-            "franken-node.engine-source-preparation.v1",
-        )
-        .map_err(|_| {
-            error(
-                "ERR_MODULE_ENGINE_NORMALIZATION",
-                "the engine could not normalize captured source",
-            )
-        })?;
-        if prepared.source_ingestion.ts_capability_intent_count != 0 {
-            // ModuleRecord has no slot for a TS capability-intent witness.
-            // Never erase hostcall annotations while dropping their authority
-            // obligations. A future ingestion contract can transport them.
-            return Err(error(
-                "ERR_MODULE_ENGINE_CAPABILITY_METADATA",
-                "typed capability intents require an engine ingestion witness contract",
-            ));
-        }
-        if module.source_language == SourceLanguage::JavaScript
-            && prepared.source_ingestion.source_language
-                != frankenengine_engine::ts_normalization::SourceLanguage::JavaScript
-        {
-            // The public engine API also accepts an inferred TS/hostcall DSL.
-            // A Node-mode .js capture must not silently switch languages just
-            // because an engine heuristic recognizes type-like source text.
-            return Err(error(
-                "ERR_MODULE_ENGINE_SOURCE_LANGUAGE",
-                "JavaScript source cannot be implicitly reclassified as TypeScript",
-            ));
-        }
-        let normalized = prepared.prepared_source;
-        if normalized.len() > MAX_PREPARED_SOURCE_BYTES {
-            return Err(preparation_limit());
-        }
-        let kind = detect_kind_with_options(&normalized, explicit, &self.parser_options)?;
+        let EnginePreparationOutput {
+            kind,
+            normalized,
+            source_ingestion,
+            normalization_witness,
+            source_map,
+        } = match self.precomputed.remove(&module.id.path) {
+            Some(precomputed) => precomputed?,
+            None => compute_engine_preparation(
+                source,
+                &module.id.path,
+                module.source_language,
+                explicit,
+                &report.input_hash,
+                &self.parser_options,
+            )?,
+        };
         let routes = if normalized == source {
             expected.clone()
         } else {
@@ -257,10 +422,6 @@ impl SourcePreparer {
                 .ok_or_else(preparation_limit)?;
             Some(Arc::from(normalized.as_str()))
         };
-        let (normalization_witness, source_map) = prepared
-            .normalization_output
-            .map(|output| (Some(output.witness), output.source_map))
-            .unwrap_or_default();
         self.prepared.modules.insert(
             module.id.path.clone(),
             PreparedModule {
@@ -269,7 +430,7 @@ impl SourcePreparer {
                     path: module.id.path.clone(),
                     kind,
                     prepared_source_bytes: normalized.len(),
-                    source_ingestion: prepared.source_ingestion,
+                    source_ingestion,
                     normalization_witness,
                     source_map,
                 },
@@ -1256,6 +1417,92 @@ export {answer};
                 );
                 assert_eq!(resolver.preparation_reports().count(), 1);
             }
+        }
+
+        #[test]
+        fn precompute_parallel_matches_sequential_for_multi_file_js_and_preserves_errors() {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "node_modules/bench-pkg/package.json",
+                r#"{"name":"bench-pkg","version":"1.0.0","main":"index.js"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/bench-pkg/index.js",
+                "const a = require('./a.js'); const b = require('./b.js'); module.exports = a + b;",
+            );
+            put(
+                root.path(),
+                "node_modules/bench-pkg/a.js",
+                "module.exports = 20;",
+            );
+            put(
+                root.path(),
+                "node_modules/bench-pkg/b.js",
+                "module.exports = 22;",
+            );
+            put(
+                root.path(),
+                "app.js",
+                "const v = require('bench-pkg'); module.exports = v;",
+            );
+            let graph = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+            assert_eq!(graph.report().modules.len(), 4);
+            let pin = graph.report().input_hash.clone();
+
+            // Verify parallel precomputation populates every unmarked .js module
+            // and agrees identically with fresh sequential preparation.
+            let mut parallel = SourcePreparer::default();
+            parallel.precompute_parallel(&graph);
+            assert_eq!(parallel.precomputed.len(), 4);
+            let mut sequential = SourcePreparer::default();
+            for module in &graph.report().modules {
+                let source = std::str::from_utf8(graph.source_bytes(&module.id).unwrap()).unwrap();
+                let par_kind = parallel.prepare(module, source, graph.report()).unwrap();
+                let seq_kind = sequential.prepare(module, source, graph.report()).unwrap();
+                assert_eq!(par_kind, seq_kind);
+                assert_eq!(par_kind, ModuleKind::CommonJs);
+            }
+            assert_eq!(
+                parallel.finish().summaries().collect::<Vec<_>>(),
+                sequential.finish().summaries().collect::<Vec<_>>()
+            );
+
+            // End-to-end resolver path uses precompute_parallel cleanly.
+            let res = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            let outputs = res
+                .resolve_chain(&res.entry_request(), &context(), &granted())
+                .unwrap();
+            assert_eq!(outputs.len(), 4);
+            assert!(
+                outputs
+                    .iter()
+                    .all(|outcome| outcome.module.record.syntax == ModuleSyntax::CommonJs)
+            );
+
+            // Parser-budget errors in parallel-precomputed modules still surface deterministically.
+            let mut limited = ParserOptions::default();
+            limited.budget.max_token_count = 1;
+            let limited_graph = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+            let limited_pin = limited_graph.report().input_hash.clone();
+            let mut limited_prep = SourcePreparer::with_parser_options(limited.clone());
+            limited_prep.precompute_parallel(&limited_graph);
+            assert_eq!(limited_prep.precomputed.len(), 4);
+            assert!(
+                limited_prep
+                    .precomputed
+                    .values()
+                    .all(|res| res.as_ref().is_err_and(|err| err.code == "ERR_MODULE_ENGINE_PARSE_LIMIT"))
+            );
+            let failure = CapturedEngineResolver::new_with_parser_options(
+                limited_graph,
+                &limited_pin,
+                limited,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(failure.code, "ERR_MODULE_ENGINE_PARSE_LIMIT");
         }
     }
 }

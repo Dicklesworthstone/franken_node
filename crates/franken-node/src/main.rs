@@ -49599,17 +49599,24 @@ fn main() -> Result<()> {
             // independent operator. A nested release keeps its narrow root
             // while retaining that exact operator's separately enforced policy.
             // The dispatcher and private worker revalidate both boundaries.
-            let project_paths = match std::env::current_dir()
-                .map_err(anyhow::Error::from)
-                .and_then(|working_dir| {
-                    RunProjectPaths::resolve_for_run(
-                        &app_path,
-                        &working_dir,
-                        admitted_operator_project.as_deref(),
-                        registry_artifact_approval.as_ref(),
-                        package_bin.as_deref(),
-                    )
-                }) {
+            let working_dir = match std::env::current_dir() {
+                Ok(dir) => dir,
+                Err(err) => {
+                    return named_cli_fail(
+                        "franken-node/run-error-cli/v1",
+                        "run",
+                        json,
+                        anyhow::Error::from(err),
+                    );
+                }
+            };
+            let project_paths = match RunProjectPaths::resolve_for_run(
+                &app_path,
+                &working_dir,
+                admitted_operator_project.as_deref(),
+                registry_artifact_approval.as_ref(),
+                package_bin.as_deref(),
+            ) {
                 Ok(project_paths) => project_paths,
                 Err(err) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
@@ -49646,25 +49653,23 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             };
-            let operator_protected_paths = match std::env::current_dir()
-                .map_err(anyhow::Error::from)
-                .and_then(|invocation_root| {
-                    run_operator_protected_paths(
-                        &resolved,
-                        project_paths.project_root(),
-                        &invocation_root,
-                    )
-                }) {
+            let operator_protected_paths = match run_operator_protected_paths(
+                &resolved,
+                project_paths.project_root(),
+                &working_dir,
+            ) {
                 Ok(paths) => paths,
                 Err(error) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             };
-            if let Err(error) = EngineDispatcher::apply_operator_source_capture_defaults(
-                &mut resolved.config,
-                &project_paths,
-                &operator_protected_paths,
-            ) {
+            if let Err(error) =
+                EngineDispatcher::apply_operator_source_capture_defaults_pre_resolved(
+                    &mut resolved.config,
+                    &project_paths,
+                    &operator_protected_paths,
+                )
+            {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
             }
             if resolved.config.runtime.frozen_module_symlinks == Some(true)

@@ -61,6 +61,8 @@ const MAX_STRING_EXPRESSION_DEPTH: usize = 64;
 const MAX_STRING_EXPRESSION_NODES: usize = 4096;
 const MAX_STRING_EXPRESSION_BYTES: usize = 16 * super::MAX_PATH;
 const MAX_STRING_ALTERNATIVES: usize = 32;
+pub(super) const REPORT_SCHEMA_VERSION: &str = "franken-node/module-source-graph/v3";
+pub(super) const REPORT_SCOPE: &str = "static-and-literal-module-requests";
 const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v3\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
@@ -68,13 +70,13 @@ type Result<T> = std::result::Result<T, ResolutionError>;
 /// module identity. Keep the standalone graph independent of the engine crate.
 pub type ImportAttributes = BTreeMap<String, String>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModuleId {
     pub path: String,
     pub url_suffix: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSite {
     pub start_byte: usize,
     pub end_byte: usize,
@@ -93,7 +95,7 @@ impl SourceSite {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadKind {
     StaticImport,
@@ -116,7 +118,7 @@ impl LoadKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeState {
     Resolved,
@@ -128,7 +130,7 @@ pub enum EdgeState {
 
 /// Source grammar is independent of the resolver's runtime format hint.
 /// Recognizing TypeScript is not a claim that the engine can execute it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceLanguage {
     #[serde(rename = "javascript")]
@@ -166,7 +168,7 @@ impl SourceLanguage {
 
 /// Extra CommonJS metadata authority, distinct from ordinary filename lookup
 /// and from executable require. Roots are canonical and project-relative.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommonJsSearch {
     Paths { paths: Vec<String> },
@@ -212,14 +214,14 @@ fn is_false(value: &bool) -> bool {
 /// A relocatable file URL or an absolute URL with no loader attached. File URL
 /// paths are decoded and project-relative; empty segments and a final slash are
 /// meaningful URL spelling. An empty path denotes the project directory itself.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolutionUrl {
     File { id: ModuleId },
     Absolute { url: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceModule {
     pub id: ModuleId,
     pub content_sha256: String,
@@ -232,7 +234,7 @@ pub struct SourceModule {
 /// A captured ordinary file selected only for its location. Its bytes remain
 /// pinned capsule inputs; no source grammar, execution format or load authority
 /// follows from this observation. A separately loaded file may appear here too.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionTarget {
     pub id: ModuleId,
     pub content_sha256: String,
@@ -806,8 +808,8 @@ fn build(
     let probes = resolver.probes();
     budget.retain(&probes)?;
     let mut report = SourceGraphReport {
-        schema_version: "franken-node/module-source-graph/v3".into(),
-        scope: "static-and-literal-module-requests".into(),
+        schema_version: REPORT_SCHEMA_VERSION.into(),
+        scope: REPORT_SCOPE.into(),
         entrypoint: entrypoint.into(),
         resolved_entrypoint: first,
         options,
@@ -826,10 +828,7 @@ fn build(
         execution_performed: false,
         release_certification: false,
     };
-    let mut hash = Sha256::new();
-    hash.update(HASH_DOMAIN);
-    serialize_evidence(&report, MAX_EVIDENCE_BYTES, |bytes| hash.update(bytes))?;
-    report.input_hash = format!("sha256:{}", hex::encode(hash.finalize()));
+    report.input_hash = compute_input_hash(&report)?;
     let inputs = resolver
         .entries
         .into_iter()
@@ -847,6 +846,13 @@ fn build(
         sources,
         inputs,
     })
+}
+
+pub(super) fn compute_input_hash(report: &SourceGraphReport) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(HASH_DOMAIN);
+    serialize_evidence(report, MAX_EVIDENCE_BYTES, |bytes| hash.update(bytes))?;
+    Ok(format!("sha256:{}", hex::encode(hash.finalize())))
 }
 
 fn fatal(e: &ResolutionError) -> bool {

@@ -680,17 +680,30 @@ impl PinnedModuleRegistry {
     pub(super) fn new_with_kind_resolver<F, B>(
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
-        mut kind_of: F,
+        kind_of: F,
         native_builtin: B,
     ) -> Result<Self>
     where
         F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
         B: Fn(&str, RequestStyle) -> Result<Option<&'static str>>,
     {
+        let validated =
+            Self::validate_source_closure(&graph, independent_graph_pin, native_builtin)?;
+        Self::new_with_validated_closure_and_kind_resolver(graph, validated, kind_of)
+    }
+
+    pub(super) fn new_with_validated_closure_and_kind_resolver<F>(
+        graph: CapturedModuleGraph,
+        validated: ValidatedSourceClosure,
+        mut kind_of: F,
+    ) -> Result<Self>
+    where
+        F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
+    {
         let ValidatedSourceClosure {
             builtin_targets,
             missing_builtin_resolutions,
-        } = Self::validate_source_closure(&graph, independent_graph_pin, native_builtin)?;
+        } = validated;
         let report = graph.report();
         let identities: BTreeMap<_, _> = report
             .modules

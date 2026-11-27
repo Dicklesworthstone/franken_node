@@ -1326,16 +1326,106 @@ fn check_source_capsule_capacity(
     Ok(())
 }
 
+/// Proof returned by [`retain_native_session_source_capsule_with_proof`]
+/// attesting that the encoded `FNSGCAP1` capsule for a freshly captured
+/// `CapturedModuleGraph` was just created or verified byte-for-byte on disk.
+///
+/// The private fields prevent external construction; `admit_with_context_inner`
+/// still re-checks directory safety and `(dev, ino, len, mtime, mtime_nsec)`
+/// plus owner/mode metadata on disk before skipping the redundant full
+/// `capsule::replay` re-parse, falling back to full replay on any discrepancy.
+#[cfg(unix)]
+pub(crate) struct RetainedNativeSessionSourceCapsule {
+    protected_root: PathBuf,
+    binding: NativeSessionSourceCapsuleBinding,
+    encoded: crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::EncodedCapsule,
+    capsule_path: PathBuf,
+    entrypoint: String,
+    file_identity: (u64, u64, u64, i64, i64),
+}
+
+#[cfg(unix)]
+impl RetainedNativeSessionSourceCapsule {
+    pub(crate) fn binding(&self) -> &NativeSessionSourceCapsuleBinding {
+        &self.binding
+    }
+
+    pub(crate) fn encoded_capsule(
+        &self,
+    ) -> &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::EncodedCapsule
+{
+        &self.encoded
+    }
+
+    fn verify_on_disk(&self, protected_root: &Path, admission: &NativeSessionAdmission) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if self.protected_root != protected_root
+            || admission.source_capsule.as_ref() != Some(&self.binding)
+        {
+            return false;
+        }
+        let Ok(rel_entry) = admission.entrypoint.strip_prefix(&admission.project_root) else {
+            return false;
+        };
+        if rel_entry.to_str() != Some(self.entrypoint.as_str()) {
+            return false;
+        }
+        if validate_existing_forensic_directory(&protected_root.join(SOURCE_CAPSULE_DIRECTORY))
+            .is_err()
+        {
+            return false;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&self.capsule_path) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink()
+            || validate_runtime_evidence_private_file_metadata(&self.capsule_path, &metadata)
+                .is_err()
+        {
+            return false;
+        }
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ) == self.file_identity
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) struct RetainedNativeSessionSourceCapsule;
+
+#[cfg(not(unix))]
+impl RetainedNativeSessionSourceCapsule {
+    fn verify_on_disk(&self, _protected_root: &Path, _admission: &NativeSessionAdmission) -> bool {
+        false
+    }
+}
+
 /// Persist the existing source-capsule format before admission. Publication is
 /// no-clobber and serialized with inventory writers, including capacity checks.
 /// A reused object must match byte-for-byte; damaged retained evidence is never
 /// silently replaced by recapturing a live project.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn retain_native_session_source_capsule(
     protected_root: &Path,
     graph: &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
 ) -> Result<NativeSessionSourceCapsuleBinding> {
+    retain_native_session_source_capsule_with_proof(protected_root, graph)
+        .map(|retained| retained.binding)
+}
+
+#[cfg(unix)]
+pub(crate) fn retain_native_session_source_capsule_with_proof(
+    protected_root: &Path,
+    graph: &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
+) -> Result<RetainedNativeSessionSourceCapsule> {
     use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule;
+    use std::os::unix::fs::MetadataExt as _;
 
     let encoded =
         capsule::encode(graph).context("encode admitted native-session source capsule")?;
@@ -1377,7 +1467,24 @@ pub(crate) fn retain_native_session_source_capsule(
     if created_directory {
         std::fs::File::open(protected_root)?.sync_all()?;
     }
-    Ok(binding)
+    let metadata = std::fs::symlink_metadata(&path)
+        .context("inspect retained native-session source capsule identity")?;
+    validate_runtime_evidence_private_file_metadata(&path, &metadata)?;
+    let file_identity = (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    );
+    Ok(RetainedNativeSessionSourceCapsule {
+        protected_root: protected_root.to_path_buf(),
+        binding,
+        encoded,
+        capsule_path: path,
+        entrypoint: graph.report().entrypoint.clone(),
+        file_identity,
+    })
 }
 
 /// Validate retained bytes against the original admission, without reading any
@@ -2708,6 +2815,7 @@ impl NativeSessionInventoryGuard {
             ticket,
             preloaded_root,
             None,
+            None,
         )?;
         Ok(guard)
     }
@@ -2725,6 +2833,7 @@ impl NativeSessionInventoryGuard {
         preloaded_root: (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey),
         capture: &RuntimeEvidenceIdentityCapture,
         capture_bytes: &[u8],
+        retained_source_capsule: Option<&RetainedNativeSessionSourceCapsule>,
     ) -> Result<(
         Self,
         super::native_session_journal::NativeSessionEffectJournalWriter,
@@ -2735,6 +2844,7 @@ impl NativeSessionInventoryGuard {
             ticket,
             Some(preloaded_root),
             Some((capture, capture_bytes)),
+            retained_source_capsule,
         )?;
         let journal =
             journal.context("native-session durable effect journal was not established")?;
@@ -2747,6 +2857,7 @@ impl NativeSessionInventoryGuard {
         mut ticket: NativeSessionAdmissionTicket,
         preloaded_root: Option<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey)>,
         deferred_capture: Option<(&RuntimeEvidenceIdentityCapture, &[u8])>,
+        retained_source_capsule: Option<&RetainedNativeSessionSourceCapsule>,
     ) -> Result<(
         Self,
         Option<super::native_session_journal::NativeSessionEffectJournalWriter>,
@@ -2801,8 +2912,12 @@ impl NativeSessionInventoryGuard {
         } else {
             verify_admission_capture_with_root(protected_root, &admission, &verifying_key)?;
         }
-        read_retained_native_session_source_capsule(protected_root, &admission)
-            .context("native-session sources must be retained before admission")?;
+        let source_capsule_verified = retained_source_capsule
+            .is_some_and(|proof| proof.verify_on_disk(protected_root, &admission));
+        if !source_capsule_verified {
+            read_retained_native_session_source_capsule(protected_root, &admission)
+                .context("native-session sources must be retained before admission")?;
+        }
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let write_lock = lock_inventory_file(protected_root, true)?;
         let database_identity = lock_file_identity(write_lock.as_ref());
@@ -7879,6 +7994,32 @@ mod tests {
         std::fs::write(&path, &original[..12]).unwrap();
         assert!(retain_native_session_source_capsule(&root, &graph).is_err());
         assert_eq!(std::fs::read(path).unwrap(), original[..12]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_capsule_proof_matches_unchanged_file_and_detects_tampering() {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let (admission, original) = frozen_source_fixture(&root, 155);
+        let graph = capture(&admission.project_root, "index.js", GraphOptions::default()).unwrap();
+        let proof = retain_native_session_source_capsule_with_proof(&root, &graph).unwrap();
+        assert_eq!(proof.encoded_capsule().bytes(), original.as_slice());
+        assert!(proof.verify_on_disk(&root, &admission));
+
+        // Wrong entrypoint must reject proof.
+        let mut wrong_entry = admission.clone();
+        wrong_entry.entrypoint = admission.project_root.join("other.js");
+        assert!(!proof.verify_on_disk(&root, &wrong_entry));
+
+        // Tampering with the retained capsule invalidates the proof immediately.
+        let path = source_capsule_path(&root, proof.binding()).unwrap();
+        std::fs::write(&path, &original[..12]).unwrap();
+        assert!(!proof.verify_on_disk(&root, &admission));
     }
 
     #[cfg(unix)]

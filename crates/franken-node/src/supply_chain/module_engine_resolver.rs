@@ -111,12 +111,17 @@ impl CapturedEngineResolver {
         independent_graph_pin: &str,
         parser_options: ParserOptions,
     ) -> Result<Self, CaptureError> {
-        let mut preparer = SourcePreparer::with_parser_options(parser_options);
-        let registry = PinnedModuleRegistry::new_with_kind_resolver(
-            graph,
+        let validated = PinnedModuleRegistry::validate_source_closure(
+            &graph,
             independent_graph_pin,
-            |module, source, report| preparer.prepare(module, source, report),
             native_builtin_provider,
+        )?;
+        let mut preparer = SourcePreparer::with_parser_options(parser_options);
+        preparer.precompute_parallel(&graph);
+        let registry = PinnedModuleRegistry::new_with_validated_closure_and_kind_resolver(
+            graph,
+            validated,
+            |module, source, report| preparer.prepare(module, source, report),
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();

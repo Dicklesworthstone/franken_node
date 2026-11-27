@@ -6,12 +6,20 @@
 //! a serialized report. A self-consistent capsule is not provenance or authority.
 
 use super::super::{MAX_CAPTURE, MAX_FILE, MAX_PROBES, validate_link_target};
+#[cfg(any(feature = "engine", test))]
+use super::super::{Mapping, Probe};
+use super::{CapturedModuleGraph, Entry, GraphOptions, Resolver, Result, build, error, parent, validate_path};
+#[cfg(any(feature = "engine", test))]
 use super::{
-    CapturedModuleGraph, Entry, GraphOptions, Resolver, Result, build, error, parent, validate_path,
+    CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError,
+    ResolutionTarget, ResolutionUrl, SourceEdge, SourceGraphReport, SourceModule, SourceSite,
+    compute_input_hash,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(feature = "engine", test))]
+use std::path::Path;
 use std::rc::Rc;
 
 const MAGIC: &[u8; 8] = b"FNSGCAP1";
@@ -21,6 +29,10 @@ const SCHEMA: &str = "franken-node/module-source-capsule/v1";
 const HASH_DOMAIN: &[u8] = b"franken-node/module-source-capsule/v1\0";
 /// Maximum encoded size, checked before hashing or parsing untrusted input.
 pub const MAX_CAPSULE_BYTES: usize = PREFIX_BYTES + MAX_HEADER_BYTES + MAX_CAPTURE;
+/// Maximum capsule size carried inline over the authenticated parent-worker IPC
+/// frame for live-disk verification without re-running tree-sitter parsing.
+#[cfg(any(feature = "engine", test))]
+pub(crate) const MAX_ADMITTED_WIRE_CAPSULE_BYTES: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -333,6 +345,358 @@ pub fn replay(bytes: &[u8], expected_capsule_hash: &str) -> Result<CapturedModul
     Ok(graph)
 }
 
+#[cfg(any(feature = "engine", test))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireResolutionError {
+    code: String,
+    detail: String,
+}
+
+#[cfg(any(feature = "engine", test))]
+fn static_resolution_error_code(code: &str) -> Option<&'static str> {
+    match code {
+        "ERR_RUNTIME_MODULE_REQUIRED" => Some("ERR_RUNTIME_MODULE_REQUIRED"),
+        "MODULE_NOT_FOUND" => Some("MODULE_NOT_FOUND"),
+        "ERR_MODULE_NOT_FOUND" => Some("ERR_MODULE_NOT_FOUND"),
+        "ERR_PACKAGE_PATH_NOT_EXPORTED" => Some("ERR_PACKAGE_PATH_NOT_EXPORTED"),
+        "ERR_PACKAGE_IMPORT_NOT_DEFINED" => Some("ERR_PACKAGE_IMPORT_NOT_DEFINED"),
+        "ERR_INVALID_PACKAGE_TARGET" => Some("ERR_INVALID_PACKAGE_TARGET"),
+        "ERR_INVALID_PACKAGE_CONFIG" => Some("ERR_INVALID_PACKAGE_CONFIG"),
+        "ERR_INVALID_MODULE_SPECIFIER" => Some("ERR_INVALID_MODULE_SPECIFIER"),
+        "ERR_INVALID_URL" => Some("ERR_INVALID_URL"),
+        "ERR_UNSUPPORTED_DIR_IMPORT" => Some("ERR_UNSUPPORTED_DIR_IMPORT"),
+        "ERR_UNSUPPORTED_ESM_URL_SCHEME" => Some("ERR_UNSUPPORTED_ESM_URL_SCHEME"),
+        _ => None,
+    }
+}
+
+#[cfg(any(feature = "engine", test))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSourceEdge {
+    importer: ModuleId,
+    site: SourceSite,
+    kind: LoadKind,
+    deferred_or_conditional: bool,
+    specifier: Option<String>,
+    #[serde(default)]
+    dirname_request: bool,
+    #[serde(default)]
+    normalized_dirname_request: bool,
+    #[serde(default)]
+    commonjs_search: Option<CommonJsSearch>,
+    #[serde(default)]
+    import_attributes: ImportAttributes,
+    conditions: Vec<String>,
+    state: EdgeState,
+    target: Option<ModuleId>,
+    #[serde(default)]
+    resolved_url: Option<ResolutionUrl>,
+    error: Option<WireResolutionError>,
+    mappings: Vec<Mapping>,
+}
+
+/// Bounded parent-to-worker snapshot of an already-captured frozen source graph
+/// and its `FNSGCAP1` capsule bytes.
+///
+/// The worker never trusts this snapshot blindly: [`Self::verify_live_and_reconstruct`]
+/// validates the capsule digest, canonical header, every file's SHA-256 against
+/// payload bytes, recomputes `SourceGraphReport.input_hash`, and re-probes every
+/// single recorded filesystem observation against the live project directory
+/// under `O_NOFOLLOW | O_DIRECTORY`. Any mismatch falls back to full live
+/// `source_graph::capture`.
+#[cfg(any(feature = "engine", test))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdmittedSourceGraphWire {
+    capsule_digest: String,
+    capsule_base64: String,
+    schema_version: String,
+    scope: String,
+    entrypoint: String,
+    resolved_entrypoint: ModuleId,
+    options: GraphOptions,
+    modules: Vec<SourceModule>,
+    #[serde(default)]
+    resolution_targets: Vec<ResolutionTarget>,
+    edges: Vec<WireSourceEdge>,
+    probes: Vec<Probe>,
+    input_hash: String,
+    fully_resolved: bool,
+    runtime_completeness: bool,
+    type_resolution_performed: bool,
+    execution_performed: bool,
+    release_certification: bool,
+}
+
+#[cfg(any(feature = "engine", test))]
+impl AdmittedSourceGraphWire {
+    pub(crate) fn from_graph_and_capsule(
+        graph: &CapturedModuleGraph,
+        encoded: &EncodedCapsule,
+    ) -> Option<Self> {
+        use base64::Engine as _;
+
+        if encoded.bytes().len() > MAX_ADMITTED_WIRE_CAPSULE_BYTES {
+            return None;
+        }
+        let report = graph.report();
+        if !report.diagnostics.is_empty()
+            || report.probes.len() > 1024
+            || report.edges.len() > 1024
+            || report.modules.len() > 256
+        {
+            return None;
+        }
+        let mut edges = Vec::with_capacity(report.edges.len());
+        for edge in &report.edges {
+            let wire_error = match &edge.error {
+                Some(err) => {
+                    static_resolution_error_code(err.code)?;
+                    Some(WireResolutionError {
+                        code: err.code.to_owned(),
+                        detail: err.detail.clone(),
+                    })
+                }
+                None => None,
+            };
+            edges.push(WireSourceEdge {
+                importer: edge.importer.clone(),
+                site: edge.site.clone(),
+                kind: edge.kind,
+                deferred_or_conditional: edge.deferred_or_conditional,
+                specifier: edge.specifier.clone(),
+                dirname_request: edge.dirname_request,
+                normalized_dirname_request: edge.normalized_dirname_request,
+                commonjs_search: edge.commonjs_search.clone(),
+                import_attributes: edge.import_attributes.clone(),
+                conditions: edge.conditions.clone(),
+                state: edge.state,
+                target: edge.target.clone(),
+                resolved_url: edge.resolved_url.clone(),
+                error: wire_error,
+                mappings: edge.mappings.clone(),
+            });
+        }
+        Some(Self {
+            capsule_digest: encoded.digest().to_owned(),
+            capsule_base64: base64::engine::general_purpose::STANDARD.encode(encoded.bytes()),
+            schema_version: report.schema_version.clone(),
+            scope: report.scope.clone(),
+            entrypoint: report.entrypoint.clone(),
+            resolved_entrypoint: report.resolved_entrypoint.clone(),
+            options: report.options.clone(),
+            modules: report.modules.clone(),
+            resolution_targets: report.resolution_targets.clone(),
+            edges,
+            probes: report.probes.clone(),
+            input_hash: report.input_hash.clone(),
+            fully_resolved: report.fully_resolved,
+            runtime_completeness: report.runtime_completeness,
+            type_resolution_performed: report.type_resolution_performed,
+            execution_performed: report.execution_performed,
+            release_certification: report.release_certification,
+        })
+    }
+
+    pub(crate) fn input_hash(&self) -> &str {
+        &self.input_hash
+    }
+
+    pub(crate) fn verify_live_and_reconstruct(
+        &self,
+        project: &Path,
+        entrypoint: &str,
+        expected_options: &GraphOptions,
+        expected_graph_hash: Option<&str>,
+    ) -> Option<CapturedModuleGraph> {
+        use base64::Engine as _;
+
+        if !valid_hash(&self.capsule_digest) || !valid_hash(&self.input_hash) {
+            return None;
+        }
+        if self.schema_version != super::REPORT_SCHEMA_VERSION
+            || self.scope != super::REPORT_SCOPE
+            || self.runtime_completeness
+            || self.type_resolution_performed
+            || self.execution_performed
+            || self.release_certification
+        {
+            return None;
+        }
+        if expected_graph_hash.is_some_and(|pin| pin != self.input_hash) {
+            return None;
+        }
+        validate_path(entrypoint).ok()?;
+        let mut canonical_options = expected_options.clone();
+        canonical_options.canonicalize_conditions().ok()?;
+        if self.entrypoint != entrypoint || self.options != canonical_options {
+            return None;
+        }
+        // Reject oversized base64 before allocating decoded bytes.
+        let max_b64_len = MAX_ADMITTED_WIRE_CAPSULE_BYTES.div_ceil(3).saturating_mul(4);
+        if self.capsule_base64.len() > max_b64_len {
+            return None;
+        }
+        let capsule_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.capsule_base64)
+            .ok()?;
+        if capsule_bytes.len() > MAX_ADMITTED_WIRE_CAPSULE_BYTES
+            || digest(&capsule_bytes) != self.capsule_digest
+        {
+            return None;
+        }
+        let (header, payload) = parse_frame(&capsule_bytes).ok()?;
+        if header.entrypoint != entrypoint
+            || header.options != canonical_options
+            || header.graph_hash != self.input_hash
+            || header.inputs.len() != self.probes.len()
+        {
+            return None;
+        }
+        let mut recorded = recorded_resolver(&header, payload).ok()?;
+        recorded.sealed = false;
+        if recorded.probes() != self.probes {
+            return None;
+        }
+
+        let mut edges = Vec::with_capacity(self.edges.len());
+        for edge in &self.edges {
+            let error = match &edge.error {
+                Some(err) => Some(ResolutionError {
+                    code: static_resolution_error_code(&err.code)?,
+                    detail: err.detail.clone(),
+                }),
+                None => None,
+            };
+            edges.push(SourceEdge {
+                importer: edge.importer.clone(),
+                site: edge.site.clone(),
+                kind: edge.kind,
+                deferred_or_conditional: edge.deferred_or_conditional,
+                specifier: edge.specifier.clone(),
+                dirname_request: edge.dirname_request,
+                normalized_dirname_request: edge.normalized_dirname_request,
+                commonjs_search: edge.commonjs_search.clone(),
+                import_attributes: edge.import_attributes.clone(),
+                conditions: edge.conditions.clone(),
+                state: edge.state,
+                target: edge.target.clone(),
+                resolved_url: edge.resolved_url.clone(),
+                error,
+                mappings: edge.mappings.clone(),
+            });
+        }
+        let mut report = SourceGraphReport {
+            schema_version: self.schema_version.clone(),
+            scope: self.scope.clone(),
+            entrypoint: self.entrypoint.clone(),
+            resolved_entrypoint: self.resolved_entrypoint.clone(),
+            options: self.options.clone(),
+            modules: self.modules.clone(),
+            resolution_targets: self.resolution_targets.clone(),
+            edges,
+            diagnostics: Vec::new(),
+            probes: self.probes.clone(),
+            input_hash: String::new(),
+            fully_resolved: self.fully_resolved,
+            runtime_completeness: self.runtime_completeness,
+            type_resolution_performed: self.type_resolution_performed,
+            execution_performed: self.execution_performed,
+            release_certification: self.release_certification,
+        };
+        let recomputed_hash = compute_input_hash(&report).ok()?;
+        if recomputed_hash != self.input_hash || recomputed_hash != header.graph_hash {
+            return None;
+        }
+        report.input_hash = recomputed_hash;
+
+        // Bind every module and resolution target in `report` directly to its
+        // SHA-256-verified capsule payload entry.
+        let mut sources = BTreeMap::new();
+        for module in &report.modules {
+            let entry = recorded.entries.get(&module.id.path)?;
+            let Entry::File { bytes, sha256 } = entry.as_ref() else {
+                return None;
+            };
+            if bytes.len() != module.content_bytes || sha256 != &module.content_sha256 {
+                return None;
+            }
+            if sources.insert(module.id.clone(), Rc::clone(entry)).is_some() {
+                return None;
+            }
+        }
+        if !sources.contains_key(&report.resolved_entrypoint) {
+            return None;
+        }
+        for target in &report.resolution_targets {
+            let entry = recorded.entries.get(&target.id.path)?;
+            let Entry::File { bytes, sha256 } = entry.as_ref() else {
+                return None;
+            };
+            if bytes.len() != target.content_bytes || sha256 != &target.content_sha256 {
+                return None;
+            }
+        }
+
+        // Re-verify every single recorded filesystem probe against the live
+        // project directory under `O_NOFOLLOW | O_DIRECTORY` and the exact
+        // `symlink_policy`. Because `build()` is a pure deterministic function
+        // of these inputs, exact live-disk agreement proves live `capture()`
+        // would produce the identical graph.
+        let mut live = Resolver::new(project, &[], canonical_options.symlink_policy).ok()?;
+        for (path, expected) in &recorded.entries {
+            if path.is_empty() {
+                if !expected.is_dir() {
+                    return None;
+                }
+                continue;
+            }
+            let read_bytes = !matches!(expected.as_ref(), Entry::FileMetadata { .. });
+            let observed = live.raw_probe_with_bytes(path, read_bytes).ok()?;
+            let matched = match (expected.as_ref(), observed.as_ref()) {
+                (Entry::Missing, Entry::Missing)
+                | (Entry::Directory(_), Entry::Directory(_))
+                | (Entry::FileMetadata { .. }, Entry::FileMetadata { .. }) => true,
+                (
+                    Entry::File {
+                        bytes: expected_bytes,
+                        sha256: expected_sha,
+                    },
+                    Entry::File {
+                        bytes: live_bytes,
+                        sha256: live_sha,
+                    },
+                ) => expected_sha == live_sha && expected_bytes == live_bytes,
+                (
+                    Entry::Symlink {
+                        target: expected_target,
+                        sha256: expected_sha,
+                    },
+                    Entry::Symlink {
+                        target: live_target,
+                        sha256: live_sha,
+                    },
+                ) => expected_sha == live_sha && expected_target == live_target,
+                _ => false,
+            };
+            if !matched {
+                return None;
+            }
+        }
+        if live.probes() != report.probes {
+            return None;
+        }
+
+        Some(CapturedModuleGraph {
+            report,
+            sources,
+            inputs: recorded.entries,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{EdgeState, ModuleId, capture};
@@ -403,6 +767,97 @@ mod tests {
                 .content = Content::Missing;
         });
         assert_eq!(failure(&relabelled), "ERR_MODULE_CAPSULE_REPLAY_MISMATCH");
+    }
+
+    #[test]
+    fn admitted_wire_snapshot_verifies_live_disk_and_rejects_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "node_modules/bench-pkg/package.json",
+            r#"{"name":"bench-pkg","version":"1.0.0","main":"index.js"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/bench-pkg/index.js",
+            "const h = require('./helper.js'); module.exports = h;",
+        );
+        put(
+            root.path(),
+            "node_modules/bench-pkg/helper.js",
+            "module.exports = 42;",
+        );
+        put(
+            root.path(),
+            "app.js",
+            "const path = require('node:path'); const p = require('bench-pkg'); console.log(path.sep, p);",
+        );
+        let options = GraphOptions::default();
+        let captured = capture(root.path(), "app.js", options.clone()).unwrap();
+        let encoded = encode(&captured).unwrap();
+        let wire = AdmittedSourceGraphWire::from_graph_and_capsule(&captured, &encoded)
+            .expect("clean graph converts to wire snapshot");
+        let pin = captured.report().input_hash.clone();
+
+        // Exact match on unchanged live disk reconstructs identical graph.
+        let reconstructed = wire
+            .verify_live_and_reconstruct(root.path(), "app.js", &options, Some(&pin))
+            .expect("unchanged live project must verify");
+        assert_eq!(reconstructed.report(), captured.report());
+        for module in &captured.report().modules {
+            assert_eq!(
+                reconstructed.source_bytes(&module.id),
+                captured.source_bytes(&module.id)
+            );
+        }
+
+        // Wrong pin is refused.
+        assert!(
+            wire.verify_live_and_reconstruct(
+                root.path(),
+                "app.js",
+                &options,
+                Some(&format!("sha256:{}", "0".repeat(64))),
+            )
+            .is_none()
+        );
+
+        // Tampered wire field fails recomputed input_hash check.
+        let mut tampered = wire.clone();
+        tampered.fully_resolved = !tampered.fully_resolved;
+        assert!(
+            tampered
+                .verify_live_and_reconstruct(root.path(), "app.js", &options, Some(&pin))
+                .is_none()
+        );
+
+        // Live disk mutation of a transitive module is detected immediately.
+        put(
+            root.path(),
+            "node_modules/bench-pkg/helper.js",
+            "module.exports = 99;",
+        );
+        assert!(
+            wire.verify_live_and_reconstruct(root.path(), "app.js", &options, Some(&pin))
+                .is_none()
+        );
+
+        // Restoring the file succeeds again, while introducing a file at a
+        // previously negative probe (package.json at project root) is detected.
+        put(
+            root.path(),
+            "node_modules/bench-pkg/helper.js",
+            "module.exports = 42;",
+        );
+        assert!(
+            wire.verify_live_and_reconstruct(root.path(), "app.js", &options, Some(&pin))
+                .is_some()
+        );
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        assert!(
+            wire.verify_live_and_reconstruct(root.path(), "app.js", &options, Some(&pin))
+                .is_none()
+        );
     }
 
     #[test]

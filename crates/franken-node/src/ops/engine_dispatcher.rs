@@ -17,7 +17,7 @@ use crate::ops::telemetry_bridge::{
 use crate::runtime::lockstep_harness::LockstepHarness;
 #[cfg(feature = "engine")]
 use crate::security::impossible_default::{
-    ChildProcessSpawnAdmission, configured_child_process_spawn_admission_in_active_containment,
+    configured_child_process_spawn_admission_in_active_containment,
     configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
 };
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
@@ -30,7 +30,7 @@ use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile, RuntimeParseBudget},
     security::impossible_default::{
-        configured_child_process_spawn_admission,
+        ChildProcessSpawnAdmission, configured_child_process_spawn_admission,
         configured_child_process_spawn_admission_from_authenticated_run_key,
     },
     security::revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
@@ -328,6 +328,16 @@ struct NativeSessionRequest {
     /// `[security.child_process_spawn]` policy subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admitted_source_graph_hash: Option<String>,
+    /// Optional bounded snapshot of the supervisor-captured frozen source graph
+    /// and its `FNSGCAP1` capsule. The worker verifies every recorded input
+    /// probe against live disk (`O_NOFOLLOW | O_DIRECTORY`) and recomputes
+    /// `input_hash`, falling back to full live `source_graph::capture` on any
+    /// mismatch.
+    #[cfg(unix)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admitted_source_snapshot: Option<
+        crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::AdmittedSourceGraphWire,
+    >,
 }
 
 #[cfg(feature = "engine")]
@@ -370,6 +380,22 @@ impl NativeSessionRequest {
                     "native-session admitted source graph pin disagrees with configured operator pin"
                 );
             }
+        }
+        #[cfg(unix)]
+        if let Some(snapshot) = self.admitted_source_snapshot.as_ref() {
+            anyhow::ensure!(
+                self.config.runtime.frozen_modules == Some(true),
+                "native-session admitted source snapshot requires frozen modules"
+            );
+            let pin = self.admitted_source_graph_hash.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "native-session admitted source snapshot requires an admitted source graph pin"
+                )
+            })?;
+            anyhow::ensure!(
+                crate::security::constant_time::ct_eq(snapshot.input_hash(), pin),
+                "native-session admitted source snapshot disagrees with admitted source graph pin"
+            );
         }
         validate_native_frozen_modules(&self.config)?;
         Ok(())
@@ -3156,6 +3182,10 @@ struct NativeEngineRunContext {
     app_args: Vec<String>,
     capture_replay: bool,
     admitted_source_graph_hash: Option<String>,
+    #[cfg(unix)]
+    admitted_source_snapshot: Option<
+        crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::AdmittedSourceGraphWire,
+    >,
 }
 
 #[cfg(feature = "engine")]
@@ -9388,6 +9418,9 @@ fn prepare_native_frozen_modules(
     expected_graph_hash: Option<&str>,
     publisher_approval: Option<&PublisherSourceGraphApproval>,
     trust_requirements: &RunTrustRequirements,
+    #[cfg(unix)] admitted_source_snapshot: Option<
+        &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::AdmittedSourceGraphWire,
+    >,
 ) -> std::result::Result<FrozenNativeModules, FrozenModulePreparationError> {
     #[cfg(not(unix))]
     {
@@ -9444,8 +9477,19 @@ fn prepare_native_frozen_modules(
                 additional_conditions: orchestrator_config.module_conditions.clone(),
                 ..GraphOptions::default()
             };
-            capture(root, entrypoint, options)
-                .map_err(|error| format!("Frozen module graph capture failed: {error}"))?
+            if let Some(verified) = admitted_source_snapshot.and_then(|snapshot| {
+                snapshot.verify_live_and_reconstruct(
+                    root,
+                    entrypoint,
+                    &options,
+                    expected_graph_hash,
+                )
+            }) {
+                verified
+            } else {
+                capture(root, entrypoint, options)
+                    .map_err(|error| format!("Frozen module graph capture failed: {error}"))?
+            }
         };
         trust_requirements
             .verify_operator_module_paths_under_canonical_root(
@@ -10778,6 +10822,20 @@ impl EngineDispatcher {
         Self::apply_operator_source_capture_defaults_with_requirements(config, paths, &requirements)
     }
 
+    /// Fast variant of [`Self::apply_operator_source_capture_defaults`] for
+    /// callers that just normalized, canonicalized, sorted, and deduplicated
+    /// `operator_protected_paths` via [`Self::operator_protected_paths_with_defaults`].
+    pub fn apply_operator_source_capture_defaults_pre_resolved(
+        config: &mut Config,
+        paths: &RunProjectPaths,
+        operator_protected_paths: &[PathBuf],
+    ) -> Result<()> {
+        validate_native_frozen_modules(config)?;
+        let requirements = RunTrustRequirements::new(&[], &[], false)?
+            .with_pre_resolved_operator_protected_paths(operator_protected_paths.to_vec())?;
+        Self::apply_operator_source_capture_defaults_with_requirements(config, paths, &requirements)
+    }
+
     fn apply_operator_source_capture_defaults_with_requirements(
         config: &mut Config,
         paths: &RunProjectPaths,
@@ -11962,6 +12020,8 @@ impl EngineDispatcher {
         let app_args = request.app_args;
         let capture_replay = request.capture_replay;
         let admitted_source_graph_hash = request.admitted_source_graph_hash;
+        #[cfg(unix)]
+        let admitted_source_snapshot = request.admitted_source_snapshot;
         let ifc_trust_key_hex = request.ifc_trust_key_hex;
         let nonce = request.nonce;
         let effect_wal =
@@ -11988,6 +12048,8 @@ impl EngineDispatcher {
                     app_args,
                     capture_replay,
                     admitted_source_graph_hash,
+                    #[cfg(unix)]
+                    admitted_source_snapshot,
                 },
             )
         });
@@ -12879,10 +12941,10 @@ impl EngineDispatcher {
         // identity. Otherwise an unstarted attempt leaves an untracked capture
         // that must conservatively remain unknown to a later fleet drain.
         #[cfg(unix)]
-        let source_capsule = admitted_source_graph
+        let retained_source_capsule = admitted_source_graph
             .as_ref()
             .map(|graph| {
-                crate::ops::native_session_inventory::retain_native_session_source_capsule(
+                crate::ops::native_session_inventory::retain_native_session_source_capsule_with_proof(
                     &prepared_evidence_directories.2,
                     graph,
                 )
@@ -12890,7 +12952,29 @@ impl EngineDispatcher {
             .transpose()
             .context("native-session source retention failed; worker was not started")?;
         #[cfg(unix)]
+        let source_capsule = retained_source_capsule
+            .as_ref()
+            .map(|retained| retained.binding().clone());
+        #[cfg(unix)]
+        let admitted_source_snapshot = if trust_requirements.registry_artifact_approval.is_none() {
+            admitted_source_graph
+                .as_ref()
+                .zip(retained_source_capsule.as_ref())
+                .and_then(|(graph, retained)| {
+                    crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::AdmittedSourceGraphWire::from_graph_and_capsule(
+                        graph,
+                        retained.encoded_capsule(),
+                    )
+                })
+        } else {
+            None
+        };
+        #[cfg(unix)]
         drop(admitted_source_graph);
+        #[cfg(not(unix))]
+        let retained_source_capsule: Option<
+            crate::ops::native_session_inventory::RetainedNativeSessionSourceCapsule,
+        > = None;
         #[cfg(not(unix))]
         let source_capsule = None;
         let ProvisionedRuntimeEvidenceSession {
@@ -12956,8 +13040,10 @@ impl EngineDispatcher {
                 (product_root, product_root_verifying_key),
                 &expected_evidence_capture,
                 &evidence_capture_bytes,
+                retained_source_capsule.as_ref(),
             )
             .context("native-session inventory admission failed; worker was not started")?;
+        drop(retained_source_capsule);
         let ifc_trust_key_hex = match preverified_ifc_trust_key_hex {
             Some(preverified) => preverified,
             None => verify_configured_ifc_declassifications(
@@ -12976,7 +13062,7 @@ impl EngineDispatcher {
             })?
             .map(|(pk_hex, _)| pk_hex),
         };
-        let request = NativeSessionRequest {
+        let mut request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
             app_path: app_path_buf.clone(),
@@ -12995,19 +13081,35 @@ impl EngineDispatcher {
             frozen_modules: config.runtime.frozen_modules.filter(|enabled| *enabled),
             module_conditions: config.runtime.module_conditions.clone(),
             admitted_source_graph_hash,
+            #[cfg(unix)]
+            admitted_source_snapshot,
         };
-        let request_frame = Zeroizing::new(
-            encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
-                |message| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: message,
-                        phase: "worker protocol".to_string(),
+        let encoded_request =
+            match encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES) {
+                Ok(frame) => Ok(frame),
+                Err(first_err) => {
+                    #[cfg(unix)]
+                    {
+                        if request.admitted_source_snapshot.take().is_some() {
+                            encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
+                        } else {
+                            Err(first_err)
+                        }
                     }
-                    .to_actionable()
-                },
-            )?,
-        );
+                    #[cfg(not(unix))]
+                    {
+                        Err(first_err)
+                    }
+                }
+            };
+        let request_frame = Zeroizing::new(encoded_request.map_err(|message| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: message,
+                phase: "worker protocol".to_string(),
+            }
+            .to_actionable()
+        })?);
         drop(request);
 
         // Hold the private snapshot through every worker/containment cleanup
@@ -14938,6 +15040,8 @@ impl EngineDispatcher {
                 app_args: Vec::new(),
                 capture_replay: false,
                 admitted_source_graph_hash: None,
+                #[cfg(unix)]
+                admitted_source_snapshot: None,
             },
         )
     }
@@ -14968,6 +15072,8 @@ impl EngineDispatcher {
             app_args,
             capture_replay,
             admitted_source_graph_hash,
+            #[cfg(unix)]
+            admitted_source_snapshot,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
         let mut execution_config = config.clone();
@@ -15238,6 +15344,8 @@ impl EngineDispatcher {
                     expected_frozen_graph_hash,
                     trust_requirements.registry_artifact_approval.as_ref(),
                     &trust_requirements,
+                    #[cfg(unix)]
+                    admitted_source_snapshot.as_ref(),
                 )
                 .map_err(|error| {
                     let failure = native_engine_spawn_error_with_telemetry_cleanup(
@@ -17510,6 +17618,8 @@ mod tests {
             None,
             None,
             &requirements,
+            #[cfg(unix)]
+            None,
         )
         .err()
         .expect("custom operator file must not become a module or replay source");
@@ -20102,6 +20212,8 @@ mod tests {
             None,
             None,
             &requirements,
+            #[cfg(unix)]
+            None,
         )
         .err()
         .expect("the engine must enforce the one-token parser budget");
@@ -20125,6 +20237,8 @@ mod tests {
             Some(&wrong_pin),
             None,
             &requirements,
+            #[cfg(unix)]
+            None,
         )
         .err()
         .expect("independently pinned source identity must be checked first");
@@ -20151,6 +20265,8 @@ mod tests {
             None,
             None,
             &requirements,
+            #[cfg(unix)]
+            None,
         )
         .err()
         .expect("source bytes must be bounded before parsing");
@@ -20171,6 +20287,8 @@ mod tests {
                 None,
                 None,
                 &requirements,
+                #[cfg(unix)]
+                None,
             )
             .is_ok(),
             "the same source remains preparable under its normal parser budget"
@@ -20989,6 +21107,8 @@ mod tests {
                 None,
                 Some(&fixture.approval),
                 &RunTrustRequirements::default(),
+                #[cfg(unix)]
+                None,
             )
             .unwrap();
             assert_eq!(prepared.entry.module.record.source, source);
@@ -21020,6 +21140,8 @@ mod tests {
                 None,
                 Some(&fixture.approval),
                 &RunTrustRequirements::default(),
+                #[cfg(unix)]
+                None,
             )
             .unwrap();
             assert_eq!(prepared.entry.module.record.source, source);
@@ -29665,6 +29787,8 @@ exec "$2" pinned-worker-image"#,
             frozen_modules: None,
             module_conditions: Vec::new(),
             admitted_source_graph_hash: None,
+            #[cfg(unix)]
+            admitted_source_snapshot: None,
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -29744,6 +29868,55 @@ exec "$2" pinned-worker-image"#,
             frozen_req.validate_module_requirements().is_err(),
             "admitted_source_graph_hash without frozen_modules must fail closed"
         );
+        #[cfg(unix)]
+        {
+            use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+                GraphOptions, capsule, capture,
+            };
+            let snap_dir = TempDir::new().expect("snapshot temp dir");
+            fs::write(snap_dir.path().join("app.js"), "console.log(1);\n").expect("write app");
+            let snap_graph =
+                capture(snap_dir.path(), "app.js", GraphOptions::default()).expect("capture graph");
+            let snap_cap = capsule::encode(&snap_graph).expect("encode capsule");
+            let snap_wire =
+                capsule::AdmittedSourceGraphWire::from_graph_and_capsule(&snap_graph, &snap_cap)
+                    .expect("build wire snapshot");
+            let snap_pin = snap_graph.report().input_hash.clone();
+
+            let mut snap_req: NativeSessionRequest =
+                decode_native_session_frame(&frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                    .expect("decode snapshot request frame");
+            snap_req.config.runtime.frozen_modules = Some(true);
+            snap_req.frozen_modules = Some(true);
+            snap_req.admitted_source_graph_hash = Some(snap_pin.clone());
+            snap_req.admitted_source_snapshot = Some(snap_wire);
+            snap_req
+                .validate_module_requirements()
+                .expect("matching admitted_source_snapshot validates under frozen_modules");
+
+            // Disagreeing pin fails closed.
+            snap_req.admitted_source_graph_hash = Some(format!("sha256:{}", "ef".repeat(32)));
+            assert!(
+                snap_req.validate_module_requirements().is_err(),
+                "admitted_source_snapshot disagreeing with pin must fail closed"
+            );
+
+            // Missing pin fails closed.
+            snap_req.admitted_source_graph_hash = None;
+            assert!(
+                snap_req.validate_module_requirements().is_err(),
+                "admitted_source_snapshot without pin must fail closed"
+            );
+
+            // Disabled frozen_modules fails closed.
+            snap_req.admitted_source_graph_hash = Some(snap_pin);
+            snap_req.config.runtime.frozen_modules = Some(false);
+            snap_req.frozen_modules = None;
+            assert!(
+                snap_req.validate_module_requirements().is_err(),
+                "admitted_source_snapshot without frozen_modules must fail closed"
+            );
+        }
         decoded
             .trust_requirements
             .enforce_operator_safe_mode()
