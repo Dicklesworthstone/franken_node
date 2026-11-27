@@ -404,7 +404,9 @@ for (const archive of cases.filter((item) => item.format === "native-session-col
     assert.equal(originals || replay || cleanup || history, false);
     const population: number = facts.session_count;
     const sourceBound: number = facts.source_bound_sessions;
+    const identities: number = facts.identity_captures_verified;
     assert(population >= 1 && population <= 16_384 && sourceBound >= 0 && sourceBound <= population);
+    assert.equal(identities, facts.schema_version === "franken-node/native-session-cold-archive/v2" ? population : 0);
     if (archive.expected_archive_root_sha256 !== undefined) {
       assert.equal(facts.merkle_root_sha256, archive.expected_archive_root_sha256);
     }

@@ -286,7 +286,8 @@ class _NativeSessionSourceFacts(TypedDict, total=False):
 class NativeSessionColdArchiveFacts(TypedDict):
     """Product-root-authenticated compaction observations, not original receipts."""
 
-    schema_version: Literal["franken-node/native-session-cold-archive/v1"]
+    schema_version: Literal["franken-node/native-session-cold-archive/v1",
+                            "franken-node/native-session-cold-archive/v2"]
     scope: Literal["authenticated_archived_supervisor_observations"]
     archive_sha256: str
     signer_public_key_hex: str
@@ -294,6 +295,7 @@ class NativeSessionColdArchiveFacts(TypedDict):
     archived_at: str
     session_count: int
     source_bound_sessions: int
+    identity_captures_verified: int
     merkle_root_sha256: str
     original_receipt_signatures_verified: Literal[False]
     replay_certified: Literal[False]
@@ -910,11 +912,13 @@ def _native_archive_valid(facts: Any, anchor: str) -> bool:
         isinstance(facts, dict)
         and set(facts) == {
             "schema_version", "scope", "archive_sha256", "signer_public_key_hex", "product_root_key_id",
-            "archived_at", "session_count", "source_bound_sessions", "merkle_root_sha256",
+            "archived_at", "session_count", "source_bound_sessions", "identity_captures_verified",
+            "merkle_root_sha256",
             "original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
             "historical_completeness",
         }
-        and facts["schema_version"] == "franken-node/native-session-cold-archive/v1"
+        and facts["schema_version"] in ("franken-node/native-session-cold-archive/v1",
+                                        "franken-node/native-session-cold-archive/v2")
         and facts["scope"] == "authenticated_archived_supervisor_observations"
         and facts["signer_public_key_hex"] == anchor
         and facts["product_root_key_id"] == "ed25519:" + anchor
@@ -924,6 +928,10 @@ def _native_archive_valid(facts: Any, anchor: str) -> bool:
         and type(facts["session_count"]) is int and 1 <= facts["session_count"] <= 16_384
         and type(facts["source_bound_sessions"]) is int
         and 0 <= facts["source_bound_sessions"] <= facts["session_count"]
+        and type(facts["identity_captures_verified"]) is int
+        and facts["identity_captures_verified"] == (
+            facts["session_count"] if facts["schema_version"] == "franken-node/native-session-cold-archive/v2" else 0
+        )
         and all(facts[field] is False for field in (
             "original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
             "historical_completeness",

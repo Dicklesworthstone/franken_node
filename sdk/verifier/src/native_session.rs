@@ -25,9 +25,9 @@ pub use module_capsule::{
 mod archive;
 pub use archive::{
     MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES, MAX_NATIVE_SESSION_COLD_ARCHIVE_SESSIONS,
-    NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, NativeSessionColdArchiveError,
-    VerifiedNativeSessionColdArchive, verify_native_session_cold_archive,
-    verify_native_session_cold_archive_with_expected_root,
+    NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA,
+    NativeSessionColdArchiveError, VerifiedNativeSessionColdArchive,
+    verify_native_session_cold_archive, verify_native_session_cold_archive_with_expected_root,
 };
 
 pub const NATIVE_SESSION_FORENSICS_SCHEMA: &str = "franken-node/native-session-forensics/v1";
@@ -221,7 +221,8 @@ pub struct VerifiedNativeSessionForensics {
 
 /// Stable failures do not include private or attacker-controlled evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeSessionForensicError {    ExpectedIdentityInvalid,
+pub enum NativeSessionForensicError {
+    ExpectedIdentityInvalid,
     ExpectedIdentityMismatch,
     InputTooLarge,
     JsonInvalid,

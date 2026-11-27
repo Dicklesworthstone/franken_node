@@ -1496,6 +1496,7 @@ function coldArchiveFacts(fixture, wire, archivedAt) {
     session_count: fixture.expected.session_count,
     source_bound_sessions: fixture.expected.entries.filter((entry) =>
       Object.hasOwn(JSON.parse(entry.canonical_admission_json), "source_capsule")).length,
+    identity_captures_verified: 0,
     merkle_root_sha256: fixture.expected.merkle_root_sha256,
     original_receipt_signatures_verified: false, replay_certified: false,
     quiescence_certified: false, historical_completeness: false,
@@ -1545,6 +1546,75 @@ for (const [name, wire, expected, metadata] of [
   ["unsigned_member", singleArchiveWire.replace('{', '{"PRIVATE-unsigned-claim":true,'), "JSON_INVALID", {}],
   ["wrong_schema", singleArchiveWire.replace('native-session-cold-archive/v1', 'native-session-cold-archive/v9'), "SCHEMA_UNSUPPORTED", {}],
 ]) add("cold_archive_" + name, "native-session-cold-archive", wire, expected, metadata);
+
+// Independently sign a v2 session identity and its length-framed archive leaf.
+// These are protocol fixtures; no guest execution or original receipt is claimed.
+const coldArchiveV2Admission = JSON.parse(singleArchive.expected.entries[0].canonical_admission_json);
+const coldArchiveV2Outcome = JSON.parse(singleArchive.expected.entries[0].canonical_outcome_json);
+const coldArchiveV2Capture = {
+  schema_version: "franken-node/runtime-evidence-identity-capture/v1",
+  session_nonce: coldArchiveV2Admission.session_nonce,
+  product_root_key_id: `ed25519:${anchor}`, product_root_verification_key_hex: anchor,
+  evidence_verification_identity: {
+    producer_id: `franken-node.native-session:ed25519:${anchor}:${coldArchiveV2Admission.session_nonce}`,
+    key_provenance: {
+      authority_class: "runtime",
+      key_id: `ed25519:${hash(Buffer.concat([Buffer.from("franken-engine.evidence-signing-key.v1"), publicBytes(sessionKey)]))}`,
+      activation_epoch: coldArchiveV2Admission.security_epoch, rotation_sequence: 1,
+    },
+    verification_key: { inner: [...publicBytes(sessionKey)] },
+  },
+};
+coldArchiveV2Capture.signature_hex = sign(null,
+  frame("franken-node.runtime-evidence-identity-capture.v1", Buffer.from(ordered(coldArchiveV2Capture))), key).toString("hex");
+function coldArchiveV2Wire(entry) {
+  const parts = [entry.session_nonce, ordered(entry.admission), ordered(entry.outcome), ordered(entry.identity_capture)]
+    .map((part) => Buffer.from(part));
+  const leaf = hash(Buffer.concat([Buffer.from("franken-node/native-session-cold-archive-leaf/v2\0"),
+    ...parts.flatMap((part) => [u64be(part.length), part])]));
+  const metadata = {
+    ...JSON.parse(singleArchive.expected.canonical_signature_metadata_json),
+    schema_version: "franken-node/native-session-cold-archive/v2", merkle_root_sha256: leaf,
+  };
+  const signature = sign(null, Buffer.concat([coldArchiveDomain, Buffer.from(ordered(metadata))]), key).toString("hex");
+  return ordered({ ...metadata, signature_hex: signature, entries: [{ ...entry, leaf_sha256: leaf }] });
+}
+const coldArchiveV2 = coldArchiveV2Wire({
+  session_nonce: coldArchiveV2Admission.session_nonce, leaf_sha256: "",
+  admission: coldArchiveV2Admission, outcome: coldArchiveV2Outcome, identity_capture: coldArchiveV2Capture,
+});
+const coldArchiveV2Root = JSON.parse(coldArchiveV2).merkle_root_sha256;
+const coldArchiveV2Facts = {
+  ...coldArchiveFacts(singleArchive, coldArchiveV2),
+  schema_version: "franken-node/native-session-cold-archive/v2",
+  identity_captures_verified: 1, merkle_root_sha256: coldArchiveV2Root,
+};
+add("cold_archive_v2_identity", "native-session-cold-archive", coldArchiveV2, "verified",
+  { archive_facts: coldArchiveV2Facts });
+add("cold_archive_v2_pinned_identity", "native-session-cold-archive", coldArchiveV2, "verified",
+  { archive_facts: coldArchiveV2Facts, expected_archive_root_sha256: coldArchiveV2Root });
+add("cold_archive_v2_wrong_population_pin", "native-session-cold-archive", coldArchiveV2,
+  "EXPECTED_ARCHIVE_ROOT_MISMATCH", { expected_archive_root_sha256: singleArchive.expected.merkle_root_sha256 });
+for (const [name, mutate, reseal, expected] of [
+  ["missing_identity", (entry) => { delete entry.identity_capture; }, false, "ARCHIVE_IDENTITY_CAPTURE_INVALID"],
+  ["null_identity", (entry) => { entry.identity_capture = null; }, false, "JSON_INVALID"],
+  ["invalid_original_signature", (entry) => { entry.identity_capture.signature_hex = "00".repeat(64); },
+    true, "ARCHIVE_IDENTITY_CAPTURE_INVALID"],
+  ["wrong_identity_epoch", (entry) => { entry.admission.security_epoch += 1; }, true, "ARCHIVE_IDENTITY_CAPTURE_INVALID"],
+  ["wrong_identity_nonce", (entry) => {
+    entry.session_nonce = "018f03f2-7938-70d5-8b64-19b7f2a5b6c1";
+    entry.admission.session_nonce = entry.session_nonce;
+  }, true, "ARCHIVE_IDENTITY_CAPTURE_INVALID"],
+]) {
+  const value = JSON.parse(coldArchiveV2);
+  mutate(value.entries[0]);
+  add("cold_archive_v2_" + name, "native-session-cold-archive",
+    reseal ? coldArchiveV2Wire(value.entries[0]) : ordered(value), expected);
+}
+const coldArchiveV1WithIdentity = JSON.parse(singleArchiveWire);
+coldArchiveV1WithIdentity.entries[0].identity_capture = coldArchiveV2Capture;
+add("cold_archive_v1_identity_upgrade_refused", "native-session-cold-archive",
+  ordered(coldArchiveV1WithIdentity), "ARCHIVE_IDENTITY_CAPTURE_INVALID");
 
 const nativePending = nativeFixture(18_446_744_073_709_551_615n);
 addNative("native_pending_max_epoch", nativePending);

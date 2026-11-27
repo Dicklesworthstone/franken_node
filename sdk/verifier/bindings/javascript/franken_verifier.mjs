@@ -376,9 +376,10 @@ function nativeJournalValid(journal, facts) {
 
 function nativeArchiveValid(facts, anchor) {
   return keys(facts, ["schema_version", "scope", "archive_sha256", "signer_public_key_hex", "product_root_key_id",
-    "archived_at", "session_count", "source_bound_sessions", "merkle_root_sha256",
+    "archived_at", "session_count", "source_bound_sessions", "identity_captures_verified", "merkle_root_sha256",
     "original_receipt_signatures_verified", "replay_certified", "quiescence_certified", "historical_completeness"])
-    && facts.schema_version === "franken-node/native-session-cold-archive/v1"
+    && ["franken-node/native-session-cold-archive/v1", "franken-node/native-session-cold-archive/v2"]
+      .includes(facts.schema_version)
     && facts.scope === "authenticated_archived_supervisor_observations"
     && facts.signer_public_key_hex === anchor && facts.product_root_key_id === `ed25519:${anchor}`
     && ["archive_sha256", "merkle_root_sha256"].every((key) => typeof facts[key] === "string"
@@ -386,6 +387,9 @@ function nativeArchiveValid(facts, anchor) {
     && instantNs(facts.archived_at) !== null
     && count(facts.session_count) && facts.session_count >= 1 && facts.session_count <= 16_384
     && count(facts.source_bound_sessions) && facts.source_bound_sessions <= facts.session_count
+    && count(facts.identity_captures_verified)
+    && facts.identity_captures_verified === (facts.schema_version === "franken-node/native-session-cold-archive/v2"
+      ? facts.session_count : 0)
     && ["original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
       "historical_completeness"].every((key) => facts[key] === false);
 }

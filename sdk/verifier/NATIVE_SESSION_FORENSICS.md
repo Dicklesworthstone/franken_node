@@ -562,10 +562,12 @@ expectations. It exercises the wire protocol, not a live multi-node campaign.
 ## Independently verify compacted native sessions
 
 `ops session-inventory compact --archive-dir ...` retains completed clean
-sessions in a product-root-signed `franken-node/native-session-cold-archive/v1`
-archive. The standalone Rust SDK, CLI, and Python and JavaScript/TypeScript
-clients can authenticate those portable archives without the product database
-or the original session files:
+sessions in a product-root-signed archive. The standalone Rust SDK, CLI, and
+Python and JavaScript/TypeScript clients support
+`franken-node/native-session-cold-archive/v1` and
+`franken-node/native-session-cold-archive/v2` without the product database or
+the original session files. V2 also retains each session's original signed
+runtime identity:
 
 ```sh
 franken-verifier verify --format native-session-cold-archive \
@@ -615,7 +617,7 @@ if (verified.format === "native-session-cold-archive") {
 
 Both clients reject malformed or misapplied root pins before launching the
 verifier. They require the returned scope, root identity, digest encodings,
-population bounds and false proof flags to match the archive contract. Returned
+population bounds, verified-identity count and false proof flags to match the archive contract. Returned
 archive facts must bind to the exact supplied bytes, and a requested population
 root must match even if a faulty verifier ignores the command-line option.
 
@@ -630,26 +632,38 @@ children separated by `:`, duplicating the final child at each odd level.
 The strict Ed25519 signature authenticates the domain-prefixed ordered archive
 metadata; this signature protocol has no length prefix.
 
+For v2, verification also authenticates each original runtime identity against
+the enrolled product root and its admission's session nonce and security epoch.
+The v2 leaf binds those exact identity bytes alongside the admission and outcome
+under a distinct leaf domain. A valid archive signature cannot replace a missing
+or invalid original identity. V1 archives remain supported with their original
+leaf protocol and refuse an attached identity; changing only the schema label
+cannot upgrade their evidence.
+
 Success uses scope `authenticated_archived_supervisor_observations`. Returned
 facts contain the trusted root identity, archive timestamp, session count,
-source-bound session count, Merkle root, and exact archive digest. They omit
+source-bound session count, `identity_captures_verified`, Merkle root, and exact
+archive digest. `identity_captures_verified` is zero for v1 and equals
+`session_count` for v2. Both language clients reject missing, noninteger or
+schema-inconsistent counts. Facts omit
 operator text, project paths, dependency names, and individual session records.
 Captured paths are never opened.
 
-The archive contains a compaction-time statement, not the original signed
-admission/outcome receipts, source capsule bytes, final effect ledger, or durable
-effect journal. Therefore `original_receipt_signatures_verified`,
+Both archive versions contain a compaction-time admission/outcome statement.
+V2 additionally carries original signed runtime identities, but neither version
+includes the original signed admission/outcome receipts, source capsule bytes,
+final effect ledger, or durable effect journal. Therefore `original_receipt_signatures_verified`,
 `replay_certified`, `quiescence_certified`, and `historical_completeness` remain
 false. A source-binding count only describes retained commitments. An archived
 clean supervisor outcome does not independently prove external-effect cleanup,
 historical completeness, current freshness, or current revocation status.
 
 The SDK accepts at most 64 MiB of archive JSON and 16,384 sessions, with canonical
-admission/outcome limits of 4 MiB and 5 MiB per entry. The 64 MiB outer limit is
-an explicit standalone-verifier bound; the producer can create larger archives.
-Use smaller `--max-sessions-to-archive` compaction batches for those populations.
+admission/outcome limits of 4 MiB and 5 MiB per entry.
+Use smaller `--max-sessions` compaction batches to stay within those bounds.
 Oversized input fails with `INPUT_TOO_LARGE`; wrong population pins fail with
-`EXPECTED_ARCHIVE_ROOT_MISMATCH`. Signature, session, leaf, and Merkle failures
+`EXPECTED_ARCHIVE_ROOT_MISMATCH`. Missing or unauthentic original v2 identities
+fail with `ARCHIVE_IDENTITY_CAPTURE_INVALID`. Signature, session, leaf, and Merkle failures
 have distinct stable codes without captured values in diagnostics.
 
 `tests/fixtures/native_session_cold_archives.json` contains synthetic protocol
@@ -657,4 +671,6 @@ vectors generated independently with Python `hashlib` and `cryptography` using
 the public RFC 8032 test key. It covers singleton and odd-sized trees, alternate
 timestamp spellings, full-width integers, Windows paths, historical option
 omission, and validly signed semantic failures. It establishes wire-protocol
-compatibility, not live compaction or recovery qualification.
+compatibility, not live compaction or recovery qualification. Independently
+Node-signed language-client vectors also cover v2 identity signatures, nonce and
+epoch bindings, population pins, and refusal of identity injection into v1.

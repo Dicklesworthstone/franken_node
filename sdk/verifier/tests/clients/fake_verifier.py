@@ -411,13 +411,18 @@ if mode.startswith("archive_"):
         "scope": "authenticated_archived_supervisor_observations",
         "archive_sha256": hashlib.sha256(data).hexdigest(), "signer_public_key_hex": anchor,
         "product_root_key_id": "ed25519:" + anchor, "archived_at": "2026-11-26T00:00:02.123456789Z",
-        "session_count": 3, "source_bound_sessions": 1, "merkle_root_sha256": "a" * 64,
+        "session_count": 3, "source_bound_sessions": 1, "identity_captures_verified": 0,
+        "merkle_root_sha256": "a" * 64,
         "original_receipt_signatures_verified": False, "replay_certified": False,
         "quiescence_certified": False, "historical_completeness": False,
     }
     action = mode[len("archive_"):]
+    if action.startswith("v2_"):
+        response["facts"]["schema_version"] = "franken-node/native-session-cold-archive/v2"
+        response["facts"]["identity_captures_verified"] = response["facts"]["session_count"]
+        action = action[len("v2_"):]
     changes = {
-        "wrong_schema": ("schema_version", "franken-node/native-session-cold-archive/v2"),
+        "wrong_schema": ("schema_version", "franken-node/native-session-cold-archive/v3"),
         "wrong_nested_scope": ("scope", "authenticated_supervisor_observations"),
         "wrong_signer": ("signer_public_key_hex", "1" * 64),
         "wrong_root_key": ("product_root_key_id", "ed25519:" + "1" * 64),
@@ -436,6 +441,13 @@ if mode.startswith("archive_"):
         "excess_sources": ("source_bound_sessions", 4),
         "negative_sources": ("source_bound_sessions", -1),
         "boolean_sources": ("source_bound_sessions", True),
+        "partial_identities": ("identity_captures_verified", 2),
+        "excess_identities": ("identity_captures_verified", 4),
+        "negative_identities": ("identity_captures_verified", -1),
+        "boolean_identities": ("identity_captures_verified", True),
+        "fractional_identities": ("identity_captures_verified", 1.5),
+        "string_identities": ("identity_captures_verified", "3"),
+        "empty_identities": ("identity_captures_verified", 0),
         "original_signatures_claim": ("original_receipt_signatures_verified", True),
         "replay_claim": ("replay_certified", True),
         "quiescence_claim": ("quiescence_certified", True),
@@ -451,10 +463,14 @@ if mode.startswith("archive_"):
         del response["facts"]["merkle_root_sha256"]
     elif action == "missing_proof_flag":
         del response["facts"]["original_receipt_signatures_verified"]
+    elif action == "missing_identities":
+        del response["facts"]["identity_captures_verified"]
     elif action == "unknown_field":
         response["facts"]["guest_execution_verified"] = True
     elif action == "maximum_population":
         response["facts"].update(session_count=16_384, source_bound_sessions=16_384)
+        if response["facts"]["schema_version"] == "franken-node/native-session-cold-archive/v2":
+            response["facts"]["identity_captures_verified"] = 16_384
     elif action == "forwarded":
         if (sys.argv.count("--expected-archive-root-sha256") != 1
                 or sys.argv[sys.argv.index("--expected-archive-root-sha256") + 1] != "a" * 64):

@@ -76,13 +76,42 @@ struct Identity {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IdentityCapture {
+pub(crate) struct IdentityCapture {
     schema_version: String,
     session_nonce: String,
     product_root_key_id: String,
     product_root_verification_key_hex: String,
     evidence_verification_identity: Identity,
     signature_hex: String,
+}
+
+impl IdentityCapture {
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        encoded(self, MAX_CAPTURE_BYTES)
+    }
+
+    /// Authenticate the original session identity before accepting it as
+    /// retained evidence for a particular native admission.
+    pub(crate) fn verify_for_session(
+        &self,
+        trusted_root: &VerifyingKey,
+        session_nonce: &str,
+        product_root_key_id: &str,
+        security_epoch: u64,
+    ) -> Result<()> {
+        verify_identity_capture(self, trusted_root)?;
+        if self.session_nonce != session_nonce
+            || self.product_root_key_id != product_root_key_id
+            || self
+                .evidence_verification_identity
+                .key_provenance
+                .activation_epoch
+                != security_epoch
+        {
+            return Err(invalid("runtime identity does not match native admission"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -242,14 +271,10 @@ fn canonical_nonce(value: &str) -> bool {
         })
 }
 
-/// Called only after the run record and the enclosing bundle were verified.
-pub(super) fn verify(bundle: &Value, trusted_root: &VerifyingKey) -> Result<VerifiedRuntimeOrigin> {
-    let initial = &bundle["initial_state_snapshot"];
-    let capture = initial
-        .get("runtime_evidence_identity_capture")
-        .ok_or(IncidentBundleError::RuntimeOriginMissing)?;
-    let capture: IdentityCapture = serde_json::from_slice(&encoded(capture, MAX_CAPTURE_BYTES)?)
-        .map_err(|_| invalid("malformed runtime identity capture"))?;
+fn verify_identity_capture(
+    capture: &IdentityCapture,
+    trusted_root: &VerifyingKey,
+) -> Result<VerifyingKey> {
     if capture.schema_version != CAPTURE_SCHEMA || !canonical_nonce(&capture.session_nonce) {
         return Err(invalid(
             "unsupported runtime identity schema or session nonce",
@@ -297,10 +322,24 @@ pub(super) fn verify(bundle: &Value, trusted_root: &VerifyingKey) -> Result<Veri
         .map_err(|_| invalid("malformed runtime identity capture signature"))?;
     trusted_root
         .verify_strict(
-            &capture_preimage(&capture)?,
+            &capture_preimage(capture)?,
             &Signature::from_bytes(&signature),
         )
         .map_err(|_| IncidentBundleError::RuntimeOriginCaptureSignatureInvalid)?;
+    Ok(session_key)
+}
+
+/// Called only after the run record and the enclosing bundle were verified.
+pub(super) fn verify(bundle: &Value, trusted_root: &VerifyingKey) -> Result<VerifiedRuntimeOrigin> {
+    let initial = &bundle["initial_state_snapshot"];
+    let capture = initial
+        .get("runtime_evidence_identity_capture")
+        .ok_or(IncidentBundleError::RuntimeOriginMissing)?;
+    let capture: IdentityCapture = serde_json::from_slice(&encoded(capture, MAX_CAPTURE_BYTES)?)
+        .map_err(|_| invalid("malformed runtime identity capture"))?;
+    let session_key = verify_identity_capture(&capture, trusted_root)?;
+    let identity = &capture.evidence_verification_identity;
+    let provenance = &identity.key_provenance;
 
     let raw = initial["run_origin"]["record_json"]
         .as_str()
@@ -327,9 +366,9 @@ pub(super) fn verify(bundle: &Value, trusted_root: &VerifyingKey) -> Result<Veri
         .map_err(|_| IncidentBundleError::RuntimeOriginLedgerSignatureInvalid)?;
     Ok(VerifiedRuntimeOrigin {
         session_nonce: capture.session_nonce,
-        product_root_key_id: root_id,
+        product_root_key_id: capture.product_root_key_id,
         producer_id: identity.producer_id.clone(),
-        evidence_key_id: key_id,
+        evidence_key_id: provenance.key_id.clone(),
         signed_epoch: envelope.signed_epoch,
     })
 }

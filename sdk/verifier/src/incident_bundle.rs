@@ -59,6 +59,7 @@ pub use run_origin::VerifiedRunOrigin;
 
 #[path = "incident_runtime_origin.rs"]
 mod runtime_origin;
+pub(crate) use runtime_origin::IdentityCapture;
 pub use runtime_origin::VerifiedRuntimeOrigin;
 
 use ed25519_dalek::{Signature, VerifyingKey};

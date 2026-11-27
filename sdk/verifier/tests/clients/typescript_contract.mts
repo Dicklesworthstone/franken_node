@@ -330,7 +330,11 @@ export async function auditColdArchive(
   const cleanup: false = verified.facts.quiescence_certified;
   const history: false = verified.facts.historical_completeness;
   const population: number = verified.facts.session_count;
-  if (originals || replay || cleanup || history || population < 1) throw new Error("archive claim exceeds its scope");
+  const identities: number = verified.facts.identity_captures_verified;
+  const expectedIdentities = verified.facts.schema_version === "franken-node/native-session-cold-archive/v2" ? population : 0;
+  if (originals || replay || cleanup || history || population < 1 || identities !== expectedIdentities) {
+    throw new Error("archive claim exceeds its scope");
+  }
   // @ts-expect-error A cold archive does not expose a per-session original receipt.
   verified.facts.admission_sha256;
   return `${verified.facts.merkle_root_sha256}:${verified.facts.archive_sha256}:${population}`;

@@ -679,28 +679,36 @@ archive_controls = [
     "invalid_time", "empty_population", "excess_population", "boolean_population", "fractional_population",
     "string_population", "excess_sources", "negative_sources", "boolean_sources", "original_signatures_claim",
     "replay_claim", "quiescence_claim", "history_claim", "numeric_proof_flag", "missing_root",
-    "missing_proof_flag", "unknown_field",
+    "missing_proof_flag", "unknown_field", "missing_identities", "partial_identities", "excess_identities",
+    "negative_identities", "boolean_identities", "fractional_identities", "string_identities",
 ]
-for control in archive_controls:
-    try:
-        verify_artifact(json.dumps({"protocol_control": "archive_" + control}).encode(), cases[0]["anchor"],
-                        verifier=root / "fake_verifier", format="native-session-cold-archive",
-                        expected_archive_root_sha256=archive_root_pin)
-    except VerifierError as error:
-        assert error.code == "PROTOCOL_INVALID" and "PRIVATE-" not in str(error), (control, error.code)
-    else:
-        raise AssertionError("invalid archive facts accepted: " + control)
-    archive_protocol_cases += 1
-for control in ("valid", "maximum_population", "forwarded"):
-    data = json.dumps({"protocol_control": "archive_" + control}).encode()
-    options = {"expected_archive_root_sha256": archive_root_pin} if control == "forwarded" else {}
-    verified = verify_artifact(data, cases[0]["anchor"].upper(), verifier=root / "fake_verifier",
-                               format="native-session-cold-archive", **options)
-    assert verified["scope"] == "authenticated_archived_supervisor_observations"
-    assert verified["facts"]["archive_sha256"] == hashlib.sha256(data).hexdigest()
-    assert verified["facts"]["original_receipt_signatures_verified"] is False
-    assert verified["facts"]["session_count"] == (16_384 if control == "maximum_population" else 3)
-    archive_protocol_cases += 1
+for prefix in ("", "v2_"):
+    controls = archive_controls + (["empty_identities"] if prefix else [])
+    for control in controls:
+        try:
+            verify_artifact(json.dumps({"protocol_control": "archive_" + prefix + control}).encode(), cases[0]["anchor"],
+                            verifier=root / "fake_verifier", format="native-session-cold-archive",
+                            expected_archive_root_sha256=archive_root_pin)
+        except VerifierError as error:
+            assert error.code == "PROTOCOL_INVALID" and "PRIVATE-" not in str(error), (prefix, control, error.code)
+        else:
+            raise AssertionError("invalid archive facts accepted: " + prefix + control)
+        archive_protocol_cases += 1
+    for control in ("valid", "maximum_population", "forwarded"):
+        data = json.dumps({"protocol_control": "archive_" + prefix + control}).encode()
+        options = {"expected_archive_root_sha256": archive_root_pin} if control == "forwarded" else {}
+        verified = verify_artifact(data, cases[0]["anchor"].upper(), verifier=root / "fake_verifier",
+                                   format="native-session-cold-archive", **options)
+        assert verified["scope"] == "authenticated_archived_supervisor_observations"
+        assert verified["facts"]["archive_sha256"] == hashlib.sha256(data).hexdigest()
+        assert all(verified["facts"][field] is False for field in (
+            "original_receipt_signatures_verified", "replay_certified", "quiescence_certified",
+            "historical_completeness",
+        ))
+        assert verified["facts"]["session_count"] == (16_384 if control == "maximum_population" else 3)
+        assert verified["facts"]["schema_version"] == "franken-node/native-session-cold-archive/" + ("v2" if prefix else "v1")
+        assert verified["facts"]["identity_captures_verified"] == (verified["facts"]["session_count"] if prefix else 0)
+        archive_protocol_cases += 1
 try:
     verify_artifact(json.dumps({"protocol_control": "archive_ignored_pin"}).encode(), cases[0]["anchor"],
                     verifier=root / "fake_verifier", format="native-session-cold-archive",

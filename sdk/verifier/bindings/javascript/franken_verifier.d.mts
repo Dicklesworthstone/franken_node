@@ -165,7 +165,7 @@ export interface NativeSessionEffectJournalFacts {
 }
 /** Authenticated compaction observations; original receipts and execution are not certified. */
 export interface NativeSessionColdArchiveFacts {
-  schema_version: "franken-node/native-session-cold-archive/v1";
+  schema_version: "franken-node/native-session-cold-archive/v1" | "franken-node/native-session-cold-archive/v2";
   scope: "authenticated_archived_supervisor_observations";
   archive_sha256: string;
   signer_public_key_hex: string;
@@ -173,6 +173,8 @@ export interface NativeSessionColdArchiveFacts {
   archived_at: string;
   session_count: number;
   source_bound_sessions: number;
+  /** Original product-root-signed identities matched to admissions; zero for v1. */
+  identity_captures_verified: number;
   merkle_root_sha256: string;
   original_receipt_signatures_verified: false;
   replay_certified: false;

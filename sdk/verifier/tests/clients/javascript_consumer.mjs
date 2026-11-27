@@ -547,24 +547,31 @@ const archiveControls = [
   "invalid_time", "empty_population", "excess_population", "boolean_population", "fractional_population",
   "string_population", "excess_sources", "negative_sources", "boolean_sources", "original_signatures_claim",
   "replay_claim", "quiescence_claim", "history_claim", "numeric_proof_flag", "missing_root",
-  "missing_proof_flag", "unknown_field",
+  "missing_proof_flag", "unknown_field", "missing_identities", "partial_identities", "excess_identities",
+  "negative_identities", "boolean_identities", "fractional_identities", "string_identities",
 ];
-for (const control of archiveControls) {
-  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_" + control })), cases[0].anchor,
-    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: archiveRootPin }),
-  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID" && !error.message.includes("PRIVATE-"), control);
-  archiveProtocolCases += 1;
-}
-for (const control of ["valid", "maximum_population", "forwarded"]) {
-  const data = Buffer.from(JSON.stringify({ protocol_control: "archive_" + control }));
-  const options = control === "forwarded" ? { expectedArchiveRootSha256: archiveRootPin } : {};
-  const verified = await verifyArtifact(data, cases[0].anchor.toUpperCase(),
-    { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", ...options });
-  assert.equal(verified.scope, "authenticated_archived_supervisor_observations");
-  assert.equal(verified.facts.archive_sha256, createHash("sha256").update(data).digest("hex"));
-  assert.equal(verified.facts.original_receipt_signatures_verified, false);
-  assert.equal(verified.facts.session_count, control === "maximum_population" ? 16_384 : 3);
-  archiveProtocolCases += 1;
+for (const prefix of ["", "v2_"]) {
+  const controls = [...archiveControls, ...(prefix ? ["empty_identities"] : [])];
+  for (const control of controls) {
+    await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_" + prefix + control })), cases[0].anchor,
+      { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: archiveRootPin }),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID" && !error.message.includes("PRIVATE-"), prefix + control);
+    archiveProtocolCases += 1;
+  }
+  for (const control of ["valid", "maximum_population", "forwarded"]) {
+    const data = Buffer.from(JSON.stringify({ protocol_control: "archive_" + prefix + control }));
+    const options = control === "forwarded" ? { expectedArchiveRootSha256: archiveRootPin } : {};
+    const verified = await verifyArtifact(data, cases[0].anchor.toUpperCase(),
+      { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", ...options });
+    assert.equal(verified.scope, "authenticated_archived_supervisor_observations");
+    assert.equal(verified.facts.archive_sha256, createHash("sha256").update(data).digest("hex"));
+    for (const field of ["original_receipt_signatures_verified", "replay_certified",
+      "quiescence_certified", "historical_completeness"]) assert.equal(verified.facts[field], false);
+    assert.equal(verified.facts.session_count, control === "maximum_population" ? 16_384 : 3);
+    assert.equal(verified.facts.schema_version, "franken-node/native-session-cold-archive/" + (prefix ? "v2" : "v1"));
+    assert.equal(verified.facts.identity_captures_verified, prefix ? verified.facts.session_count : 0);
+    archiveProtocolCases += 1;
+  }
 }
 await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "archive_ignored_pin" })), cases[0].anchor,
   { verifier: resolve("fake_verifier"), format: "native-session-cold-archive", expectedArchiveRootSha256: "b".repeat(64) }),

@@ -1,10 +1,12 @@
 //! Offline verification of product-root-signed native session cold archives.
 //!
-//! The v1 archive authenticates a compaction-time snapshot. It does not carry
-//! the original admission/outcome signatures, source bytes, or effect ledger.
-//! Verification therefore cannot certify original receipts, replay, cleanup,
-//! freshness, or complete history. Private paths and operator text stay inside
-//! the input and are never opened or returned.
+//! The v1 archive authenticates a compaction-time snapshot. The v2 archive also
+//! retains each original product-root-signed runtime identity, bound to the
+//! archived admission and the session leaf. Neither carries the original
+//! admission/outcome signatures, source bytes, or effect ledger. Verification
+//! therefore cannot certify original receipts, replay, cleanup, freshness, or
+//! complete history. Private paths and operator text stay inside the input and
+//! are never opened or returned.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -18,14 +20,17 @@ use super::{
     Admission, EffectObservation, MAX_ADMISSION_BYTES, MAX_OUTCOME_BYTES, Outcome, OutcomeKind,
     ProcessObservation, digest_valid, lowercase_hex, validate_admission, validate_outcome,
 };
-use crate::incident_bundle::decode_evidence_json;
+use crate::incident_bundle::{IdentityCapture, decode_evidence_json};
 
 pub const NATIVE_SESSION_COLD_ARCHIVE_SCHEMA: &str = "franken-node/native-session-cold-archive/v1";
+pub const NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA: &str =
+    "franken-node/native-session-cold-archive/v2";
 /// Oversized archives must be produced in smaller compaction batches.
 pub const MAX_NATIVE_SESSION_COLD_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_NATIVE_SESSION_COLD_ARCHIVE_SESSIONS: usize = 16_384;
 
 const LEAF_DOMAIN: &[u8] = b"franken-node/native-session-cold-archive-leaf/v1\0";
+const LEAF_V2_DOMAIN: &[u8] = b"franken-node/native-session-cold-archive-leaf/v2\0";
 const NODE_DOMAIN: &[u8] = b"franken-node/native-session-cold-archive-node/v1\0";
 const SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-session-cold-archive-sig/v1\0";
 
@@ -40,6 +45,9 @@ pub struct VerifiedNativeSessionColdArchive {
     pub archived_at: String,
     pub session_count: usize,
     pub source_bound_sessions: usize,
+    /// Original root-signed identities verified against their admissions.
+    /// Historical v1 archives cannot establish these identities.
+    pub identity_captures_verified: usize,
     pub merkle_root_sha256: String,
     pub original_receipt_signatures_verified: bool,
     pub replay_certified: bool,
@@ -60,6 +68,7 @@ pub enum NativeSessionColdArchiveError {
     SignatureInvalid,
     ArchiveInvalid,
     SessionInvalid,
+    IdentityCaptureInvalid,
     LeafMismatch,
     MerkleRootMismatch,
 }
@@ -77,6 +86,7 @@ impl NativeSessionColdArchiveError {
             Self::SignatureInvalid => "SIGNATURE_INVALID",
             Self::ArchiveInvalid => "ARCHIVE_INVALID",
             Self::SessionInvalid => "ARCHIVE_SESSION_INVALID",
+            Self::IdentityCaptureInvalid => "ARCHIVE_IDENTITY_CAPTURE_INVALID",
             Self::LeafMismatch => "ARCHIVE_LEAF_MISMATCH",
             Self::MerkleRootMismatch => "ARCHIVE_ROOT_MISMATCH",
         }
@@ -100,6 +110,9 @@ impl fmt::Display for NativeSessionColdArchiveError {
             Self::SignatureInvalid => "native session cold archive signature is invalid",
             Self::ArchiveInvalid => "native session cold archive metadata is inconsistent",
             Self::SessionInvalid => "native session cold archive contains an invalid session",
+            Self::IdentityCaptureInvalid => {
+                "native session cold archive lacks a valid original session identity"
+            }
             Self::LeafMismatch => "native session cold archive leaf commitment does not match",
             Self::MerkleRootMismatch => "native session cold archive Merkle root does not match",
         })
@@ -129,6 +142,8 @@ struct Entry {
     leaf_sha256: String,
     admission: Admission,
     outcome: Outcome,
+    #[serde(default, deserialize_with = "super::nonnull_option")]
+    identity_capture: Option<IdentityCapture>,
 }
 
 // Field order and optional-field omission are part of the producer's protocol.
@@ -285,11 +300,26 @@ fn outcome_bytes(outcome: &Outcome) -> Result<Vec<u8>, NativeSessionColdArchiveE
     )
 }
 
-fn leaf_hash(entry: &Entry) -> Result<String, NativeSessionColdArchiveError> {
+fn leaf_hash(entry: &Entry, schema: &str) -> Result<String, NativeSessionColdArchiveError> {
+    let (domain, capture) = match (schema, &entry.identity_capture) {
+        (NATIVE_SESSION_COLD_ARCHIVE_SCHEMA, None) => (LEAF_DOMAIN, None),
+        (NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA, Some(capture)) => (
+            LEAF_V2_DOMAIN,
+            Some(
+                capture
+                    .canonical_bytes()
+                    .map_err(|_| NativeSessionColdArchiveError::IdentityCaptureInvalid)?,
+            ),
+        ),
+        (NATIVE_SESSION_COLD_ARCHIVE_SCHEMA | NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA, _) => {
+            return Err(NativeSessionColdArchiveError::IdentityCaptureInvalid);
+        }
+        _ => return Err(NativeSessionColdArchiveError::SchemaUnsupported),
+    };
     let admission = admission_bytes(&entry.admission)?;
     let outcome = outcome_bytes(&entry.outcome)?;
     let mut hash = Sha256::new();
-    hash.update(LEAF_DOMAIN);
+    hash.update(domain);
     for part in [
         entry.session_nonce.as_bytes(),
         admission.as_slice(),
@@ -297,6 +327,10 @@ fn leaf_hash(entry: &Entry) -> Result<String, NativeSessionColdArchiveError> {
     ] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part);
+    }
+    if let Some(capture) = capture {
+        hash.update((capture.len() as u64).to_be_bytes());
+        hash.update(&capture);
     }
     Ok(hex::encode(hash.finalize()))
 }
@@ -354,7 +388,8 @@ fn signature_preimage(archive: &Archive) -> Result<Vec<u8>, NativeSessionColdArc
 ///
 /// Recomputes every ordered, length-framed session leaf and the Merkle tree,
 /// verifies the strict Ed25519 metadata signature, and refuses non-clean or
-/// cross-root entries. This verifies the archive-time statement only.
+/// cross-root entries. V2 additionally authenticates original root-signed
+/// identities. It does not reconstruct identities absent from v1 archives.
 pub fn verify_native_session_cold_archive(
     input: &[u8],
     trusted_root: &VerifyingKey,
@@ -391,9 +426,11 @@ fn verify_archive(
         decode_evidence_json(input).map_err(|_| NativeSessionColdArchiveError::JsonInvalid)?;
     let archive: Archive =
         serde_json::from_value(value).map_err(|_| NativeSessionColdArchiveError::JsonInvalid)?;
-    if archive.schema_version != NATIVE_SESSION_COLD_ARCHIVE_SCHEMA {
-        return Err(NativeSessionColdArchiveError::SchemaUnsupported);
-    }
+    let schema_version = match archive.schema_version.as_str() {
+        NATIVE_SESSION_COLD_ARCHIVE_SCHEMA => NATIVE_SESSION_COLD_ARCHIVE_SCHEMA,
+        NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA => NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA,
+        _ => return Err(NativeSessionColdArchiveError::SchemaUnsupported),
+    };
     if archive.entries.is_empty()
         || archive.session_count != archive.entries.len()
         || archive.entries.len() > MAX_NATIVE_SESSION_COLD_ARCHIVE_SESSIONS
@@ -425,6 +462,7 @@ fn verify_archive(
     let mut seen = BTreeSet::new();
     let mut leaves = Vec::with_capacity(archive.entries.len());
     let mut source_bound_sessions = 0;
+    let mut identity_captures_verified = 0;
     for entry in &archive.entries {
         if entry.session_nonce != entry.admission.session_nonce
             || entry.admission.product_root_key_id != product_root_key_id
@@ -435,7 +473,18 @@ fn verify_archive(
         validate_admission(&entry.admission)
             .and_then(|()| validate_outcome(&entry.admission, &entry.outcome))
             .map_err(|_| NativeSessionColdArchiveError::SessionInvalid)?;
-        let leaf = leaf_hash(entry)?;
+        if let Some(capture) = &entry.identity_capture {
+            capture
+                .verify_for_session(
+                    trusted_root,
+                    &entry.admission.session_nonce,
+                    &entry.admission.product_root_key_id,
+                    entry.admission.security_epoch,
+                )
+                .map_err(|_| NativeSessionColdArchiveError::IdentityCaptureInvalid)?;
+            identity_captures_verified += 1;
+        }
+        let leaf = leaf_hash(entry, schema_version)?;
         if entry.leaf_sha256 != leaf {
             return Err(NativeSessionColdArchiveError::LeafMismatch);
         }
@@ -450,7 +499,7 @@ fn verify_archive(
         return Err(NativeSessionColdArchiveError::ExpectedRootMismatch);
     }
     Ok(VerifiedNativeSessionColdArchive {
-        schema_version: NATIVE_SESSION_COLD_ARCHIVE_SCHEMA,
+        schema_version,
         scope: "authenticated_archived_supervisor_observations",
         archive_sha256: hex::encode(Sha256::digest(input)),
         signer_public_key_hex: key_hex,
@@ -460,6 +509,7 @@ fn verify_archive(
             .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
         session_count: archive.session_count,
         source_bound_sessions,
+        identity_captures_verified,
         merkle_root_sha256: root,
         original_receipt_signatures_verified: false,
         replay_certified: false,
@@ -554,7 +604,7 @@ mod tests {
                         expected["canonical_outcome_json"].as_str().unwrap()
                     );
                     assert_eq!(
-                        leaf_hash(entry).unwrap(),
+                        leaf_hash(entry, &archive.schema_version).unwrap(),
                         case["expected"]["leaf_sha256"][index].as_str().unwrap()
                     );
                 }
@@ -663,7 +713,7 @@ mod tests {
             NativeSessionColdArchiveError::JsonInvalid
         );
         changed = original.clone();
-        changed["schema_version"] = json!("franken-node/native-session-cold-archive/v2");
+        changed["schema_version"] = json!("franken-node/native-session-cold-archive/v3");
         assert_eq!(
             verify_value(&key, &changed).unwrap_err(),
             NativeSessionColdArchiveError::SchemaUnsupported
@@ -700,6 +750,226 @@ mod tests {
             verify_native_session_cold_archive_with_expected_root(b"unread", &key, "bad")
                 .unwrap_err(),
             NativeSessionColdArchiveError::ExpectedRootInvalid
+        );
+    }
+
+    // These captures and the complete v2 leaf/outer signature were encoded and
+    // signed independently with Python hashlib/cryptography and the existing
+    // RFC 8032 test root. They are protocol vectors, not runtime execution proof.
+    const ORIGINAL_CAPTURE: &str = r#"{"schema_version":"franken-node/runtime-evidence-identity-capture/v1","session_nonce":"018f03f2-7938-70d5-8b64-19b7f2a5b6c0","product_root_key_id":"ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a","product_root_verification_key_hex":"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a","evidence_verification_identity":{"producer_id":"franken-node.native-session:ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a:018f03f2-7938-70d5-8b64-19b7f2a5b6c0","key_provenance":{"authority_class":"runtime","key_id":"ed25519:eadd35af8469f62f025ca58e56cb7beccfea6fc29595f49aabec2aff875aad4e","activation_epoch":7,"rotation_sequence":1},"verification_key":{"inner":[43,194,128,11,51,22,224,9,32,159,253,117,125,171,25,204,240,174,132,188,122,233,6,84,225,232,23,18,210,112,246,83]}},"signature_hex":"774a42159e14dfadc562541b1f3d7e9005021f30c7451b49a1a73b7bb9c94384efdaa812c06a6162cae1daef27e955fdcb3c0e0ce53bd736abf8dcce67f3f30c"}"#;
+    const SUBSTITUTED_CAPTURE: &str = r#"{"schema_version":"franken-node/runtime-evidence-identity-capture/v1","session_nonce":"018f03f2-7938-70d5-8b64-19b7f2a5b6c0","product_root_key_id":"ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a","product_root_verification_key_hex":"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a","evidence_verification_identity":{"producer_id":"franken-node.native-session:ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a:018f03f2-7938-70d5-8b64-19b7f2a5b6c0","key_provenance":{"authority_class":"runtime","key_id":"ed25519:1626da68caf5d16a0927f39d3b6fdd7542e84dc1155421395d1094f0ffba8c42","activation_epoch":7,"rotation_sequence":1},"verification_key":{"inner":[214,47,1,106,30,253,30,79,223,121,62,180,44,216,68,113,225,186,159,12,240,77,18,135,181,204,113,246,22,40,124,184]}},"signature_hex":"0838238e7b4f0bfbd955f91ff1cbf8459fc6eff04b0863bfdb10aa21604ed1a71ab954fc71ea649a11b8ea7a7cb5ea0d9f06b05ffd49800fc5604f5ac411010b"}"#;
+    const FOREIGN_CAPTURE: &str = r#"{"schema_version":"franken-node/runtime-evidence-identity-capture/v1","session_nonce":"018f03f2-7938-70d5-8b64-19b7f2a5b6c0","product_root_key_id":"ed25519:204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c21","product_root_verification_key_hex":"204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c21","evidence_verification_identity":{"producer_id":"franken-node.native-session:ed25519:204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c21:018f03f2-7938-70d5-8b64-19b7f2a5b6c0","key_provenance":{"authority_class":"runtime","key_id":"ed25519:eadd35af8469f62f025ca58e56cb7beccfea6fc29595f49aabec2aff875aad4e","activation_epoch":7,"rotation_sequence":1},"verification_key":{"inner":[43,194,128,11,51,22,224,9,32,159,253,117,125,171,25,204,240,174,132,188,122,233,6,84,225,232,23,18,210,112,246,83]}},"signature_hex":"ae28c174e96c9f4fd90a71839ae974ddad28bb3d299da444f5f0cb16365bb74d50e84340c60859118943d15d7f057ec2819a337351ae42a2bf4dcb0fc3eea907"}"#;
+    const V2_ROOT: &str = "622fd212718e47b52640195c761ee07b286e6ccd03329ba3a3578bfdafdab518";
+
+    fn candidate_v2() -> (VerifyingKey, Value) {
+        let (key, mut archive) = candidate("single");
+        archive["schema_version"] = json!(NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA);
+        archive["entries"][0]["identity_capture"] = serde_json::from_str(ORIGINAL_CAPTURE).unwrap();
+        archive["entries"][0]["leaf_sha256"] = json!(V2_ROOT);
+        archive["merkle_root_sha256"] = json!(V2_ROOT);
+        archive["signature_hex"] = json!(
+            "3f9f418e85297c5b14de0256179ba135ffa27b88e0c46c30c8da49e174a5ac56fb05f117d12e51cbf23d67b6b16b6fe6c995a60cdfa906c9a1c1aac5f170e309"
+        );
+        (key, archive)
+    }
+
+    fn sign_archive_metadata(value: &mut Value) {
+        use ed25519_dalek::{Signer as _, SigningKey};
+
+        let mut seed = [0_u8; 32];
+        hex::decode_to_slice(
+            include_str!("../tests/fixtures/cli_incident_bundle/rfc8032_test1_seed.hex").trim(),
+            &mut seed,
+        )
+        .unwrap();
+        let archive: Archive = serde_json::from_value(value.clone()).unwrap();
+        value["signature_hex"] = json!(hex::encode(
+            SigningKey::from_bytes(&seed)
+                .sign(&signature_preimage(&archive).unwrap())
+                .to_bytes()
+        ));
+    }
+
+    fn reseal_archive(value: &mut Value) {
+        let archive: Archive = serde_json::from_value(value.clone()).unwrap();
+        let leaves: Vec<_> = archive
+            .entries
+            .iter()
+            .map(|entry| leaf_hash(entry, &archive.schema_version).unwrap())
+            .collect();
+        for (entry, leaf) in value["entries"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(&leaves)
+        {
+            entry["leaf_sha256"] = json!(leaf);
+        }
+        value["merkle_root_sha256"] = json!(merkle_root(leaves));
+        sign_archive_metadata(value);
+    }
+
+    #[test]
+    fn cold_archive_v2_matches_independently_signed_identity_vector() {
+        let (key, value) = candidate_v2();
+        let input = serde_json::to_vec(&value).unwrap();
+        let archive: Archive = serde_json::from_slice(&input).unwrap();
+        assert_eq!(
+            archive.entries[0]
+                .identity_capture
+                .as_ref()
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+            ORIGINAL_CAPTURE.as_bytes()
+        );
+        assert_eq!(
+            leaf_hash(&archive.entries[0], &archive.schema_version).unwrap(),
+            V2_ROOT
+        );
+        let verified =
+            verify_native_session_cold_archive_with_expected_root(&input, &key, V2_ROOT).unwrap();
+        assert_eq!(
+            verified.schema_version,
+            NATIVE_SESSION_COLD_ARCHIVE_V2_SCHEMA
+        );
+        assert_eq!(verified.identity_captures_verified, 1);
+        assert_eq!(verified.session_count, 1);
+        assert!(!verified.original_receipt_signatures_verified);
+        assert!(!verified.replay_certified);
+        assert!(!verified.quiescence_certified);
+        assert!(!verified.historical_completeness);
+        let summary = serde_json::to_string(&verified).unwrap();
+        for private in ["/project", "operator:test", "native-session:", "018f03f2"] {
+            assert!(!summary.contains(private));
+        }
+        assert_eq!(
+            verify_native_session_cold_archive_with_expected_root(&input, &key, &"0".repeat(64))
+                .unwrap_err(),
+            NativeSessionColdArchiveError::ExpectedRootMismatch
+        );
+
+        let (_, legacy) = candidate("single");
+        let historical = verify_value(&key, &legacy).unwrap();
+        assert_eq!(
+            historical.schema_version,
+            NATIVE_SESSION_COLD_ARCHIVE_SCHEMA
+        );
+        assert_eq!(historical.identity_captures_verified, 0);
+    }
+
+    #[test]
+    fn cold_archive_v2_refuses_missing_invalid_and_foreign_identities() {
+        let (key, original) = candidate_v2();
+        let mut changed = original.clone();
+        changed["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("identity_capture");
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+        changed = original.clone();
+        changed["entries"][0]["identity_capture"] = Value::Null;
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::JsonInvalid
+        );
+        changed = original.clone();
+        changed["entries"][0]["identity_capture"]["signature_hex"] = json!("00".repeat(64));
+        // Even a new valid outer signature cannot replace the original
+        // identity's own product-root signature.
+        reseal_archive(&mut changed);
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+        changed = original;
+        changed["entries"][0]["identity_capture"] = serde_json::from_str(FOREIGN_CAPTURE).unwrap();
+        let foreign: IdentityCapture = serde_json::from_str(FOREIGN_CAPTURE).unwrap();
+        let foreign_key = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]).verifying_key();
+        foreign
+            .verify_for_session(
+                &foreign_key,
+                changed["entries"][0]["session_nonce"].as_str().unwrap(),
+                &format!("ed25519:{}", hex::encode(foreign_key.as_bytes())),
+                7,
+            )
+            .unwrap();
+        reseal_archive(&mut changed);
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+    }
+
+    #[test]
+    fn cold_archive_v2_binds_original_identity_bytes_and_admission() {
+        let (key, original) = candidate_v2();
+        let mut changed = original.clone();
+        changed["entries"][0]["identity_capture"] =
+            serde_json::from_str(SUBSTITUTED_CAPTURE).unwrap();
+        // This is another valid root-signed key for the same nonce and epoch.
+        // The archived leaf must still refuse substitution of the key bytes.
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::LeafMismatch
+        );
+
+        changed = original.clone();
+        changed["entries"][0]["admission"]["security_epoch"] = json!(8);
+        reseal_archive(&mut changed);
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+
+        changed = original.clone();
+        let other_nonce = "018f03f2-7938-70d5-8b64-19b7f2a5b6c1";
+        changed["entries"][0]["session_nonce"] = json!(other_nonce);
+        changed["entries"][0]["admission"]["session_nonce"] = json!(other_nonce);
+        reseal_archive(&mut changed);
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+
+        changed = original;
+        changed["entries"][0]["identity_capture"]["evidence_verification_identity"]["key_provenance"]
+            ["unknown"] = json!(true);
+        assert_eq!(
+            verify_value(&key, &changed).unwrap_err(),
+            NativeSessionColdArchiveError::JsonInvalid
+        );
+    }
+
+    #[test]
+    fn cold_archive_identity_cannot_be_smuggled_through_legacy_or_ambiguous_json() {
+        let (key, mut legacy) = candidate("single");
+        legacy["entries"][0]["identity_capture"] = serde_json::from_str(ORIGINAL_CAPTURE).unwrap();
+        assert_eq!(
+            verify_value(&key, &legacy).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+        let (_, mut downgraded) = candidate_v2();
+        downgraded["schema_version"] = json!(NATIVE_SESSION_COLD_ARCHIVE_SCHEMA);
+        sign_archive_metadata(&mut downgraded);
+        assert_eq!(
+            verify_value(&key, &downgraded).unwrap_err(),
+            NativeSessionColdArchiveError::IdentityCaptureInvalid
+        );
+        let (_, original) = candidate_v2();
+        let raw = serde_json::to_string(&original).unwrap();
+        let duplicate = raw.replacen(
+            "\"activation_epoch\":7",
+            "\"activation_epoch\":7,\"activation_epoch\":7",
+            1,
+        );
+        assert_ne!(duplicate, raw);
+        assert_eq!(
+            verify_native_session_cold_archive(duplicate.as_bytes(), &key).unwrap_err(),
+            NativeSessionColdArchiveError::JsonInvalid
         );
     }
 }
