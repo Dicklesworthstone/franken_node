@@ -425,17 +425,19 @@ class PowerShellInstallation(unittest.TestCase):
                 archive.writestr(info, payload)
         return path
 
-    def run_installer(self, archive, *options, checksum=None, prelude=""):
+    def run_installer(self, archive, *options, checksum=None, prelude="", version=None):
         environment = dict(os.environ)
         for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "TMPDIR", "TMP", "TEMP"):
             directory = self.root / name
             directory.mkdir(exist_ok=True)
             environment[name] = str(directory)
         arguments = [
-            "-Dest", str(self.dest), "-Version", "v-test", "-ArtifactUrl",
+            "-Dest", str(self.dest), "-ArtifactUrl",
             f"http://127.0.0.1:{self.server.server_port}/{archive.name}",
             "-Checksum", checksum or hashlib.sha256(archive.read_bytes()).hexdigest(), *options,
         ]
+        if version is not None:
+            arguments.extend(["-Version", version])
         script = ROOT / "install.ps1"
         if prelude:
             # A verifier protocol fixture lives in the calling PowerShell scope;
@@ -443,10 +445,12 @@ class PowerShellInstallation(unittest.TestCase):
             # This does not exercise or certify Sigstore cryptography.
             environment["INSTALL_TEST_SCRIPT"] = str(script)
             named_arguments = {
-                "Dest": str(self.dest), "Version": "v-test",
+                "Dest": str(self.dest),
                 "ArtifactUrl": f"http://127.0.0.1:{self.server.server_port}/{archive.name}",
                 "Checksum": checksum or hashlib.sha256(archive.read_bytes()).hexdigest(),
             }
+            if version is not None:
+                named_arguments["Version"] = version
             for option in options:
                 self.assertIn(option, ("-Verify", "-NoVerify"))
                 named_arguments[option.removeprefix("-")] = True
@@ -499,6 +503,32 @@ exit $LASTEXITCODE
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), self.old)
         self.assertIn("Self-test passed", result.stdout)
+
+    def test_pinned_release_requires_exact_candidate_version_before_replacement(self):
+        if os.name == "nt":
+            # Compile a real native-launchable console fixture for PowerShell 5.1
+            # as well as PowerShell Core, using the Windows .NET Framework.
+            compiler = Path(os.environ["SystemRoot"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+            source = self.root / "VersionProbe.cs"
+            source.write_text('class VersionProbe { static int Main(string[] args) {'
+                              'if (args.Length != 1 || args[0] != "--version") return 1;'
+                              'System.Console.WriteLine("franken-node 0.2.0-rc.1+ci"); return 0; } }')
+            executable = self.root / "VersionProbe.exe"
+            subprocess.run([str(compiler), "/nologo", "/target:exe", f"/out:{executable}", str(source)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            payload = executable.read_bytes()
+        else:
+            payload = b'#!/bin/sh\n[ "$1" = --version ] || exit 1\nprintf "franken-node 0.2.0-rc.1+ci\\r\\n"\n'
+        archive = self.archive(payload)
+        for version in ("v0.2.0", "v0.2.0-rc.1+CI"):
+            with self.subTest(version=version):
+                result = self.run_installer(archive, "-NoVerify", version=version)
+                self.assert_preserved(result)
+                self.assertIn("does not report the exact release", result.stdout + result.stderr)
+                self.assertEqual(list(self.dest.glob(".franken-node.previous.*.exe")), [])
+        result = self.run_installer(archive, "-Verify", version="v0.2.0-rc.1+ci")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), payload)
 
     def test_successful_first_install_needs_no_existing_destination(self):
         self.target.rename(self.root / "old-fixture")
@@ -714,12 +744,13 @@ finally { $held.Dispose() }
     def test_version_probe_timeout_is_bounded_and_does_not_replace_old_install(self):
         if os.name == "nt":
             self.skipTest("POSIX sleeper fixture; native Windows process timeout awaits its own executable fixture")
-        result = self.run_functions(r'''
-[System.IO.File]::WriteAllText($Source, "#!/bin/sh`nexec sleep 30`n")
-Assert-InstallBinary -Path $Source -TimeoutMillis 100
-''')
-        self.assert_preserved(result)
-        self.assertIn("timed out", result.stderr)
+        for pin in ("", "-ExpectedVersion v0.2.0"):
+            with self.subTest(pin=pin):
+                result = self.run_functions(r'''
+[System.IO.File]::WriteAllText($Source, "#!/bin/sh`nprintf franken-node`nexec sleep 30`n")
+Assert-InstallBinary -Path $Source -TimeoutMillis 100 ''' + pin)
+                self.assert_preserved(result)
+                self.assertIn("timed out", result.stderr)
 
 
 if __name__ == "__main__":
