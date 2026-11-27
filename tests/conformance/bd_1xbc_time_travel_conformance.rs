@@ -22,7 +22,7 @@ use frankenengine_node::replay::time_travel_engine::{
     SCHEMA_VERSION, SideEffect, TimeTravelError, contract_invariants, error_codes, event_codes,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ impl ConformanceTest for LifecycleReplayTest {
         }
 
         // Divergent replay should detect divergence
-        if original_output == replay_output_divergent {
+        if original_output.as_slice() == replay_output_divergent.as_slice() {
             return TestResult::Fail {
                 reason: "Different outputs should be detected as divergent".to_string(),
             };

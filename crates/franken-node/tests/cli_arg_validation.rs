@@ -698,6 +698,84 @@ fn source_graph_cli_capsule_replay_preserves_incomplete_capture() {
 
 #[test]
 #[cfg(unix)]
+fn source_graph_cli_capsule_replay_keeps_negative_probes_and_original_package_routes() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        EdgeState, GraphOptions, capsule, capture,
+    };
+
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("project");
+    let package = project.join("node_modules/selected");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        project.join("app.mjs"),
+        "import 'selected'; import './late.mjs';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"exports":{"development":"./dev.mjs","default":"./prod.mjs"}}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("dev.mjs"), "export const captured = true;\n").unwrap();
+    std::fs::write(package.join("prod.mjs"), "export const alternate = true;\n").unwrap();
+    let options = GraphOptions {
+        additional_conditions: vec!["development".into()],
+        ..GraphOptions::default()
+    };
+    let captured = capture(&project, "app.mjs", options.clone()).unwrap();
+    assert!(!captured.report().fully_resolved);
+    assert!(captured.report().edges.iter().any(|edge| {
+        edge.specifier.as_deref() == Some("./late.mjs") && edge.state == EdgeState::Unresolved
+    }));
+    assert!(
+        captured
+            .report()
+            .modules
+            .iter()
+            .any(|module| module.id.path == "node_modules/selected/dev.mjs")
+    );
+    let encoded = capsule::encode(&captured).unwrap();
+    let path = workspace.path().join("retained.capsule");
+    std::fs::write(&path, encoded.bytes()).unwrap();
+
+    // A newly present file and a changed condition-selected export make a live
+    // recapture succeed. Neither may repair or replace the historical evidence.
+    std::fs::write(
+        project.join("late.mjs"),
+        "export const appearedLater = true;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"exports":{"development":"./replacement.mjs","default":"./prod.mjs"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("replacement.mjs"),
+        "throw new Error('LIVE_REPLACEMENT_MUST_NOT_EXECUTE');\n",
+    )
+    .unwrap();
+    let live = capture(&project, "app.mjs", options).unwrap();
+    assert!(live.report().fully_resolved);
+    assert_ne!(live.report().input_hash, captured.report().input_hash);
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(&project)
+        .args(["verify", "source-graph", "--replay-source-capsule"])
+        .arg(&path)
+        .args(["--expected-capsule-hash", encoded.digest(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report, serde_json::to_value(captured.report()).unwrap());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("LIVE_REPLACEMENT_MUST_NOT_EXECUTE"));
+}
+
+#[test]
+#[cfg(unix)]
 fn source_graph_cli_capsule_replay_refuses_unsafe_files_without_blocking() {
     let workspace = tempfile::tempdir().unwrap();
     let fifo = workspace.path().join("writerless.fifo");

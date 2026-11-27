@@ -401,10 +401,7 @@ impl std::error::Error for TimeTravelError {}
 /// Reject an oversized trace population before a caller materializes step
 /// payloads or CAS objects. Capture, imported traces and operator navigation use
 /// the same limit; none may certify a retained suffix as the complete history.
-pub fn validate_trace_step_count(
-    trace_id: &str,
-    step_count: usize,
-) -> Result<(), TimeTravelError> {
+pub fn validate_trace_step_count(trace_id: &str, step_count: usize) -> Result<(), TimeTravelError> {
     if step_count > MAX_TRACE_STEPS {
         return Err(TimeTravelError::CaptureLimitExceeded {
             trace_id: trace_id.to_string(),

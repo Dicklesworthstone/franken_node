@@ -39328,7 +39328,9 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
                 println!("Source capsule: {} ({})", path.display(), capsule.digest());
             }
             if args.replay_source_capsule.is_some() {
-                println!("Reconstructed from retained observations; the live project was not read.");
+                println!(
+                    "Reconstructed from retained observations; the live project was not read."
+                );
             }
         }
         // Successful explicit export certifies the closed request surface,
