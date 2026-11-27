@@ -1294,6 +1294,116 @@ fn source_capsule_path(
         .join(format!("{digest}.fnsgcap")))
 }
 
+fn check_private_directory_capacity(
+    directory: &Path,
+    additional_files: usize,
+    additional_bytes: usize,
+    max_files: usize,
+    max_bytes: usize,
+    item_kind: &str,
+    plural_kind: &str,
+) -> Result<()> {
+    let mut files = additional_files;
+    let mut bytes = additional_bytes;
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, open, statat};
+
+        let expected_uid = rustix::process::geteuid().as_raw();
+        let dir_fd = open(
+            directory,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| format!("open retained native-session {plural_kind} directory"))?;
+        let dir_stat = fstat(&dir_fd)
+            .with_context(|| format!("inspect retained native-session {plural_kind} directory"))?;
+        if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
+            || dir_stat.st_uid != expected_uid
+            || (dir_stat.st_mode & 0o077) != 0
+        {
+            bail!("retained native-session {plural_kind} directory must be private and owned");
+        }
+        let dir_iter = Dir::read_from(&dir_fd)
+            .with_context(|| format!("enumerate retained native-session {plural_kind}"))?;
+        for entry in dir_iter {
+            let entry = entry
+                .with_context(|| format!("enumerate retained native-session {plural_kind}"))?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let stat = match statat(&dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(rustix::io::Errno::NOENT) => {
+                    bail!(
+                        "retained native-session {item_kind} disappeared during capacity accounting"
+                    );
+                }
+                Err(error) => {
+                    return Err(std::io::Error::from(error))
+                        .with_context(|| format!("inspect retained native-session {item_kind}"));
+                }
+            };
+            let file_type = FileType::from_raw_mode(stat.st_mode);
+            if file_type == FileType::Symlink {
+                bail!(
+                    "native-session inventory path {} is a symlink",
+                    name.to_string_lossy()
+                );
+            }
+            if file_type != FileType::RegularFile {
+                bail!(
+                    "runtime evidence key material {} must be a regular file",
+                    name.to_string_lossy()
+                );
+            }
+            if (stat.st_mode & 0o077) != 0 {
+                bail!(
+                    "runtime evidence key material {} must not grant group or other access",
+                    name.to_string_lossy()
+                );
+            }
+            if stat.st_nlink != 1 || stat.st_uid != expected_uid {
+                bail!("native-session inventory file must be owned and have a single link");
+            }
+            let len = u64::try_from(stat.st_size)
+                .context("retained native-session file reported negative size")?;
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(usize::try_from(len)?);
+            if files > max_files || bytes > max_bytes {
+                bail!(
+                    "native-session {item_kind} capacity exceeded: {files}/{max_files} retained \
+                     files, {bytes}/{max_bytes} bytes; refusing to discard retained {plural_kind}"
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        for entry in std::fs::read_dir(directory)
+            .with_context(|| format!("enumerate retained native-session {plural_kind}"))?
+        {
+            let path = entry?.path();
+            let Some(metadata) = validate_private_path_metadata_if_present(&path)? else {
+                bail!("retained native-session {item_kind} disappeared during capacity accounting");
+            };
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
+            if files > max_files || bytes > max_bytes {
+                bail!(
+                    "native-session {item_kind} capacity exceeded: {files}/{max_files} retained \
+                     files, {bytes}/{max_bytes} bytes; refusing to discard retained {plural_kind}"
+                );
+            }
+        }
+    }
+    if files > max_files || bytes > max_bytes {
+        bail!("native-session {item_kind} capacity exceeded before retention");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn check_source_capsule_capacity(
     directory: &Path,
@@ -1302,28 +1412,15 @@ fn check_source_capsule_capacity(
     max_files: usize,
     max_bytes: usize,
 ) -> Result<()> {
-    let mut files = additional_files;
-    let mut bytes = additional_bytes;
-    for entry in
-        std::fs::read_dir(directory).context("enumerate retained native-session sources")?
-    {
-        let path = entry?.path();
-        let Some(metadata) = validate_private_path_metadata_if_present(&path)? else {
-            bail!("retained native-session source disappeared during capacity accounting");
-        };
-        files = files.saturating_add(1);
-        bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
-        if files > max_files || bytes > max_bytes {
-            bail!(
-                "native-session source capsule capacity exceeded: {files}/{max_files} retained files, \
-                 {bytes}/{max_bytes} bytes; refusing to discard retained sources"
-            );
-        }
-    }
-    if files > max_files || bytes > max_bytes {
-        bail!("native-session source capsule capacity exceeded before retention");
-    }
-    Ok(())
+    check_private_directory_capacity(
+        directory,
+        additional_files,
+        additional_bytes,
+        max_files,
+        max_bytes,
+        "source capsule",
+        "sources",
+    )
 }
 
 /// Proof returned by [`retain_native_session_source_capsule_with_proof`]
@@ -1866,28 +1963,15 @@ fn check_admission_record_capacity(
     max_files: usize,
     max_bytes: usize,
 ) -> Result<()> {
-    let mut files = additional_files;
-    let mut bytes = additional_bytes;
-    for entry in
-        std::fs::read_dir(directory).context("enumerate retained native-session admissions")?
-    {
-        let path = entry?.path();
-        let Some(metadata) = validate_private_path_metadata_if_present(&path)? else {
-            bail!("retained native-session admission disappeared during capacity accounting");
-        };
-        files = files.saturating_add(1);
-        bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
-        if files > max_files || bytes > max_bytes {
-            bail!(
-                "native-session admission record capacity exceeded: {files}/{max_files} retained \
-                 files, {bytes}/{max_bytes} bytes; refusing to discard retained admissions"
-            );
-        }
-    }
-    if files > max_files || bytes > max_bytes {
-        bail!("native-session admission record capacity exceeded before retention");
-    }
-    Ok(())
+    check_private_directory_capacity(
+        directory,
+        additional_files,
+        additional_bytes,
+        max_files,
+        max_bytes,
+        "admission record",
+        "admissions",
+    )
 }
 
 /// Publish while holding the inventory writer lock, after the original signed
@@ -2414,10 +2498,255 @@ fn authenticate_inventory_records(
     Ok(authority)
 }
 
+#[cfg(unix)]
+type PrivateFileIdentity = (u64, u64, u64, i64, i64, i64, i64);
+
+#[cfg(unix)]
+fn capture_private_file_identity(path: &Path, expected_uid: u32) -> Option<PrivateFileIdentity> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || (metadata.permissions().mode() & 0o077) != 0
+        || metadata.nlink() != 1
+        || metadata.uid() != expected_uid
+    {
+        return None;
+    }
+    Some((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    ))
+}
+
+#[cfg(unix)]
+fn capture_private_dir_identity(path: &Path, expected_uid: u32) -> Option<(u64, u64, u32)> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || (metadata.permissions().mode() & 0o077) != 0
+        || metadata.uid() != expected_uid
+    {
+        return None;
+    }
+    Some((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.permissions().mode() & 0o777,
+    ))
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalFileFingerprint {
+    identity: PrivateFileIdentity,
+    sha256: [u8; 32],
+}
+
+/// Content-and-metadata fingerprint of `native-sessions.db` and its WAL.
+/// Used strictly as an in-memory acceleration proof between `admit` and
+/// `finish` inside one supervisor process; any mismatch or missing proof falls
+/// back to the full SQL aggregate query.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatabaseStateFingerprint {
+    db_identity: PrivateFileIdentity,
+    db_header: Vec<u8>,
+    wal: Option<WalFileFingerprint>,
+}
+
+#[cfg(unix)]
+fn read_private_file_header(
+    path: &Path,
+    expected_uid: u32,
+    head_len: usize,
+) -> Option<(PrivateFileIdentity, Vec<u8>)> {
+    use rustix::fs::{Mode, OFlags, open};
+    use std::os::unix::fs::{FileExt as _, MetadataExt as _, PermissionsExt as _};
+
+    let file = std::fs::File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?,
+    );
+    let meta = file.metadata().ok()?;
+    if !meta.is_file()
+        || (meta.permissions().mode() & 0o077) != 0
+        || meta.nlink() != 1
+        || meta.uid() != expected_uid
+    {
+        return None;
+    }
+    let file_len = meta.len();
+    let head_count = usize::try_from(file_len.min(head_len as u64)).ok()?;
+    let mut head = vec![0_u8; head_count];
+    if head_count > 0 {
+        file.read_exact_at(&mut head, 0).ok()?;
+    }
+    let after = file.metadata().ok()?;
+    let identity = (
+        meta.dev(),
+        meta.ino(),
+        file_len,
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    );
+    let after_identity = (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    );
+    if identity != after_identity {
+        return None;
+    }
+    Some((identity, head))
+}
+
+#[cfg(unix)]
+fn hash_bounded_private_file(
+    path: &Path,
+    expected_uid: u32,
+    max_len: u64,
+) -> Option<WalFileFingerprint> {
+    use rustix::fs::{Mode, OFlags, open};
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?,
+    );
+    let meta = file.metadata().ok()?;
+    if !meta.is_file()
+        || (meta.permissions().mode() & 0o077) != 0
+        || meta.nlink() != 1
+        || meta.uid() != expected_uid
+        || meta.len() > max_len
+    {
+        return None;
+    }
+    let file_len = meta.len();
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buf = [0_u8; 16 * 1024];
+    loop {
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64)?;
+        if total > max_len {
+            return None;
+        }
+        hasher.update(&buf[..read]);
+    }
+    if total != file_len {
+        return None;
+    }
+    let after = file.metadata().ok()?;
+    let identity = (
+        meta.dev(),
+        meta.ino(),
+        file_len,
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    );
+    let after_identity = (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    );
+    if identity != after_identity {
+        return None;
+    }
+    Some(WalFileFingerprint {
+        identity,
+        sha256: hasher.finalize().into(),
+    })
+}
+
+#[cfg(unix)]
+fn database_state_fingerprint(protected_root: &Path) -> Option<DatabaseStateFingerprint> {
+    const MAX_FINGERPRINTED_WAL_BYTES: u64 = 512 * 1024;
+
+    let expected_uid = rustix::process::geteuid().as_raw();
+    let journal_path = protected_root.join(format!("{INVENTORY_FILE}-journal"));
+    match std::fs::symlink_metadata(&journal_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
+    let db_path = protected_root.join(INVENTORY_FILE);
+    let (db_identity, db_header) = read_private_file_header(&db_path, expected_uid, 100)?;
+    let wal_path = protected_root.join(format!("{INVENTORY_FILE}-wal"));
+    let wal = match std::fs::symlink_metadata(&wal_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(_) => Some(hash_bounded_private_file(
+            &wal_path,
+            expected_uid,
+            MAX_FINGERPRINTED_WAL_BYTES,
+        )?),
+        Err(_) => return None,
+    };
+    Some(DatabaseStateFingerprint {
+        db_identity,
+        db_header,
+        wal,
+    })
+}
+
+struct CachedOutcomeSigningContext {
+    product_root: ed25519_dalek::SigningKey,
+    verifying_key: ed25519_dalek::VerifyingKey,
+    #[cfg(unix)]
+    keys_dir_identity: Option<(u64, u64, u32)>,
+    #[cfg(unix)]
+    capture_dir_identity: Option<(u64, u64, u32)>,
+    #[cfg(unix)]
+    root_key_identity: Option<PrivateFileIdentity>,
+    #[cfg(unix)]
+    capture_identity: Option<PrivateFileIdentity>,
+}
+
 fn retain_outcome_receipt(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
     outcome: &NativeSessionOutcome,
+) -> Result<()> {
+    retain_outcome_receipt_with_cached_root(protected_root, admission, outcome, None)
+}
+
+fn retain_outcome_receipt_with_cached_root(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    outcome: &NativeSessionOutcome,
+    cached_root: Option<&CachedOutcomeSigningContext>,
 ) -> Result<()> {
     use std::io::Write as _;
 
@@ -2425,15 +2754,50 @@ fn retain_outcome_receipt(
     if admission.identity_capture_path.parent() != Some(capture_directory.as_path()) {
         bail!("native-session capture is outside its protected capture directory");
     }
-    ensure_runtime_evidence_directory(&capture_directory, true)?;
-    ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
-    let root = load_runtime_evidence_product_root(
-        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
-    )?;
-    let key = root.verifying_key();
-    verify_admission_capture_with_root(protected_root, admission, &key)?;
+    let keys_directory = protected_root.join("keys");
+    let root_key_path = protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH);
+    #[cfg(unix)]
+    let fast_root = cached_root.and_then(|cached| {
+        let expected_keys_dir = cached.keys_dir_identity?;
+        let expected_capture_dir = cached.capture_dir_identity?;
+        let expected_key = cached.root_key_identity?;
+        let expected_capture = cached.capture_identity?;
+        let expected_uid = rustix::process::geteuid().as_raw();
+        let current_keys_dir = capture_private_dir_identity(&keys_directory, expected_uid)?;
+        let current_capture_dir = capture_private_dir_identity(&capture_directory, expected_uid)?;
+        let current_key = capture_private_file_identity(&root_key_path, expected_uid)?;
+        let current_capture =
+            capture_private_file_identity(&admission.identity_capture_path, expected_uid)?;
+        if current_keys_dir == expected_keys_dir
+            && current_capture_dir == expected_capture_dir
+            && current_key == expected_key
+            && current_capture == expected_capture
+        {
+            Some((&cached.product_root, &cached.verifying_key))
+        } else {
+            None
+        }
+    });
+    #[cfg(not(unix))]
+    let fast_root: Option<(&ed25519_dalek::SigningKey, &ed25519_dalek::VerifyingKey)> = {
+        let _ = cached_root;
+        None
+    };
+
+    let loaded_root;
+    let loaded_key;
+    let (root, key) = if let Some((root_ref, key_ref)) = fast_root {
+        (root_ref, key_ref)
+    } else {
+        ensure_runtime_evidence_directory(&capture_directory, true)?;
+        ensure_runtime_evidence_directory(&keys_directory, true)?;
+        loaded_root = load_runtime_evidence_product_root(&root_key_path)?;
+        loaded_key = loaded_root.verifying_key();
+        verify_admission_capture_with_root(protected_root, admission, &loaded_key)?;
+        (&loaded_root, &loaded_key)
+    };
     let receipt =
-        NativeSessionOutcomeReceipt::issue_with_verifying_key(admission, outcome, &root, &key)?;
+        NativeSessionOutcomeReceipt::issue_with_verifying_key(admission, outcome, root, key)?;
     let bytes = bounded_json(&receipt, MAX_OUTCOME_RECEIPT_BYTES)?;
     let directory = protected_root.join(OUTCOME_RECEIPT_DIRECTORY);
     let created_directory = ensure_runtime_evidence_directory_with_status(&directory, true)?;
@@ -2446,7 +2810,7 @@ fn retain_outcome_receipt(
     match staged.persist_noclobber(&path) {
         Ok(_) => published_new = true,
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = read_outcome_receipt(protected_root, admission, &key)?
+            let existing = read_outcome_receipt(protected_root, admission, key)?
                 .context("retained native-session outcome disappeared during publication")?;
             if existing.outcome != *outcome {
                 bail!("native-session outcome receipt is immutable once observed");
@@ -2467,6 +2831,63 @@ fn retain_outcome_receipt(
     #[cfg(not(unix))]
     let _ = (created_directory, published_new);
     Ok(())
+}
+
+/// Fast O(1) outcome persistence used when `DatabaseStateFingerprint` proves
+/// zero external writes occurred to `native-sessions.db` or its WAL since this
+/// supervisor process committed the session admission.
+#[cfg(unix)]
+fn write_observed_outcome_with_verified_usage(
+    tx: &mut Transaction<'_>,
+    expected_admission: &NativeSessionAdmission,
+    outcome: &NativeSessionOutcome,
+    count: usize,
+    bytes: usize,
+) -> Result<()> {
+    let rows = tx.query_with_params(
+        "SELECT admission_json, outcome_json FROM native_sessions WHERE session_nonce = ?1;",
+        &[SqliteValue::Text(
+            expected_admission.session_nonce.clone().into(),
+        )],
+    )?;
+    let [row] = rows.as_slice() else {
+        bail!("native-session admission disappeared before outcome persistence");
+    };
+    let [admission_val, existing] = row.values() else {
+        bail!("native-session outcome row shape is invalid");
+    };
+    let admission: NativeSessionAdmission = parse_json(admission_val, MAX_ADMISSION_BYTES)?;
+    validate_admission(&admission)?;
+    if admission != *expected_admission {
+        bail!("native-session admission changed before outcome persistence");
+    }
+    validate_outcome(&admission, outcome)?;
+    let json = bounded_json(outcome, MAX_OUTCOME_BYTES)?;
+    let post_bytes = match existing {
+        SqliteValue::Null => {
+            let outcome_len = json.len();
+            tx.execute_with_params(
+                "UPDATE native_sessions SET outcome_json = ?1
+                 WHERE session_nonce = ?2 AND outcome_json IS NULL;",
+                &[
+                    SqliteValue::Text(json.into()),
+                    SqliteValue::Text(admission.session_nonce.into()),
+                ],
+            )?;
+            bytes
+                .checked_sub(MAX_OUTCOME_BYTES)
+                .and_then(|base| base.checked_add(outcome_len))
+                .context("native-session reservation accounting overflowed")?
+        }
+        value => {
+            let existing: NativeSessionOutcome = parse_json(value, MAX_OUTCOME_BYTES)?;
+            if existing != *outcome {
+                bail!("native-session outcome is immutable once observed");
+            }
+            bytes
+        }
+    };
+    check_reservation_usage(count, post_bytes, MAX_STORED_SESSIONS, MAX_RESERVED_BYTES)
 }
 
 /// Combined single-query outcome persistence and reservation bounds check for
@@ -2712,6 +3133,9 @@ pub(crate) struct NativeSessionInventoryGuard {
     containment_empty_observed: bool,
     finished: bool,
     supervisor_lease: Option<supervisor_lease::SupervisorLease>,
+    cached_root: Option<CachedOutcomeSigningContext>,
+    #[cfg(unix)]
+    post_admit_usage: Option<(DatabaseStateFingerprint, usize, usize)>,
 }
 
 /// Deferred completion handle for an already-reaped native session. Allows the
@@ -2954,7 +3378,7 @@ impl NativeSessionInventoryGuard {
         // false never-spawned receipt for an already running worker.
         let mut refused_outcome = None;
         let mut commit_attempt = 0_u32;
-        let (admitted, recovered_sessions) = retry_snapshot_conflict(|| {
+        let (admitted, recovered_sessions, committed_usage) = retry_snapshot_conflict(|| {
             if commit_attempt > 0 {
                 connection = None;
                 connection = Some(
@@ -3089,10 +3513,16 @@ impl NativeSessionInventoryGuard {
             }
             tx.commit()?;
             protect_sidecars(protected_root)?;
-            Ok((admitted, recovered_sessions))
+            let committed_usage = (recovered_sessions == 0 && admitted).then_some((count, bytes));
+            Ok((admitted, recovered_sessions, committed_usage))
         })
         .context("persist native-session admission before worker spawn")?;
-        drop(product_root);
+        #[cfg(unix)]
+        let post_admit_usage = committed_usage.and_then(|(count, bytes)| {
+            database_state_fingerprint(protected_root).map(|fp| (fp, count, bytes))
+        });
+        #[cfg(not(unix))]
+        let _ = committed_usage;
         drop(write_lock);
         if recovered_sessions > 0 {
             tracing::info!(
@@ -3102,6 +3532,7 @@ impl NativeSessionInventoryGuard {
             );
         }
         if !admitted {
+            drop(product_root);
             // Drop any staged journal temp file before recording the refused
             // outcome so a drain-fenced attempt leaves no journal artifact.
             drop(staged_journal);
@@ -3119,6 +3550,22 @@ impl NativeSessionInventoryGuard {
                 "native-session admission crossed a fleet drain fence; no worker was started; retry under the current applied policy"
             );
         }
+        #[cfg(unix)]
+        let (keys_dir_identity, capture_dir_identity, root_key_identity, capture_identity) = {
+            let expected_uid = rustix::process::geteuid().as_raw();
+            (
+                capture_private_dir_identity(&protected_root.join("keys"), expected_uid),
+                capture_private_dir_identity(
+                    &protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH),
+                    expected_uid,
+                ),
+                capture_private_file_identity(
+                    &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+                    expected_uid,
+                ),
+                capture_private_file_identity(&admission.identity_capture_path, expected_uid),
+            )
+        };
         let guard = Self {
             connection: connection.context("native-session inventory connection missing")?,
             database_identity,
@@ -3129,6 +3576,20 @@ impl NativeSessionInventoryGuard {
             containment_empty_observed: false,
             finished: false,
             supervisor_lease,
+            cached_root: Some(CachedOutcomeSigningContext {
+                product_root,
+                verifying_key,
+                #[cfg(unix)]
+                keys_dir_identity,
+                #[cfg(unix)]
+                capture_dir_identity,
+                #[cfg(unix)]
+                root_key_identity,
+                #[cfg(unix)]
+                capture_identity,
+            }),
+            #[cfg(unix)]
+            post_admit_usage,
         };
         let journal = match published_journal {
             Some(writer) => Some(writer),
@@ -3204,6 +3665,11 @@ impl NativeSessionInventoryGuard {
                 "native-session outcome could not be persisted; admission remains unresolved");
         }
         self.finished = true;
+        self.cached_root = None;
+        #[cfg(unix)]
+        {
+            self.post_admit_usage = None;
+        }
         // Reaping the worker alone is insufficient: deferred finalization keeps
         // ownership until the exact outcome persistence attempt has finished.
         self.supervisor_lease = None;
@@ -3239,6 +3705,11 @@ impl NativeSessionInventoryGuard {
         }
         let persisted = self.persist_outcome(&outcome);
         self.finished = true;
+        self.cached_root = None;
+        #[cfg(unix)]
+        {
+            self.post_admit_usage = None;
+        }
         self.supervisor_lease = None;
         persisted.context("failed persisting the authenticated native panic outcome")?;
         if let Some(error) = detail_error {
@@ -3250,10 +3721,26 @@ impl NativeSessionInventoryGuard {
     }
 
     fn persist_outcome(&self, outcome: &NativeSessionOutcome) -> Result<()> {
-        retain_outcome_receipt(&self.protected_root, &self.admission, outcome)?;
+        retain_outcome_receipt_with_cached_root(
+            &self.protected_root,
+            &self.admission,
+            outcome,
+            self.cached_root.as_ref(),
+        )?;
         let write_lock = lock_inventory_file(&self.protected_root, false)?;
         let reuse_connection = self.database_identity.is_some()
             && lock_file_identity(write_lock.as_ref()) == self.database_identity;
+        #[cfg(unix)]
+        let verified_usage = if reuse_connection {
+            self.post_admit_usage
+                .as_ref()
+                .and_then(|(fp, count, bytes)| {
+                    let current = database_state_fingerprint(&self.protected_root)?;
+                    (current == *fp).then_some((*count, *bytes))
+                })
+        } else {
+            None
+        };
         let mut attempt = 0_u32;
         retry_snapshot_conflict(|| {
             let fresh = if attempt == 0 && reuse_connection {
@@ -3261,10 +3748,27 @@ impl NativeSessionInventoryGuard {
             } else {
                 open_inventory_unlocked(&self.protected_root, false)?
             };
+            let current_attempt = attempt;
             attempt = attempt.saturating_add(1);
             let active_conn = fresh.as_ref().unwrap_or(&self.connection);
             let mut tx = active_conn.transaction()?;
-            write_observed_outcome_and_check_bounds(&mut tx, &self.admission, outcome)?;
+            #[cfg(unix)]
+            if let Some((count, bytes)) = verified_usage.filter(|_| current_attempt == 0) {
+                write_observed_outcome_with_verified_usage(
+                    &mut tx,
+                    &self.admission,
+                    outcome,
+                    count,
+                    bytes,
+                )?;
+            } else {
+                write_observed_outcome_and_check_bounds(&mut tx, &self.admission, outcome)?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = current_attempt;
+                write_observed_outcome_and_check_bounds(&mut tx, &self.admission, outcome)?;
+            }
             tx.commit()?;
             drop(tx);
             // Keep the WAL bounded so subsequent opens do not replay hundreds
@@ -8020,6 +8524,118 @@ mod tests {
         let path = source_capsule_path(&root, proof.binding()).unwrap();
         std::fs::write(&path, &original[..12]).unwrap();
         assert!(!proof.verify_on_disk(&root, &admission));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_capacity_statat_enforces_limits_and_rejects_unsafe_entries() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("cap-dir");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let file_a = dir.join("a.bin");
+        std::fs::write(&file_a, b"0123456789").unwrap();
+        std::fs::set_permissions(&file_a, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_source_capsule_capacity(&dir, 0, 0, 1, 10).is_ok());
+        assert!(check_source_capsule_capacity(&dir, 1, 0, 1, 10).is_err());
+        assert!(check_source_capsule_capacity(&dir, 0, 1, 1, 10).is_err());
+        assert!(check_admission_record_capacity(&dir, 0, 0, 1, 10).is_ok());
+
+        // Group-readable file must be refused.
+        std::fs::set_permissions(&file_a, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(check_source_capsule_capacity(&dir, 0, 0, 10, 1024).is_err());
+        std::fs::set_permissions(&file_a, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Hardlink (nlink > 1) must be refused.
+        let link_path = temp.path().join("hardlink.bin");
+        std::fs::hard_link(&file_a, &link_path).unwrap();
+        assert!(check_admission_record_capacity(&dir, 0, 0, 10, 1024).is_err());
+        std::fs::remove_file(&link_path).unwrap();
+
+        // Symlink inside capacity directory must be refused.
+        let sym_path = dir.join("sym.bin");
+        symlink(&file_a, &sym_path).unwrap();
+        assert!(check_source_capsule_capacity(&dir, 0, 0, 10, 1024).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_state_fingerprint_detects_raw_sql_mutation_and_capture_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let (admission, _) = frozen_source_fixture(&root, 156);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let (expected_fp, count, bytes) = guard
+            .post_admit_usage
+            .clone()
+            .expect("clean admission captures post-admit DB fingerprint");
+        assert_eq!(count, 1);
+        assert!(bytes > MAX_OUTCOME_BYTES);
+        assert_eq!(
+            database_state_fingerprint(&root).as_ref(),
+            Some(&expected_fp)
+        );
+
+        // A raw SQL mutation between admit and finish must invalidate the DB fingerprint.
+        let conn = open_inventory_unlocked(&root, false).unwrap().unwrap();
+        let mut tx = conn.transaction().unwrap();
+        tx.execute_with_params(
+            "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json) VALUES (?1, ?2, ?3);",
+            &[
+                SqliteValue::Text("01900000-0000-7000-8000-000000000999".into()),
+                SqliteValue::Text("{}".into()),
+                SqliteValue::Text("{}".into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_ne!(
+            database_state_fingerprint(&root).as_ref(),
+            Some(&expected_fp),
+            "raw SQL write must invalidate post-admit DB fingerprint"
+        );
+
+        // Weakening keys/ directory permissions invalidates the cached root and fails closed.
+        use std::os::unix::fs::PermissionsExt as _;
+        let keys_dir = root.join("keys");
+        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Completed,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: false,
+            effects: NativeSessionEffectObservation::NotStarted,
+            panic_evidence: None,
+        };
+        assert!(
+            retain_outcome_receipt_with_cached_root(
+                &root,
+                &admission,
+                &outcome,
+                guard.cached_root.as_ref(),
+            )
+            .is_err(),
+            "world-readable keys/ directory must fail closed instead of trusting cached signing root"
+        );
+        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Tampering with identity-capture invalidates cached signing proof and fails closed.
+        std::fs::write(&admission.identity_capture_path, b"corrupted").unwrap();
+        assert!(
+            retain_outcome_receipt_with_cached_root(
+                &root,
+                &admission,
+                &outcome,
+                guard.cached_root.as_ref(),
+            )
+            .is_err(),
+            "tampered identity capture must fail closed instead of trusting cached signing root"
+        );
+        guard.finished = true;
+        drop(guard);
     }
 
     #[cfg(unix)]
