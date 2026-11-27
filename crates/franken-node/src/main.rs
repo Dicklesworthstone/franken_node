@@ -15024,6 +15024,143 @@ impl Drop for PrewarmedEvidenceWorker {
     }
 }
 
+/// Keep native-session authority live until every project evidence consumer has
+/// finished. The worker is declared after the finalizer so it joins first even
+/// when persistence returns early or unwinds. The finalizer's Drop then records
+/// the original observed outcome and releases the supervisor lease.
+fn with_run_evidence_persistence<W, F, R>(
+    evidence_worker: W,
+    session_finalizer: F,
+    persist: impl FnOnce(&mut W) -> R,
+) -> R {
+    let _session_finalizer = session_finalizer;
+    let mut evidence_worker = evidence_worker;
+    persist(&mut evidence_worker)
+}
+
+#[cfg(test)]
+mod run_evidence_persistence_tests {
+    use super::with_run_evidence_persistence;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+    use std::time::Duration;
+
+    struct EvidenceConsumer(Option<std::thread::JoinHandle<()>>);
+
+    impl Drop for EvidenceConsumer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    struct SessionFinalizer {
+        finalized: Arc<AtomicBool>,
+        consumer_finished: Arc<AtomicBool>,
+        finalized_early: Arc<AtomicBool>,
+    }
+
+    impl Drop for SessionFinalizer {
+        fn drop(&mut self) {
+            self.finalized_early.store(
+                !self.consumer_finished.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            self.finalized.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PersistenceExit {
+        Success,
+        Error,
+        Panic,
+    }
+
+    fn assert_finalizes_after_pending_consumer(exit: PersistenceExit) {
+        let timeout = Duration::from_secs(5);
+        let finalized = Arc::new(AtomicBool::new(false));
+        let consumer_finished = Arc::new(AtomicBool::new(false));
+        let finalized_early = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = sync_channel(0);
+        let consumer = {
+            let finalized = Arc::clone(&finalized);
+            let consumer_finished = Arc::clone(&consumer_finished);
+            EvidenceConsumer(Some(std::thread::spawn(move || {
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("bounded evidence persistence release");
+                assert!(
+                    !finalized.load(Ordering::SeqCst),
+                    "evidence must not consume retired native-session authority"
+                );
+                consumer_finished.store(true, Ordering::SeqCst);
+            })))
+        };
+        let finalizer = SessionFinalizer {
+            finalized: Arc::clone(&finalized),
+            consumer_finished: Arc::clone(&consumer_finished),
+            finalized_early: Arc::clone(&finalized_early),
+        };
+        let (persisted_tx, persisted_rx) = sync_channel(1);
+        let (returned_tx, returned_rx) = sync_channel(1);
+        let owner = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_run_evidence_persistence(Some(consumer), finalizer, |_| {
+                    persisted_tx.send(()).expect("announce persistence exit");
+                    match exit {
+                        PersistenceExit::Success => Ok(()),
+                        PersistenceExit::Error => Err("project evidence persistence failed"),
+                        PersistenceExit::Panic => panic!("project evidence persistence panicked"),
+                    }
+                })
+            }));
+            returned_tx.send(()).expect("announce completed cleanup");
+            result
+        });
+        persisted_rx
+            .recv_timeout(timeout)
+            .expect("persistence must reach its exit");
+        let premature_return = returned_rx.recv_timeout(Duration::from_millis(100));
+        let premature_finalization = finalized.load(Ordering::SeqCst);
+        // Always release the worker before assertions so a failing regression
+        // cannot leave the owner blocked while unwinding the test itself.
+        release_tx.send(()).expect("release evidence consumer");
+        let result = owner.join().expect("join persistence owner");
+
+        assert!(matches!(premature_return, Err(RecvTimeoutError::Timeout)));
+        assert!(!premature_finalization);
+        assert!(!finalized_early.load(Ordering::SeqCst));
+        assert!(consumer_finished.load(Ordering::SeqCst));
+        assert!(finalized.load(Ordering::SeqCst));
+        match exit {
+            PersistenceExit::Success => assert_eq!(result.expect("normal return"), Ok(())),
+            PersistenceExit::Error => assert_eq!(
+                result.expect("error return"),
+                Err("project evidence persistence failed")
+            ),
+            PersistenceExit::Panic => assert!(result.is_err()),
+        }
+    }
+
+    #[test]
+    fn completed_persistence_keeps_authority_until_pending_evidence_finishes() {
+        assert_finalizes_after_pending_consumer(PersistenceExit::Success);
+    }
+
+    #[test]
+    fn failed_persistence_keeps_authority_until_pending_evidence_finishes() {
+        assert_finalizes_after_pending_consumer(PersistenceExit::Error);
+    }
+
+    #[test]
+    fn panicking_persistence_keeps_authority_until_pending_evidence_finishes() {
+        assert_finalizes_after_pending_consumer(PersistenceExit::Panic);
+    }
+}
+
 /// Record an operator trust decision in the durable evidence ledger in
 /// `ledger_dir`; a failure is reported on stderr and never changes the
 /// command's outcome (the decision itself is already persisted).
@@ -50393,7 +50530,7 @@ fn main() -> Result<()> {
             // Never creates files or directories on refused runs.
             let mut evidence_worker =
                 PrewarmedEvidenceWorker::spawn(project_ledger_dir(&project_root));
-            let (dispatch, mut session_finalizer, execution_error) = match dispatcher
+            let (dispatch, session_finalizer, execution_error) = match dispatcher
                 .dispatch_run_with_deferred_finalizer(
                     &app_path,
                     &resolved.config,
@@ -50552,7 +50689,7 @@ fn main() -> Result<()> {
                     }
                 }
             };
-            let persisted_run = (|| -> Result<(RunExecutionReceipt, PathBuf, Option<String>)> {
+            let persist_run = |evidence_worker: &mut Option<PrewarmedEvidenceWorker>| {
                 let ssrf_violations = extract_ssrf_violations(&dispatch);
                 let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
                     &project_root,
@@ -50600,11 +50737,10 @@ fn main() -> Result<()> {
                     planned_run_execution_receipt_path(&project_root, &receipt)?;
                 let receipt_signing = load_receipt_signing_material(None);
                 let receipt_limit = configured_run_receipt_limit(&resolved.config);
-                // Coalesce the four disjoint post-spawn durability flushes
-                // (execution receipt, signed run host-effect ledger, durable
-                // evidence ledger, and native-session inventory completion)
-                // into one concurrent barrier so ext4 jbd2 commits them
-                // together without weakening any durability guarantee.
+                // Persist the three project evidence stores concurrently. Keep
+                // native-session authority live until they and incident capture
+                // finish: compaction must not retire the admission or runtime
+                // identity while a consumer is still publishing its evidence.
                 let mut evidence_submitted = false;
                 let mut evidence_fallback_error: Option<anyhow::Error> = None;
                 let mut evidence_signing_present = false;
@@ -50693,13 +50829,6 @@ fn main() -> Result<()> {
                             }))
                         };
 
-                        #[cfg(feature = "engine")]
-                        if let Some(finalizer) = session_finalizer.take() {
-                            finalizer.finalize();
-                        }
-                        #[cfg(not(feature = "engine"))]
-                        let _ = session_finalizer.take();
-
                         let receipt_result = receipt_handle.join().unwrap_or_else(|_| {
                             Err(anyhow::anyhow!(
                                 "run execution receipt persistence panicked"
@@ -50775,14 +50904,9 @@ fn main() -> Result<()> {
                     eprintln!("warning: evidence ledger append failed: {err:#}");
                 }
                 Ok((receipt, receipt_path, captured_incident))
-            })();
-            drop(evidence_worker.take());
-            #[cfg(feature = "engine")]
-            if let Some(finalizer) = session_finalizer.take() {
-                finalizer.finalize();
-            }
-            #[cfg(not(feature = "engine"))]
-            let _ = session_finalizer.take();
+            };
+            let persisted_run: Result<_> =
+                with_run_evidence_persistence(evidence_worker, session_finalizer, persist_run);
             let (receipt, receipt_path, captured_incident) = match persisted_run {
                 Ok(persisted) => persisted,
                 Err(persistence_error) => {
